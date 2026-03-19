@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 21:35 - Phase 2 Part 1 Module/Optimizer 系统完成，73 个测试通过
+- **修改文件**: `src/engine/df.engine.module.ixx`, `src/engine/df.engine.linear.ixx`, `src/engine/df.engine.activations.ixx`, `src/engine/df.engine.optimizer.ixx`, `src/engine/df.engine.loss.ixx`, `tests/test_nn.cpp`, `src/main.cpp`, `CMakeLists.txt`
+- **修改类型**: 新增/修改
+- **修改内容**: 新增 5 个引擎层模块：Module 基类（参数管理/子模块注册/训练评估模式/递归参数遍历/梯度清零）+ Sequential 顺序容器；Linear 全连接层（Kaiming 初始化/可选偏置/y=x@W+b）；ReLU 激活模块；SGD 优化器（支持动量）+ Adam 优化器（一阶/二阶矩偏差校正）；CrossEntropyLoss + MSELoss 损失函数。编写 10 个 test_nn 测试用例（LinearForward/LinearWithBias/SequentialForward/SGDStep/AdamStep/LinearBackward/CrossEntropyForward/ModuleParameters/ZeroGrad/TrainEvalMode），连同原有 63 个测试共 73 个全部通过（10 个测试套件 100%，0.12s）。重构 main.cpp 使用 Module/Optimizer API：Sequential 构建网络、SGD 优化器绑定参数、CrossEntropyLoss 计算损失，训练循环简化为 forward/zeroGrad/backward/step 四步；合成数据训练正常收敛（loss 2.07->0.20，epoch 2 达 100% 准确率）
+- **关联功能**: Phase 2 Part 1 / nn.Module 系统 / 优化器 / 损失函数
+
 ### 20:58 - Phase 1D MNIST MLP 训练完整实现，63 个测试通过
 - **修改文件**: `src/hal/df.hal.cpu_backend.ixx`, `src/engine/df.engine.autograd.ixx`, `src/engine/df.engine.tensor_ops.ixx`, `src/engine/df.engine.mnist.ixx`, `src/main.cpp`, `CMakeLists.txt`
 - **修改类型**: 新增/修改

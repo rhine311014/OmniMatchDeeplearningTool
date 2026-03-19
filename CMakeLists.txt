@@ -86,6 +86,11 @@ target_sources(df_engine
             src/engine/df.engine.tensor.ixx
             src/engine/df.engine.autograd.ixx
             src/engine/df.engine.tensor_ops.ixx
+            src/engine/df.engine.module.ixx
+            src/engine/df.engine.linear.ixx
+            src/engine/df.engine.activations.ixx
+            src/engine/df.engine.optimizer.ixx
+            src/engine/df.engine.loss.ixx
             src/engine/df.engine.mnist.ixx
 )
 
@@ -126,4 +131,5 @@ if(DF_BUILD_TESTS)
     df_add_engine_test(test_tensor tests/test_tensor.cpp)
     df_add_engine_test(test_tensor_ops tests/test_tensor_ops.cpp)
     df_add_engine_test(test_autograd tests/test_autograd.cpp)
+    df_add_engine_test(test_nn tests/test_nn.cpp)
 endif()
