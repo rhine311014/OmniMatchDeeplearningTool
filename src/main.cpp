@@ -40,6 +40,7 @@ int main() {
 
     df::MnistDataset trainData;  // 20260319 ZJH 训练集
     df::MnistDataset testData;   // 20260319 ZJH 测试集
+    bool bUseSyntheticData = false;  // 20260319 ZJH 是否使用合成数据
 
     try {
         std::printf("Loading MNIST training data...\n");
@@ -47,9 +48,49 @@ int main() {
         std::printf("Loading MNIST test data...\n");
         testData = df::loadMnist(strTestImagesPath, strTestLabelsPath);
     } catch (const std::runtime_error& e) {
-        // 20260319 ZJH 数据文件缺失时输出清晰的指引信息并退出
-        std::fprintf(stderr, "\n[ERROR] %s\n", e.what());
-        return 1;  // 20260319 ZJH 返回非零退出码表示错误
+        // 20260319 ZJH 数据文件缺失时切换到合成数据模式
+        std::printf("\n[WARNING] %s\n", e.what());
+        std::printf("MNIST data not found. Switching to SYNTHETIC DATA mode.\n");
+        std::printf("(Place MNIST files in data/mnist/ for real training)\n\n");
+        bUseSyntheticData = true;
+
+        // 20260319 ZJH 生成合成分类数据：10 个类别，每类特征向量中对应位置较高
+        // 训练集 1000 样本，测试集 200 样本
+        int nTrainSynth = 1000;
+        int nTestSynth = 200;
+
+        // 20260319 ZJH 生成合成数据的 lambda
+        auto generateSynthetic = [&](int nSamples) -> df::MnistDataset {
+            df::MnistDataset ds;
+            ds.m_nSamples = nSamples;
+            // 20260319 ZJH 初始化图像和标签张量
+            ds.m_images = df::Tensor::zeros({nSamples, nInputDim});
+            ds.m_labels = df::Tensor::zeros({nSamples, nOutputDim});
+            float* pImages = ds.m_images.mutableFloatDataPtr();
+            float* pLabels = ds.m_labels.mutableFloatDataPtr();
+
+            // 20260319 ZJH 简单合成规则：类别 c 的样本在维度 [c*78, (c+1)*78) 有较高值
+            for (int i = 0; i < nSamples; ++i) {
+                int nClass = i % nOutputDim;  // 20260319 ZJH 循环分配类别
+                // 20260319 ZJH 基底噪声 0.1
+                for (int j = 0; j < nInputDim; ++j) {
+                    pImages[i * nInputDim + j] = 0.1f;
+                }
+                // 20260319 ZJH 类别特征区域设为 0.9
+                int nStart = nClass * (nInputDim / nOutputDim);
+                int nEnd = (nClass + 1) * (nInputDim / nOutputDim);
+                if (nEnd > nInputDim) nEnd = nInputDim;
+                for (int j = nStart; j < nEnd; ++j) {
+                    pImages[i * nInputDim + j] = 0.9f;
+                }
+                // 20260319 ZJH one-hot 标签
+                pLabels[i * nOutputDim + nClass] = 1.0f;
+            }
+            return ds;
+        };
+
+        trainData = generateSynthetic(nTrainSynth);
+        testData = generateSynthetic(nTestSynth);
     }
 
     std::printf("Training samples: %d\n", trainData.m_nSamples);
