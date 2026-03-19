@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 19:30 - Config 模块实现与测试通过
+- **修改文件**: `src/platform/df.platform.config.ixx`, `tests/test_config.cpp`
+- **修改类型**: 修改（替换占位存根）
+- **修改内容**: 实现 nlohmann-json 配置封装模块；支持 string/int/double/bool 类型安全读写（模板 set/get/get+默认值）；has() 键存在检查；save() 保存到文件（4 空格缩进）；load() 静态工厂方法（含文件不存在和 JSON 格式错误两种错误路径）；编写 5 个 GTest 单元测试，全部通过（5/5）；nlohmann-json #include 置于全局模块片段，模板方法 MSVC 模块边界无兼容问题
+- **关联功能**: 配置平台层 / Task 3
+
 ### 19:09 - Logger 模块实现与测试通过
 - **修改文件**: `src/platform/df.platform.logger.ixx`, `tests/test_logger.cpp`
 - **修改类型**: 修改（替换占位存根）
