@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 23:55 - Phase 1B-T4：Tensor 类实现与 11 个测试全部通过
+- **修改文件**: `src/engine/df.engine.tensor.ixx`, `tests/test_tensor.cpp`
+- **修改类型**: 修改（替换占位存根）
+- **修改内容**: 实现 Tensor 类，采用 Storage+View 分离设计：shared_ptr<TensorStorage> 持有原始内存，Tensor 自身持有 shape / strides / offset，支持零拷贝视图；工厂方法 zeros/ones/full/randn/fromData（全部 Float32+CPU）；属性 ndim/shape/shapeVec/stride/stridesVec/numel/dtype/device/isContiguous；数据访问 floatDataPtr/mutableFloatDataPtr（非模板，规避 MSVC 跨模块模板问题）/ at / setAt；contiguous() 自身连续则返回自身，否则通过 CPUBackend::stridedCopy 复制到新连续张量；makeView/storage/offset 供 tensor_ops 使用；initContiguous 计算行主序步长（最低维=1，高维=低维步长×低维大小）；编写 11 个 GTest 单元测试全部通过（Zeros/Ones/Full/Randn/FromData/OneDimensional/ThreeDimensional/Strides/IsContiguous/AtAccess/ShapeVec，总耗时 1ms）
+- **关联功能**: Phase 1B / 引擎层 Tensor 类 / Task 1B-T4
+
 ### 23:30 - Phase 1B T1-T3：CMake 配置 + TensorStorage + CPUBackend
 - **修改文件**: `CMakeLists.txt`, `src/engine/df.engine.tensor_storage.ixx`, `src/engine/df.engine.tensor.ixx`, `src/engine/df.engine.tensor_ops.ixx`, `src/hal/df.hal.cpu_backend.ixx`, `tests/test_tensor.cpp`, `tests/test_tensor_ops.cpp`
 - **修改类型**: 新增
