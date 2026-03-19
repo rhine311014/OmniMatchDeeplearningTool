@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 23:27 - Phase 4 SDL3+ImGui GUI 应用完成
+- **修改文件**: `CMakeLists.txt`, `src/ui/app_main.cpp`
+- **修改类型**: 新增/修改
+- **修改内容**: 新建 deepforge_app GUI 应用（SDL3 + ImGui 1.92.6 Docking + ImPlot + stb_image）；CMakeLists.txt 新增 SDL3/imgui/implot/Stb find_package 和 deepforge_app 可执行目标；app_main.cpp 单文件实现完整 GUI：4 个工作台标签页（Training/Inference/Data/Model Repository）+ 底部状态栏；Training 工作台含模型选择（MLP/ResNet-18）、优化器选择（SGD/Adam）、超参数滑块（epochs/batch_size/learning_rate）、Start/Pause/Stop 控制按钮、ImPlot 实时损失和准确率曲线、训练日志窗口、进度条，训练在 std::jthread 中执行（atomic + mutex 线程安全通信）；Inference 工作台含模型加载（.dfm 格式）、stb_image 图像加载显示（SDL_Texture）、softmax 置信度条形图；Data Manager 含 MNIST/合成数据集状态检查、类别分布图表、数据集汇总表格；Model Repository 扫描 data/models/ 目录列出 .dfm 文件，支持删除操作；工业深色主题（蓝色主色调）；中文字体自动加载（msyh.ttc/simhei.ttf/simsun.ttc 降级回退）；训练完成后自动保存模型到 data/models/；全部 12 个测试套件 88 个用例通过（100%，9.94s）；deepforge_app.exe 5.8MB 构建成功
+- **关联功能**: Phase 4 / SDL3 + ImGui 桌面 GUI 应用
+
 ### 23:04 - Phase 2 Part 3 ResNet18/CLI 完成，88 个测试通过
 - **修改文件**: `src/engine/df.engine.resnet.ixx`, `src/engine/df.engine.module.ixx`, `src/main.cpp`, `tests/test_resnet.cpp`, `CMakeLists.txt`
 - **修改类型**: 新增/修改

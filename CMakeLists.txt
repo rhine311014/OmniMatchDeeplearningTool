@@ -105,6 +105,29 @@ target_link_libraries(df_engine PUBLIC df_hal)
 add_executable(deepforge_train src/main.cpp)
 target_link_libraries(deepforge_train PRIVATE df_engine)
 
+# ---------- UI 依赖（Phase 4） ----------
+# 20260319 ZJH SDL3 + ImGui + ImPlot + stb 用于桌面 GUI 应用
+find_package(SDL3 CONFIG REQUIRED)
+find_package(imgui CONFIG REQUIRED)
+find_package(implot CONFIG REQUIRED)
+find_package(Stb REQUIRED)
+
+# ---------- GUI 应用程序（Phase 4） ----------
+# 20260319 ZJH DeepForge 桌面 GUI 应用（SDL3 + ImGui Docking）
+add_executable(deepforge_app
+    src/ui/app_main.cpp
+)
+
+target_link_libraries(deepforge_app PRIVATE
+    df_engine
+    SDL3::SDL3
+    imgui::imgui
+    implot::implot
+)
+
+# 20260319 ZJH stb 只提供头文件，通过 include 目录引入
+target_include_directories(deepforge_app PRIVATE ${Stb_INCLUDE_DIR})
+
 # ---------- 测试 ----------
 if(DF_BUILD_TESTS)
     enable_testing()

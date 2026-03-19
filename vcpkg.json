@@ -6,6 +6,13 @@
     "spdlog",
     "nlohmann-json",
     "sqlite3",
-    "gtest"
+    "gtest",
+    "sdl3",
+    {
+      "name": "imgui",
+      "features": ["sdl3-binding", "sdl3-renderer-binding", "docking-experimental"]
+    },
+    "implot",
+    "stb"
   ]
 }
