@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 22:15 - Phase 2 Part 2 Conv/Pool/BN/Serializer 完成，83 个测试通过
+- **修改文件**: `src/hal/df.hal.cpu_backend.ixx`, `src/engine/df.engine.autograd.ixx`, `src/engine/df.engine.tensor_ops.ixx`, `src/engine/df.engine.module.ixx`, `src/engine/df.engine.conv.ixx`, `src/engine/df.engine.serializer.ixx`, `tests/test_conv.cpp`, `CMakeLists.txt`
+- **修改类型**: 新增/修改
+- **修改内容**: CPUBackend 新增 10 个内核（conv2d/conv2dBackwardInput/conv2dBackwardWeight/batchNorm2d/batchNorm2dBackward/maxPool2d/maxPool2dBackward/avgPool2d/avgPool2dBackward）；autograd 新增 6 个 Backward 子类（Conv2dBackward/BatchNorm2dBackward/MaxPool2dBackward/AvgPool2dBackward/FlattenBackward/DropoutBackward）；tensor_ops 新增 6 个运算函数（tensorConv2d/tensorBatchNorm2d/tensorMaxPool2d/tensorAvgPool2d/tensorFlatten/tensorDropout）；新建 df.engine.conv 模块含 7 个 Module（Conv2d/BatchNorm2d/MaxPool2d/AvgPool2d/Dropout/Flatten/Softmax）；新建 df.engine.serializer 模块含 ModelSerializer（.dfm 二进制格式，CRC32 校验）；Module 基类新增 namedParameters() 方法；编写 10 个 test_conv 测试用例（Conv2dForward/Conv2dNoPad/BatchNorm2dForward/MaxPool2dForward/AvgPool2dForward/FlattenForward/DropoutForward/Conv2dBackward/SerializeSaveLoad/SimpleCNN），连同原有 73 个测试共 83 个全部通过（11 个测试套件 100%，0.36s）
+- **关联功能**: Phase 2 Part 2 / Conv2d / BatchNorm2d / Pool / Dropout / Flatten / Softmax / 模型序列化
+
 ### 21:35 - Phase 2 Part 1 Module/Optimizer 系统完成，73 个测试通过
 - **修改文件**: `src/engine/df.engine.module.ixx`, `src/engine/df.engine.linear.ixx`, `src/engine/df.engine.activations.ixx`, `src/engine/df.engine.optimizer.ixx`, `src/engine/df.engine.loss.ixx`, `tests/test_nn.cpp`, `src/main.cpp`, `CMakeLists.txt`
 - **修改类型**: 新增/修改

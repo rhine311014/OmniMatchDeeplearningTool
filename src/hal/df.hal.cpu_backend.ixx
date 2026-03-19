@@ -218,6 +218,384 @@ public:
         for (size_t i = 0; i < nCount; ++i) pDst[i] = pSrc[i];
     }
 
+    // ===== Conv2d =====
+
+    // 20260319 ZJH Conv2d 前向：NCHW 格式，朴素直接卷积（不使用 im2col）
+    // pInput: [N, Cin, H, W]  pWeight: [Cout, Cin, KH, KW]  pBias: [Cout] 或 nullptr
+    // pOutput: [N, Cout, Hout, Wout]
+    // Hout = (H + 2*pad - KH) / stride + 1, Wout = (W + 2*pad - KW) / stride + 1
+    static void conv2d(const float* pInput, const float* pWeight, const float* pBias,
+                       float* pOutput,
+                       int nBatch, int nCin, int nH, int nW,
+                       int nCout, int nKH, int nKW,
+                       int nStride, int nPad) {
+        int nHout = (nH + 2 * nPad - nKH) / nStride + 1;  // 20260319 ZJH 输出高度
+        int nWout = (nW + 2 * nPad - nKW) / nStride + 1;  // 20260319 ZJH 输出宽度
+        int nOutSize = nBatch * nCout * nHout * nWout;  // 20260319 ZJH 输出总元素数
+        // 20260319 ZJH 初始化输出为零
+        for (int i = 0; i < nOutSize; ++i) pOutput[i] = 0.0f;
+
+        // 20260319 ZJH 六重循环实现直接卷积
+        for (int n = 0; n < nBatch; ++n) {  // 20260319 ZJH 遍历批次
+            for (int co = 0; co < nCout; ++co) {  // 20260319 ZJH 遍历输出通道
+                for (int oh = 0; oh < nHout; ++oh) {  // 20260319 ZJH 遍历输出行
+                    for (int ow = 0; ow < nWout; ++ow) {  // 20260319 ZJH 遍历输出列
+                        float fSum = 0.0f;  // 20260319 ZJH 当前输出位置的累加值
+                        // 20260319 ZJH 遍历卷积核
+                        for (int ci = 0; ci < nCin; ++ci) {  // 20260319 ZJH 遍历输入通道
+                            for (int kh = 0; kh < nKH; ++kh) {  // 20260319 ZJH 遍历核高度
+                                for (int kw = 0; kw < nKW; ++kw) {  // 20260319 ZJH 遍历核宽度
+                                    int nIh = oh * nStride - nPad + kh;  // 20260319 ZJH 输入行坐标
+                                    int nIw = ow * nStride - nPad + kw;  // 20260319 ZJH 输入列坐标
+                                    // 20260319 ZJH 边界检查：padding 区域跳过（等效零填充）
+                                    if (nIh >= 0 && nIh < nH && nIw >= 0 && nIw < nW) {
+                                        // 20260319 ZJH 输入索引: [n, ci, ih, iw]
+                                        int nInIdx = ((n * nCin + ci) * nH + nIh) * nW + nIw;
+                                        // 20260319 ZJH 权重索引: [co, ci, kh, kw]
+                                        int nWIdx = ((co * nCin + ci) * nKH + kh) * nKW + kw;
+                                        fSum += pInput[nInIdx] * pWeight[nWIdx];  // 20260319 ZJH 累加乘积
+                                    }
+                                }
+                            }
+                        }
+                        // 20260319 ZJH 加偏置（如果有）
+                        if (pBias) fSum += pBias[co];
+                        // 20260319 ZJH 写入输出: [n, co, oh, ow]
+                        int nOutIdx = ((n * nCout + co) * nHout + oh) * nWout + ow;
+                        pOutput[nOutIdx] = fSum;
+                    }
+                }
+            }
+        }
+    }
+
+    // 20260319 ZJH Conv2d 反向（对输入求梯度）：gradInput = 转置卷积
+    // pGradOutput: [N, Cout, Hout, Wout]  pWeight: [Cout, Cin, KH, KW]
+    // pGradInput: [N, Cin, H, W]（需预先置零）
+    static void conv2dBackwardInput(const float* pGradOutput, const float* pWeight,
+                                     float* pGradInput,
+                                     int nBatch, int nCin, int nH, int nW,
+                                     int nCout, int nKH, int nKW,
+                                     int nStride, int nPad) {
+        int nHout = (nH + 2 * nPad - nKH) / nStride + 1;  // 20260319 ZJH 输出高度
+        int nWout = (nW + 2 * nPad - nKW) / nStride + 1;  // 20260319 ZJH 输出宽度
+        // 20260319 ZJH 初始化 gradInput 为零
+        int nInputSize = nBatch * nCin * nH * nW;
+        for (int i = 0; i < nInputSize; ++i) pGradInput[i] = 0.0f;
+
+        // 20260319 ZJH 遍历每个输出位置，将梯度散布回输入位置
+        for (int n = 0; n < nBatch; ++n) {
+            for (int co = 0; co < nCout; ++co) {
+                for (int oh = 0; oh < nHout; ++oh) {
+                    for (int ow = 0; ow < nWout; ++ow) {
+                        // 20260319 ZJH gradOutput 的索引: [n, co, oh, ow]
+                        int nGradOutIdx = ((n * nCout + co) * nHout + oh) * nWout + ow;
+                        float fGrad = pGradOutput[nGradOutIdx];  // 20260319 ZJH 当前输出梯度
+                        for (int ci = 0; ci < nCin; ++ci) {
+                            for (int kh = 0; kh < nKH; ++kh) {
+                                for (int kw = 0; kw < nKW; ++kw) {
+                                    int nIh = oh * nStride - nPad + kh;  // 20260319 ZJH 输入行坐标
+                                    int nIw = ow * nStride - nPad + kw;  // 20260319 ZJH 输入列坐标
+                                    if (nIh >= 0 && nIh < nH && nIw >= 0 && nIw < nW) {
+                                        int nInIdx = ((n * nCin + ci) * nH + nIh) * nW + nIw;
+                                        int nWIdx = ((co * nCin + ci) * nKH + kh) * nKW + kw;
+                                        // 20260319 ZJH 梯度散布：gradInput += gradOutput * weight
+                                        pGradInput[nInIdx] += fGrad * pWeight[nWIdx];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 20260319 ZJH Conv2d 反向（对权重和偏置求梯度）
+    // pInput: [N, Cin, H, W]  pGradOutput: [N, Cout, Hout, Wout]
+    // pGradWeight: [Cout, Cin, KH, KW]  pGradBias: [Cout] 或 nullptr
+    static void conv2dBackwardWeight(const float* pInput, const float* pGradOutput,
+                                      float* pGradWeight, float* pGradBias,
+                                      int nBatch, int nCin, int nH, int nW,
+                                      int nCout, int nKH, int nKW,
+                                      int nStride, int nPad) {
+        int nHout = (nH + 2 * nPad - nKH) / nStride + 1;  // 20260319 ZJH 输出高度
+        int nWout = (nW + 2 * nPad - nKW) / nStride + 1;  // 20260319 ZJH 输出宽度
+        // 20260319 ZJH 初始化 gradWeight 为零
+        int nWeightSize = nCout * nCin * nKH * nKW;
+        for (int i = 0; i < nWeightSize; ++i) pGradWeight[i] = 0.0f;
+        // 20260319 ZJH 初始化 gradBias 为零
+        if (pGradBias) {
+            for (int i = 0; i < nCout; ++i) pGradBias[i] = 0.0f;
+        }
+
+        // 20260319 ZJH 遍历每个输出位置计算权重梯度
+        for (int n = 0; n < nBatch; ++n) {
+            for (int co = 0; co < nCout; ++co) {
+                for (int oh = 0; oh < nHout; ++oh) {
+                    for (int ow = 0; ow < nWout; ++ow) {
+                        int nGradOutIdx = ((n * nCout + co) * nHout + oh) * nWout + ow;
+                        float fGrad = pGradOutput[nGradOutIdx];  // 20260319 ZJH 当前输出梯度
+                        // 20260319 ZJH 偏置梯度：所有位置的梯度之和
+                        if (pGradBias) pGradBias[co] += fGrad;
+                        for (int ci = 0; ci < nCin; ++ci) {
+                            for (int kh = 0; kh < nKH; ++kh) {
+                                for (int kw = 0; kw < nKW; ++kw) {
+                                    int nIh = oh * nStride - nPad + kh;
+                                    int nIw = ow * nStride - nPad + kw;
+                                    if (nIh >= 0 && nIh < nH && nIw >= 0 && nIw < nW) {
+                                        int nInIdx = ((n * nCin + ci) * nH + nIh) * nW + nIw;
+                                        int nWIdx = ((co * nCin + ci) * nKH + kh) * nKW + kw;
+                                        // 20260319 ZJH gradWeight += input * gradOutput
+                                        pGradWeight[nWIdx] += pInput[nInIdx] * fGrad;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ===== BatchNorm2d =====
+
+    // 20260319 ZJH BatchNorm2d 前向：NCHW 格式
+    // 训练时：计算当前 batch 的均值和方差，更新 running 统计量，归一化后缩放偏移
+    // 评估时：使用 running 统计量进行归一化
+    // pSavedMean/pSavedInvStd: 保存训练时的均值和逆标准差，用于反向传播
+    static void batchNorm2d(const float* pInput, float* pOutput,
+                             const float* pGamma, const float* pBeta,
+                             float* pRunMean, float* pRunVar,
+                             float* pSavedMean, float* pSavedInvStd,
+                             int nBatch, int nChannels, int nH, int nW,
+                             float fEps, float fMomentum, bool bTraining) {
+        int nSpatial = nH * nW;  // 20260319 ZJH 空间维度大小
+        int nCount = nBatch * nSpatial;  // 20260319 ZJH 每通道的元素总数
+
+        for (int c = 0; c < nChannels; ++c) {  // 20260319 ZJH 遍历每个通道
+            float fMean = 0.0f;  // 20260319 ZJH 通道均值
+            float fVar = 0.0f;   // 20260319 ZJH 通道方差
+
+            if (bTraining) {
+                // 20260319 ZJH 训练模式：从当前 batch 计算均值
+                for (int n = 0; n < nBatch; ++n) {
+                    for (int s = 0; s < nSpatial; ++s) {
+                        int nIdx = (n * nChannels + c) * nSpatial + s;  // 20260319 ZJH NCHW 索引
+                        fMean += pInput[nIdx];
+                    }
+                }
+                fMean /= static_cast<float>(nCount);  // 20260319 ZJH 求均值
+
+                // 20260319 ZJH 计算方差
+                for (int n = 0; n < nBatch; ++n) {
+                    for (int s = 0; s < nSpatial; ++s) {
+                        int nIdx = (n * nChannels + c) * nSpatial + s;
+                        float fDiff = pInput[nIdx] - fMean;
+                        fVar += fDiff * fDiff;
+                    }
+                }
+                fVar /= static_cast<float>(nCount);  // 20260319 ZJH 求方差
+
+                // 20260319 ZJH 保存均值和逆标准差，用于反向传播
+                pSavedMean[c] = fMean;
+                pSavedInvStd[c] = 1.0f / std::sqrt(fVar + fEps);
+
+                // 20260319 ZJH 更新 running 统计量（指数移动平均）
+                pRunMean[c] = (1.0f - fMomentum) * pRunMean[c] + fMomentum * fMean;
+                pRunVar[c] = (1.0f - fMomentum) * pRunVar[c] + fMomentum * fVar;
+            } else {
+                // 20260319 ZJH 评估模式：使用 running 统计量
+                fMean = pRunMean[c];
+                fVar = pRunVar[c];
+                // 20260319 ZJH 仍然保存用于一致性
+                pSavedMean[c] = fMean;
+                pSavedInvStd[c] = 1.0f / std::sqrt(fVar + fEps);
+            }
+
+            // 20260319 ZJH 归一化 + 缩放 + 偏移：y = gamma * (x - mean) / sqrt(var + eps) + beta
+            float fInvStd = 1.0f / std::sqrt(fVar + fEps);  // 20260319 ZJH 逆标准差
+            for (int n = 0; n < nBatch; ++n) {
+                for (int s = 0; s < nSpatial; ++s) {
+                    int nIdx = (n * nChannels + c) * nSpatial + s;
+                    float fNorm = (pInput[nIdx] - fMean) * fInvStd;  // 20260319 ZJH 归一化
+                    pOutput[nIdx] = pGamma[c] * fNorm + pBeta[c];  // 20260319 ZJH 缩放 + 偏移
+                }
+            }
+        }
+    }
+
+    // 20260319 ZJH BatchNorm2d 反向传播
+    // 计算 gradInput, gradGamma, gradBeta
+    static void batchNorm2dBackward(const float* pGradOutput, const float* pInput,
+                                     const float* pSavedMean, const float* pSavedInvStd,
+                                     const float* pGamma,
+                                     float* pGradInput, float* pGradGamma, float* pGradBeta,
+                                     int nBatch, int nChannels, int nH, int nW) {
+        int nSpatial = nH * nW;  // 20260319 ZJH 空间维度大小
+        int nCount = nBatch * nSpatial;  // 20260319 ZJH 每通道的元素总数
+        float fInvCount = 1.0f / static_cast<float>(nCount);  // 20260319 ZJH 元素数倒数
+
+        for (int c = 0; c < nChannels; ++c) {  // 20260319 ZJH 遍历每个通道
+            float fMean = pSavedMean[c];        // 20260319 ZJH 前向保存的均值
+            float fInvStd = pSavedInvStd[c];    // 20260319 ZJH 前向保存的逆标准差
+            float fGamma = pGamma[c];            // 20260319 ZJH 缩放参数
+
+            // 20260319 ZJH 第一步：计算 gradGamma 和 gradBeta
+            float fGradGamma = 0.0f;
+            float fGradBeta = 0.0f;
+            for (int n = 0; n < nBatch; ++n) {
+                for (int s = 0; s < nSpatial; ++s) {
+                    int nIdx = (n * nChannels + c) * nSpatial + s;
+                    float fXhat = (pInput[nIdx] - fMean) * fInvStd;  // 20260319 ZJH 归一化值
+                    fGradGamma += pGradOutput[nIdx] * fXhat;  // 20260319 ZJH gradGamma = sum(dL/dy * xhat)
+                    fGradBeta += pGradOutput[nIdx];  // 20260319 ZJH gradBeta = sum(dL/dy)
+                }
+            }
+            pGradGamma[c] = fGradGamma;
+            pGradBeta[c] = fGradBeta;
+
+            // 20260319 ZJH 第二步：计算 gradInput
+            // gradInput = gamma * invStd * (gradOutput - mean(gradOutput) - xhat * mean(gradOutput * xhat))
+            // 简化为：gradInput = gamma * invStd / N * (N * dL/dy - sum(dL/dy) - xhat * sum(dL/dy * xhat))
+            for (int n = 0; n < nBatch; ++n) {
+                for (int s = 0; s < nSpatial; ++s) {
+                    int nIdx = (n * nChannels + c) * nSpatial + s;
+                    float fXhat = (pInput[nIdx] - fMean) * fInvStd;
+                    // 20260319 ZJH BN 反向公式
+                    pGradInput[nIdx] = fGamma * fInvStd * fInvCount *
+                        (static_cast<float>(nCount) * pGradOutput[nIdx] - fGradBeta - fXhat * fGradGamma);
+                }
+            }
+        }
+    }
+
+    // ===== MaxPool2d =====
+
+    // 20260319 ZJH MaxPool2d 前向：保存最大值索引用于反向传播
+    // pInput: [N, C, H, W]  pOutput: [N, C, Hout, Wout]  pIndices: [N, C, Hout, Wout]
+    static void maxPool2d(const float* pInput, float* pOutput, int* pIndices,
+                           int nBatch, int nChannels, int nH, int nW,
+                           int nKH, int nKW, int nStride, int nPad) {
+        int nHout = (nH + 2 * nPad - nKH) / nStride + 1;  // 20260319 ZJH 输出高度
+        int nWout = (nW + 2 * nPad - nKW) / nStride + 1;  // 20260319 ZJH 输出宽度
+
+        for (int n = 0; n < nBatch; ++n) {
+            for (int c = 0; c < nChannels; ++c) {
+                for (int oh = 0; oh < nHout; ++oh) {
+                    for (int ow = 0; ow < nWout; ++ow) {
+                        int nOutIdx = ((n * nChannels + c) * nHout + oh) * nWout + ow;
+                        float fMax = -1e30f;  // 20260319 ZJH 初始化为极小值
+                        int nMaxIdx = -1;      // 20260319 ZJH 最大值在输入中的平面索引
+                        for (int kh = 0; kh < nKH; ++kh) {
+                            for (int kw = 0; kw < nKW; ++kw) {
+                                int nIh = oh * nStride - nPad + kh;
+                                int nIw = ow * nStride - nPad + kw;
+                                if (nIh >= 0 && nIh < nH && nIw >= 0 && nIw < nW) {
+                                    int nInIdx = ((n * nChannels + c) * nH + nIh) * nW + nIw;
+                                    if (pInput[nInIdx] > fMax) {
+                                        fMax = pInput[nInIdx];  // 20260319 ZJH 更新最大值
+                                        nMaxIdx = nInIdx;  // 20260319 ZJH 记录最大值索引
+                                    }
+                                }
+                            }
+                        }
+                        pOutput[nOutIdx] = fMax;      // 20260319 ZJH 写入最大值
+                        pIndices[nOutIdx] = nMaxIdx;  // 20260319 ZJH 保存索引
+                    }
+                }
+            }
+        }
+    }
+
+    // 20260319 ZJH MaxPool2d 反向：将梯度散布回最大值位置
+    // pGradOutput: [N, C, Hout, Wout]  pIndices: [N, C, Hout, Wout]
+    // pGradInput: [N, C, H, W]（需预先置零）
+    static void maxPool2dBackward(const float* pGradOutput, const int* pIndices,
+                                   float* pGradInput,
+                                   int nBatch, int nChannels, int nHout, int nWout,
+                                   int nH, int nW) {
+        // 20260319 ZJH 初始化 gradInput 为零
+        int nInputSize = nBatch * nChannels * nH * nW;
+        for (int i = 0; i < nInputSize; ++i) pGradInput[i] = 0.0f;
+        // 20260319 ZJH 遍历每个输出位置，将梯度写到对应的最大值输入位置
+        int nOutSize = nBatch * nChannels * nHout * nWout;
+        for (int i = 0; i < nOutSize; ++i) {
+            if (pIndices[i] >= 0) {
+                pGradInput[pIndices[i]] += pGradOutput[i];  // 20260319 ZJH 梯度累加到最大值位置
+            }
+        }
+    }
+
+    // ===== AvgPool2d =====
+
+    // 20260319 ZJH AvgPool2d 前向：窗口内取均值
+    // pInput: [N, C, H, W]  pOutput: [N, C, Hout, Wout]
+    static void avgPool2d(const float* pInput, float* pOutput,
+                           int nBatch, int nChannels, int nH, int nW,
+                           int nKH, int nKW, int nStride, int nPad) {
+        int nHout = (nH + 2 * nPad - nKH) / nStride + 1;  // 20260319 ZJH 输出高度
+        int nWout = (nW + 2 * nPad - nKW) / nStride + 1;  // 20260319 ZJH 输出宽度
+
+        for (int n = 0; n < nBatch; ++n) {
+            for (int c = 0; c < nChannels; ++c) {
+                for (int oh = 0; oh < nHout; ++oh) {
+                    for (int ow = 0; ow < nWout; ++ow) {
+                        float fSum = 0.0f;  // 20260319 ZJH 窗口内元素之和
+                        int nValidCount = 0;  // 20260319 ZJH 有效元素计数（不含 padding）
+                        for (int kh = 0; kh < nKH; ++kh) {
+                            for (int kw = 0; kw < nKW; ++kw) {
+                                int nIh = oh * nStride - nPad + kh;
+                                int nIw = ow * nStride - nPad + kw;
+                                if (nIh >= 0 && nIh < nH && nIw >= 0 && nIw < nW) {
+                                    int nInIdx = ((n * nChannels + c) * nH + nIh) * nW + nIw;
+                                    fSum += pInput[nInIdx];
+                                    nValidCount++;
+                                }
+                            }
+                        }
+                        int nOutIdx = ((n * nChannels + c) * nHout + oh) * nWout + ow;
+                        // 20260319 ZJH 使用固定核大小做平均（PyTorch 默认 count_include_pad=true 风格，无 pad 时等价）
+                        pOutput[nOutIdx] = fSum / static_cast<float>(nKH * nKW);
+                    }
+                }
+            }
+        }
+    }
+
+    // 20260319 ZJH AvgPool2d 反向：将梯度均匀散布回窗口内各位置
+    static void avgPool2dBackward(const float* pGradOutput, float* pGradInput,
+                                   int nBatch, int nChannels, int nH, int nW,
+                                   int nHout, int nWout,
+                                   int nKH, int nKW, int nStride, int nPad) {
+        // 20260319 ZJH 初始化 gradInput 为零
+        int nInputSize = nBatch * nChannels * nH * nW;
+        for (int i = 0; i < nInputSize; ++i) pGradInput[i] = 0.0f;
+
+        float fScale = 1.0f / static_cast<float>(nKH * nKW);  // 20260319 ZJH 均值的缩放因子
+
+        for (int n = 0; n < nBatch; ++n) {
+            for (int c = 0; c < nChannels; ++c) {
+                for (int oh = 0; oh < nHout; ++oh) {
+                    for (int ow = 0; ow < nWout; ++ow) {
+                        int nOutIdx = ((n * nChannels + c) * nHout + oh) * nWout + ow;
+                        float fGrad = pGradOutput[nOutIdx] * fScale;  // 20260319 ZJH 均分到窗口内
+                        for (int kh = 0; kh < nKH; ++kh) {
+                            for (int kw = 0; kw < nKW; ++kw) {
+                                int nIh = oh * nStride - nPad + kh;
+                                int nIw = ow * nStride - nPad + kw;
+                                if (nIh >= 0 && nIh < nH && nIw >= 0 && nIw < nW) {
+                                    int nInIdx = ((n * nChannels + c) * nH + nIh) * nW + nIw;
+                                    pGradInput[nInIdx] += fGrad;  // 20260319 ZJH 梯度累加
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // 20260319 ZJH 基于 strides 的非连续数据提取到连续缓冲区
     // 用于 slice/transpose 等产生非连续视图后的数据收集
     static void stridedCopy(const float* pSrc, float* pDst,

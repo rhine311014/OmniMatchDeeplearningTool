@@ -5,6 +5,8 @@ module;
 #include <stdexcept>
 #include <memory>
 #include <cassert>
+#include <random>
+#include <cmath>
 #include "df_types.h"
 
 export module df.engine.tensor_ops;
@@ -454,6 +456,269 @@ std::vector<int> tensorArgmax(const Tensor& t) {
     // 20260319 ZJH 调用 CPU argmax 内核
     CPUBackend::argmax(ct.floatDataPtr(), vecResult.data(), nBatch, nClasses);
     return vecResult;  // 20260319 ZJH 返回各行最大值索引
+}
+
+// =========================================================
+// Phase 2 Part 2: Conv2d / BatchNorm2d / Pool / Flatten / Dropout
+// =========================================================
+
+// 20260319 ZJH tensorConv2d — 2D 卷积前向，支持自动微分
+// input: [N, Cin, H, W]  weight: [Cout, Cin, KH, KW]  bias: [Cout]（可为空张量）
+// 返回: [N, Cout, Hout, Wout]
+Tensor tensorConv2d(Tensor input, Tensor weight, Tensor bias, int nStride, int nPad) {
+    auto cInput = input.contiguous();   // 20260319 ZJH 确保输入连续
+    auto cWeight = weight.contiguous(); // 20260319 ZJH 确保权重连续
+    int nBatch = cInput.shape(0);       // 20260319 ZJH 批次大小
+    int nCin = cInput.shape(1);         // 20260319 ZJH 输入通道数
+    int nH = cInput.shape(2);           // 20260319 ZJH 输入高度
+    int nW = cInput.shape(3);           // 20260319 ZJH 输入宽度
+    int nCout = cWeight.shape(0);       // 20260319 ZJH 输出通道数
+    int nKH = cWeight.shape(2);         // 20260319 ZJH 核高度
+    int nKW = cWeight.shape(3);         // 20260319 ZJH 核宽度
+    int nHout = (nH + 2 * nPad - nKH) / nStride + 1;  // 20260319 ZJH 输出高度
+    int nWout = (nW + 2 * nPad - nKW) / nStride + 1;  // 20260319 ZJH 输出宽度
+
+    auto result = Tensor::zeros({nBatch, nCout, nHout, nWout});  // 20260319 ZJH 分配输出张量
+
+    // 20260319 ZJH 判断是否有偏置
+    bool bHasBias = (bias.numel() > 0);
+    const float* pBias = bHasBias ? bias.contiguous().floatDataPtr() : nullptr;
+
+    CPUBackend::conv2d(cInput.floatDataPtr(), cWeight.floatDataPtr(), pBias,
+                       result.mutableFloatDataPtr(),
+                       nBatch, nCin, nH, nW, nCout, nKH, nKW, nStride, nPad);
+
+    // 20260319 ZJH AutoGrad: 如果任一输入需要梯度，创建 Conv2dBackward
+    if (input.requiresGrad() || weight.requiresGrad()) {
+        auto pBackward = std::make_shared<Conv2dBackward>();
+        pBackward->m_savedInput = cInput;
+        pBackward->m_savedWeight = cWeight;
+        pBackward->m_nBatch = nBatch;
+        pBackward->m_nCin = nCin;
+        pBackward->m_nH = nH;
+        pBackward->m_nW = nW;
+        pBackward->m_nCout = nCout;
+        pBackward->m_nKH = nKH;
+        pBackward->m_nKW = nKW;
+        pBackward->m_nStride = nStride;
+        pBackward->m_nPad = nPad;
+        pBackward->m_bHasBias = bHasBias;
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));   // 20260319 ZJH 输入边
+        pBackward->m_vecInputEdges.push_back(makeEdge(weight, 0));  // 20260319 ZJH 权重边
+        if (bHasBias) {
+            pBackward->m_vecInputEdges.push_back(makeEdge(bias, 0));  // 20260319 ZJH 偏置边
+        }
+        result.setGradFnRaw(pBackward);
+        result.setRequiresGrad(true);
+    }
+
+    return result;
+}
+
+// 20260319 ZJH tensorBatchNorm2d — 批归一化前向，支持自动微分
+// input: [N, C, H, W]  gamma/beta: [C]  runMean/runVar: [C]
+Tensor tensorBatchNorm2d(Tensor input, Tensor gamma, Tensor beta,
+                          Tensor& runMean, Tensor& runVar,
+                          bool bTraining, float fEps, float fMomentum) {
+    auto cInput = input.contiguous();
+    auto cGamma = gamma.contiguous();
+    auto cBeta = beta.contiguous();
+    int nBatch = cInput.shape(0);
+    int nChannels = cInput.shape(1);
+    int nH = cInput.shape(2);
+    int nW = cInput.shape(3);
+
+    auto result = Tensor::zeros(cInput.shapeVec());
+    auto savedMean = Tensor::zeros({nChannels});   // 20260319 ZJH 保存均值
+    auto savedInvStd = Tensor::zeros({nChannels}); // 20260319 ZJH 保存逆标准差
+
+    CPUBackend::batchNorm2d(
+        cInput.floatDataPtr(), result.mutableFloatDataPtr(),
+        cGamma.floatDataPtr(), cBeta.floatDataPtr(),
+        runMean.mutableFloatDataPtr(), runVar.mutableFloatDataPtr(),
+        savedMean.mutableFloatDataPtr(), savedInvStd.mutableFloatDataPtr(),
+        nBatch, nChannels, nH, nW, fEps, fMomentum, bTraining);
+
+    // 20260319 ZJH AutoGrad
+    if (input.requiresGrad() || gamma.requiresGrad()) {
+        auto pBackward = std::make_shared<BatchNorm2dBackward>();
+        pBackward->m_savedInput = cInput;
+        pBackward->m_savedMean = savedMean;
+        pBackward->m_savedInvStd = savedInvStd;
+        pBackward->m_savedGamma = cGamma;
+        pBackward->m_nBatch = nBatch;
+        pBackward->m_nChannels = nChannels;
+        pBackward->m_nH = nH;
+        pBackward->m_nW = nW;
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
+        pBackward->m_vecInputEdges.push_back(makeEdge(gamma, 0));
+        pBackward->m_vecInputEdges.push_back(makeEdge(beta, 0));
+        result.setGradFnRaw(pBackward);
+        result.setRequiresGrad(true);
+    }
+
+    return result;
+}
+
+// 20260319 ZJH tensorMaxPool2d — 最大池化前向，支持自动微分
+// input: [N, C, H, W]  返回: [N, C, Hout, Wout]
+Tensor tensorMaxPool2d(Tensor input, int nKernelSize, int nStride, int nPad) {
+    auto cInput = input.contiguous();
+    int nBatch = cInput.shape(0);
+    int nChannels = cInput.shape(1);
+    int nH = cInput.shape(2);
+    int nW = cInput.shape(3);
+    int nHout = (nH + 2 * nPad - nKernelSize) / nStride + 1;
+    int nWout = (nW + 2 * nPad - nKernelSize) / nStride + 1;
+
+    auto result = Tensor::zeros({nBatch, nChannels, nHout, nWout});
+    int nOutSize = nBatch * nChannels * nHout * nWout;
+    std::vector<int> vecIndices(static_cast<size_t>(nOutSize));  // 20260319 ZJH 临时 int 索引
+
+    CPUBackend::maxPool2d(cInput.floatDataPtr(), result.mutableFloatDataPtr(),
+                           vecIndices.data(),
+                           nBatch, nChannels, nH, nW,
+                           nKernelSize, nKernelSize, nStride, nPad);
+
+    // 20260319 ZJH AutoGrad
+    if (input.requiresGrad()) {
+        // 20260319 ZJH 将 int 索引转为 float 存储到 Tensor 中（避免引入 int Tensor）
+        auto savedIndices = Tensor::zeros({nBatch, nChannels, nHout, nWout});
+        float* pIdxFloat = savedIndices.mutableFloatDataPtr();
+        for (int i = 0; i < nOutSize; ++i) {
+            pIdxFloat[i] = static_cast<float>(vecIndices[static_cast<size_t>(i)]);
+        }
+
+        auto pBackward = std::make_shared<MaxPool2dBackward>();
+        pBackward->m_savedIndices = savedIndices;
+        pBackward->m_nBatch = nBatch;
+        pBackward->m_nChannels = nChannels;
+        pBackward->m_nHout = nHout;
+        pBackward->m_nWout = nWout;
+        pBackward->m_nH = nH;
+        pBackward->m_nW = nW;
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
+        result.setGradFnRaw(pBackward);
+        result.setRequiresGrad(true);
+    }
+
+    return result;
+}
+
+// 20260319 ZJH tensorAvgPool2d — 平均池化前向，支持自动微分
+// input: [N, C, H, W]  返回: [N, C, Hout, Wout]
+Tensor tensorAvgPool2d(Tensor input, int nKernelSize, int nStride, int nPad) {
+    auto cInput = input.contiguous();
+    int nBatch = cInput.shape(0);
+    int nChannels = cInput.shape(1);
+    int nH = cInput.shape(2);
+    int nW = cInput.shape(3);
+    int nHout = (nH + 2 * nPad - nKernelSize) / nStride + 1;
+    int nWout = (nW + 2 * nPad - nKernelSize) / nStride + 1;
+
+    auto result = Tensor::zeros({nBatch, nChannels, nHout, nWout});
+    CPUBackend::avgPool2d(cInput.floatDataPtr(), result.mutableFloatDataPtr(),
+                           nBatch, nChannels, nH, nW,
+                           nKernelSize, nKernelSize, nStride, nPad);
+
+    // 20260319 ZJH AutoGrad
+    if (input.requiresGrad()) {
+        auto pBackward = std::make_shared<AvgPool2dBackward>();
+        pBackward->m_nBatch = nBatch;
+        pBackward->m_nChannels = nChannels;
+        pBackward->m_nH = nH;
+        pBackward->m_nW = nW;
+        pBackward->m_nHout = nHout;
+        pBackward->m_nWout = nWout;
+        pBackward->m_nKH = nKernelSize;
+        pBackward->m_nKW = nKernelSize;
+        pBackward->m_nStride = nStride;
+        pBackward->m_nPad = nPad;
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
+        result.setGradFnRaw(pBackward);
+        result.setRequiresGrad(true);
+    }
+
+    return result;
+}
+
+// 20260319 ZJH tensorFlatten — 将 [N, C, H, W, ...] 展平为 [N, -1]
+// startDim: 从哪个维度开始展平（默认 1，保留 batch 维）
+Tensor tensorFlatten(Tensor input, int nStartDim) {
+    auto cInput = input.contiguous();
+    auto vecShape = cInput.shapeVec();
+
+    // 20260319 ZJH 计算新形状
+    std::vector<int> vecNewShape;
+    int nFlatSize = 1;
+    for (int d = 0; d < static_cast<int>(vecShape.size()); ++d) {
+        if (d < nStartDim) {
+            vecNewShape.push_back(vecShape[static_cast<size_t>(d)]);
+        } else {
+            nFlatSize *= vecShape[static_cast<size_t>(d)];
+        }
+    }
+    vecNewShape.push_back(nFlatSize);
+
+    // 20260319 ZJH 使用 fromData 创建新张量（保证连续）
+    auto result = Tensor::fromData(cInput.floatDataPtr(), vecNewShape);
+
+    // 20260319 ZJH AutoGrad
+    if (input.requiresGrad()) {
+        auto pBackward = std::make_shared<FlattenBackward>();
+        pBackward->m_vecInputShape = vecShape;  // 20260319 ZJH 保存原始形状
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
+        result.setGradFnRaw(pBackward);
+        result.setRequiresGrad(true);
+    }
+
+    return result;
+}
+
+// 20260319 ZJH tensorDropout — Dropout 前向，支持自动微分
+// 训练时随机将元素置零，概率为 fProb，剩余元素放大 1/(1-p)
+// 评估时直接透传
+Tensor tensorDropout(Tensor input, float fProb, bool bTraining) {
+    auto cInput = input.contiguous();
+
+    if (!bTraining || fProb <= 0.0f) {
+        // 20260319 ZJH 评估模式或概率为 0 时直接透传
+        return Tensor::fromData(cInput.floatDataPtr(), cInput.shapeVec());
+    }
+
+    int nNumel = cInput.numel();
+    auto result = Tensor::zeros(cInput.shapeVec());
+    auto mask = Tensor::zeros(cInput.shapeVec());  // 20260319 ZJH 生成 mask
+
+    // 20260319 ZJH 使用 thread_local 随机数生成器
+    static thread_local std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    float fScale = 1.0f / (1.0f - fProb);  // 20260319 ZJH 放大因子
+    const float* pInput = cInput.floatDataPtr();
+    float* pResult = result.mutableFloatDataPtr();
+    float* pMask = mask.mutableFloatDataPtr();
+
+    for (int i = 0; i < nNumel; ++i) {
+        if (dist(gen) >= fProb) {
+            pMask[i] = fScale;      // 20260319 ZJH 保留并放大
+            pResult[i] = pInput[i] * fScale;
+        } else {
+            pMask[i] = 0.0f;        // 20260319 ZJH 置零
+            pResult[i] = 0.0f;
+        }
+    }
+
+    // 20260319 ZJH AutoGrad
+    if (input.requiresGrad()) {
+        auto pBackward = std::make_shared<DropoutBackward>();
+        pBackward->m_savedMask = mask;
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
+        result.setGradFnRaw(pBackward);
+        result.setRequiresGrad(true);
+    }
+
+    return result;
 }
 
 }  // namespace df

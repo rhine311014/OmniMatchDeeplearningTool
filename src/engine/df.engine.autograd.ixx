@@ -327,6 +327,177 @@ public:
     }
 };
 
+// 20260319 ZJH Conv2dBackward — 2D 卷积反向
+// 前向: output = conv2d(input, weight, bias)
+// 反向: gradInput = conv2dBackwardInput, gradWeight = conv2dBackwardWeight
+class Conv2dBackward : public GradFunction {
+public:
+    Tensor m_savedInput;   // 20260319 ZJH 保存前向输入 [N, Cin, H, W]
+    Tensor m_savedWeight;  // 20260319 ZJH 保存卷积核 [Cout, Cin, KH, KW]
+    int m_nBatch = 0;      // 20260319 ZJH 批次大小
+    int m_nCin = 0;        // 20260319 ZJH 输入通道数
+    int m_nH = 0;          // 20260319 ZJH 输入高度
+    int m_nW = 0;          // 20260319 ZJH 输入宽度
+    int m_nCout = 0;       // 20260319 ZJH 输出通道数
+    int m_nKH = 0;         // 20260319 ZJH 核高度
+    int m_nKW = 0;         // 20260319 ZJH 核宽度
+    int m_nStride = 1;     // 20260319 ZJH 步幅
+    int m_nPad = 0;        // 20260319 ZJH 填充
+    bool m_bHasBias = false;  // 20260319 ZJH 是否有偏置
+
+    // 20260319 ZJH backward — 计算输入、权重、偏置的梯度
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cGradOut = gradOutput.contiguous();
+        auto cInput = m_savedInput.contiguous();
+        auto cWeight = m_savedWeight.contiguous();
+
+        // 20260319 ZJH 计算输入梯度
+        auto gradInput = Tensor::zeros(cInput.shapeVec());
+        CPUBackend::conv2dBackwardInput(
+            cGradOut.floatDataPtr(), cWeight.floatDataPtr(),
+            gradInput.mutableFloatDataPtr(),
+            m_nBatch, m_nCin, m_nH, m_nW,
+            m_nCout, m_nKH, m_nKW, m_nStride, m_nPad);
+
+        // 20260319 ZJH 计算权重梯度
+        auto gradWeight = Tensor::zeros(cWeight.shapeVec());
+        if (m_bHasBias) {
+            // 20260319 ZJH 有偏置时同时计算偏置梯度
+            auto gradBias = Tensor::zeros({m_nCout});
+            CPUBackend::conv2dBackwardWeight(
+                cInput.floatDataPtr(), cGradOut.floatDataPtr(),
+                gradWeight.mutableFloatDataPtr(), gradBias.mutableFloatDataPtr(),
+                m_nBatch, m_nCin, m_nH, m_nW,
+                m_nCout, m_nKH, m_nKW, m_nStride, m_nPad);
+            return {gradInput, gradWeight, gradBias};
+        } else {
+            CPUBackend::conv2dBackwardWeight(
+                cInput.floatDataPtr(), cGradOut.floatDataPtr(),
+                gradWeight.mutableFloatDataPtr(), nullptr,
+                m_nBatch, m_nCin, m_nH, m_nW,
+                m_nCout, m_nKH, m_nKW, m_nStride, m_nPad);
+            return {gradInput, gradWeight};
+        }
+    }
+};
+
+// 20260319 ZJH BatchNorm2dBackward — 批归一化反向
+class BatchNorm2dBackward : public GradFunction {
+public:
+    Tensor m_savedInput;     // 20260319 ZJH 保存前向输入
+    Tensor m_savedMean;      // 20260319 ZJH 保存均值
+    Tensor m_savedInvStd;    // 20260319 ZJH 保存逆标准差
+    Tensor m_savedGamma;     // 20260319 ZJH 保存 gamma 参数
+    int m_nBatch = 0;        // 20260319 ZJH 批次大小
+    int m_nChannels = 0;     // 20260319 ZJH 通道数
+    int m_nH = 0;            // 20260319 ZJH 高度
+    int m_nW = 0;            // 20260319 ZJH 宽度
+
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cGradOut = gradOutput.contiguous();
+        auto cInput = m_savedInput.contiguous();
+
+        auto gradInput = Tensor::zeros(cInput.shapeVec());
+        auto gradGamma = Tensor::zeros({m_nChannels});
+        auto gradBeta = Tensor::zeros({m_nChannels});
+
+        CPUBackend::batchNorm2dBackward(
+            cGradOut.floatDataPtr(), cInput.floatDataPtr(),
+            m_savedMean.floatDataPtr(), m_savedInvStd.floatDataPtr(),
+            m_savedGamma.floatDataPtr(),
+            gradInput.mutableFloatDataPtr(),
+            gradGamma.mutableFloatDataPtr(), gradBeta.mutableFloatDataPtr(),
+            m_nBatch, m_nChannels, m_nH, m_nW);
+
+        return {gradInput, gradGamma, gradBeta};
+    }
+};
+
+// 20260319 ZJH MaxPool2dBackward — 最大池化反向
+class MaxPool2dBackward : public GradFunction {
+public:
+    Tensor m_savedIndices;   // 20260319 ZJH 保存最大值索引（int 数据存为 float）
+    int m_nBatch = 0;
+    int m_nChannels = 0;
+    int m_nHout = 0;
+    int m_nWout = 0;
+    int m_nH = 0;            // 20260319 ZJH 原始输入高度
+    int m_nW = 0;            // 20260319 ZJH 原始输入宽度
+
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cGradOut = gradOutput.contiguous();
+        // 20260319 ZJH 分配输入梯度
+        auto gradInput = Tensor::zeros({m_nBatch, m_nChannels, m_nH, m_nW});
+        // 20260319 ZJH 将 float 索引恢复为 int 索引
+        const float* pIdxFloat = m_savedIndices.floatDataPtr();
+        int nOutSize = m_nBatch * m_nChannels * m_nHout * m_nWout;
+        std::vector<int> vecIndices(static_cast<size_t>(nOutSize));
+        for (int i = 0; i < nOutSize; ++i) {
+            vecIndices[static_cast<size_t>(i)] = static_cast<int>(pIdxFloat[i]);
+        }
+        CPUBackend::maxPool2dBackward(
+            cGradOut.floatDataPtr(), vecIndices.data(),
+            gradInput.mutableFloatDataPtr(),
+            m_nBatch, m_nChannels, m_nHout, m_nWout, m_nH, m_nW);
+        return {gradInput};
+    }
+};
+
+// 20260319 ZJH AvgPool2dBackward — 平均池化反向
+class AvgPool2dBackward : public GradFunction {
+public:
+    int m_nBatch = 0;
+    int m_nChannels = 0;
+    int m_nH = 0;
+    int m_nW = 0;
+    int m_nHout = 0;
+    int m_nWout = 0;
+    int m_nKH = 0;
+    int m_nKW = 0;
+    int m_nStride = 1;
+    int m_nPad = 0;
+
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cGradOut = gradOutput.contiguous();
+        auto gradInput = Tensor::zeros({m_nBatch, m_nChannels, m_nH, m_nW});
+        CPUBackend::avgPool2dBackward(
+            cGradOut.floatDataPtr(), gradInput.mutableFloatDataPtr(),
+            m_nBatch, m_nChannels, m_nH, m_nW,
+            m_nHout, m_nWout, m_nKH, m_nKW, m_nStride, m_nPad);
+        return {gradInput};
+    }
+};
+
+// 20260319 ZJH FlattenBackward — Flatten 反向：恢复原始形状
+class FlattenBackward : public GradFunction {
+public:
+    std::vector<int> m_vecInputShape;  // 20260319 ZJH 保存前向输入的原始形状
+
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cGrad = gradOutput.contiguous();
+        // 20260319 ZJH 将梯度 reshape 回原始形状
+        auto gradInput = Tensor::fromData(cGrad.floatDataPtr(), m_vecInputShape);
+        return {gradInput};
+    }
+};
+
+// 20260319 ZJH DropoutBackward — Dropout 反向：使用与前向相同的 mask
+class DropoutBackward : public GradFunction {
+public:
+    Tensor m_savedMask;  // 20260319 ZJH 保存前向使用的 mask（0 或 1/(1-p)）
+
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cGrad = gradOutput.contiguous();
+        auto cMask = m_savedMask.contiguous();
+        auto gradInput = Tensor::zeros(cGrad.shapeVec());
+        // 20260319 ZJH gradInput = gradOutput * mask（与前向使用相同的 mask）
+        CPUBackend::mul(cGrad.floatDataPtr(), cMask.floatDataPtr(),
+                        gradInput.mutableFloatDataPtr(),
+                        static_cast<size_t>(gradInput.numel()));
+        return {gradInput};
+    }
+};
+
 // 20260319 ZJH LeafAccumulator — 叶节点的 GradFunction
 // 叶节点（用户创建的 requiresGrad=true 的张量）的 gradFn 就是 LeafAccumulator
 // 它不做真正的 backward 计算，而是将梯度累加到 GradAccumulator 中

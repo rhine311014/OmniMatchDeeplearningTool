@@ -52,6 +52,24 @@ public:
         return vecResult;  // 20260319 ZJH 返回所有参数指针
     }
 
+    // 20260319 ZJH namedParameters — 递归收集本模块及所有子模块的命名参数
+    // 返回: {名称, Tensor*} 对的向量，名称带层级前缀（如 "layer_0.weight"）
+    std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") {
+        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        // 20260319 ZJH 收集本模块直接注册的参数
+        for (auto& [strName, pParam] : m_vecParameters) {
+            std::string strFullName = strPrefix.empty() ? strName : strPrefix + "." + strName;
+            vecResult.push_back({strFullName, pParam});
+        }
+        // 20260319 ZJH 递归收集子模块的命名参数
+        for (auto& [strName, pChild] : m_vecChildren) {
+            std::string strChildPrefix = strPrefix.empty() ? strName : strPrefix + "." + strName;
+            auto vecChildParams = pChild->namedParameters(strChildPrefix);
+            vecResult.insert(vecResult.end(), vecChildParams.begin(), vecChildParams.end());
+        }
+        return vecResult;
+    }
+
     // 20260319 ZJH registerModule — 注册子模块，用于递归参数管理和训练模式切换
     // strName: 子模块名称
     // pModule: 子模块的 shared_ptr

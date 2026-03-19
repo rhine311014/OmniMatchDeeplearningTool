@@ -91,6 +91,8 @@ target_sources(df_engine
             src/engine/df.engine.activations.ixx
             src/engine/df.engine.optimizer.ixx
             src/engine/df.engine.loss.ixx
+            src/engine/df.engine.conv.ixx
+            src/engine/df.engine.serializer.ixx
             src/engine/df.engine.mnist.ixx
 )
 
@@ -132,4 +134,5 @@ if(DF_BUILD_TESTS)
     df_add_engine_test(test_tensor_ops tests/test_tensor_ops.cpp)
     df_add_engine_test(test_autograd tests/test_autograd.cpp)
     df_add_engine_test(test_nn tests/test_nn.cpp)
+    df_add_engine_test(test_conv tests/test_conv.cpp)
 endif()
