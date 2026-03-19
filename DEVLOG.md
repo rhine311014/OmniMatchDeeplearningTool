@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 23:04 - Phase 2 Part 3 ResNet18/CLI 完成，88 个测试通过
+- **修改文件**: `src/engine/df.engine.resnet.ixx`, `src/engine/df.engine.module.ixx`, `src/main.cpp`, `tests/test_resnet.cpp`, `CMakeLists.txt`
+- **修改类型**: 新增/修改
+- **修改内容**: 新建 df.engine.resnet 模块含 BasicBlock（两层 3x3 卷积+跳跃连接+可选 1x1 下采样）和 ResNet18（针对小图像优化：3x3 初始卷积+无 MaxPool+4 层残差+全局平均池化+FC，11.17M 参数/62 个张量）；Module 基类 parameters()/namedParameters()/train() 改为 virtual 以支持自定义参数收集；BasicBlock 下采样路径使用 unique_ptr 避免 move-assign 导致 registerParameter 指针失效；重构 main.cpp 支持 CLI 参数（--model mlp|resnet18 / --epochs / --lr / --batch-size / --help），ResNet 模式使用 Adam 优化器并将输入 reshape 为 NCHW；编写 5 个 test_resnet 测试用例（BasicBlockSameSize/BasicBlockDownsample/ResNet18Forward/ResNet18Parameters/ResNet18SaveLoad），连同原有 83 个测试共 88 个全部通过（12 个测试套件 100%，9.82s）
+- **关联功能**: Phase 2 Part 3 / ResNet-18 / CLI 参数解析
+
 ### 22:15 - Phase 2 Part 2 Conv/Pool/BN/Serializer 完成，83 个测试通过
 - **修改文件**: `src/hal/df.hal.cpu_backend.ixx`, `src/engine/df.engine.autograd.ixx`, `src/engine/df.engine.tensor_ops.ixx`, `src/engine/df.engine.module.ixx`, `src/engine/df.engine.conv.ixx`, `src/engine/df.engine.serializer.ixx`, `tests/test_conv.cpp`, `CMakeLists.txt`
 - **修改类型**: 新增/修改

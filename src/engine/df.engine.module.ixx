@@ -38,7 +38,8 @@ public:
 
     // 20260319 ZJH parameters — 递归收集本模块及所有子模块的参数指针
     // 返回: 所有参数的 Tensor* 向量，用于传给优化器
-    std::vector<Tensor*> parameters() {
+    // 声明为 virtual 以支持自定义参数收集（如 ResNet 的 BasicBlock）
+    virtual std::vector<Tensor*> parameters() {
         std::vector<Tensor*> vecResult;  // 20260319 ZJH 结果容器
         // 20260319 ZJH 收集本模块直接注册的参数
         for (auto& [strName, pParam] : m_vecParameters) {
@@ -54,7 +55,8 @@ public:
 
     // 20260319 ZJH namedParameters — 递归收集本模块及所有子模块的命名参数
     // 返回: {名称, Tensor*} 对的向量，名称带层级前缀（如 "layer_0.weight"）
-    std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") {
+    // 声明为 virtual 以支持自定义命名参数收集（如 ResNet 的 BasicBlock）
+    virtual std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") {
         std::vector<std::pair<std::string, Tensor*>> vecResult;
         // 20260319 ZJH 收集本模块直接注册的参数
         for (auto& [strName, pParam] : m_vecParameters) {
@@ -79,7 +81,8 @@ public:
 
     // 20260319 ZJH train — 设置训练模式，递归传播到所有子模块
     // bMode: true 为训练模式，false 为评估模式
-    void train(bool bMode = true) {
+    // 声明为 virtual 以支持自定义训练模式切换（如 ResNet 的 BasicBlock）
+    virtual void train(bool bMode = true) {
         m_bTraining = bMode;  // 20260319 ZJH 设置本模块的训练标志
         // 20260319 ZJH 递归设置所有子模块的训练模式
         for (auto& [strName, pChild] : m_vecChildren) {
