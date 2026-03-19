@@ -244,6 +244,89 @@ public:
     }
 };
 
+// 20260319 ZJH ReLUBackward — ReLU 激活反向
+// 前向: out = max(0, in)
+// 反向: grad_in = grad_out * (in > 0 ? 1 : 0)，需要保存前向的输入
+class ReLUBackward : public GradFunction {
+public:
+    Tensor m_savedInput;  // 20260319 ZJH 保存前向输入，用于判断哪些位置 > 0
+
+    // 20260319 ZJH backward — 根据保存的输入判断梯度是否通过
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cGrad = gradOutput.contiguous();  // 20260319 ZJH 确保梯度连续
+        auto cInput = m_savedInput.contiguous();  // 20260319 ZJH 确保输入连续
+        auto gradIn = Tensor::zeros(cInput.shapeVec());  // 20260319 ZJH 分配输入梯度张量
+        // 20260319 ZJH 调用 CPU reluBackward 内核：输入>0 时梯度直通，否则为 0
+        CPUBackend::reluBackward(cInput.floatDataPtr(), cGrad.floatDataPtr(),
+                                  gradIn.mutableFloatDataPtr(),
+                                  static_cast<size_t>(gradIn.numel()));
+        return { gradIn };  // 20260319 ZJH 返回输入的梯度
+    }
+};
+
+// 20260319 ZJH AddBiasBackward — 广播偏置加法反向
+// 前向: out[b,j] = in[b,j] + bias[j]，in 形状 [batch, cols]，bias 形状 [1, cols]
+// 反向: grad_in = grad_out, grad_bias = sum(grad_out, dim=0)（沿 batch 维求和）
+class AddBiasBackward : public GradFunction {
+public:
+    int m_nBatch = 0;  // 20260319 ZJH 批次大小，用于沿 batch 维求和
+    int m_nCols = 0;   // 20260319 ZJH 列数（特征维度大小）
+
+    // 20260319 ZJH backward — 输入梯度直通，偏置梯度沿 batch 维求和
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cGrad = gradOutput.contiguous();  // 20260319 ZJH 确保梯度连续
+        const float* pGrad = cGrad.floatDataPtr();  // 20260319 ZJH 梯度数据指针
+
+        // 20260319 ZJH grad_input = grad_output（形状与输入相同，梯度直通）
+        auto gradInput = Tensor::fromData(pGrad, cGrad.shapeVec());
+
+        // 20260319 ZJH grad_bias = sum(grad_output, dim=0)，结果形状 [1, nCols]
+        auto gradBias = Tensor::zeros({1, m_nCols});
+        float* pBiasGrad = gradBias.mutableFloatDataPtr();  // 20260319 ZJH 偏置梯度写入指针
+        for (int b = 0; b < m_nBatch; ++b) {
+            for (int j = 0; j < m_nCols; ++j) {
+                // 20260319 ZJH 逐列累加所有 batch 行的梯度
+                pBiasGrad[j] += pGrad[b * m_nCols + j];
+            }
+        }
+
+        return { gradInput, gradBias };  // 20260319 ZJH 返回输入和偏置的梯度
+    }
+};
+
+// 20260319 ZJH SoftmaxCrossEntropyBackward — Softmax + 交叉熵联合反向
+// 前向: loss = CrossEntropy(Softmax(logits), targets)
+// 反向: grad_logits = (softmax_output - targets) / batch_size
+// 保存 softmax 输出和 targets
+class SoftmaxCrossEntropyBackward : public GradFunction {
+public:
+    Tensor m_savedSoftmax;  // 20260319 ZJH 保存 softmax 输出概率
+    Tensor m_savedTargets;  // 20260319 ZJH 保存 one-hot 目标标签
+    int m_nBatch = 0;       // 20260319 ZJH 批次大小
+    int m_nClasses = 0;     // 20260319 ZJH 类别数
+
+    // 20260319 ZJH backward — 联合梯度公式 (softmax - target) / batch
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cSoftmax = m_savedSoftmax.contiguous();  // 20260319 ZJH 确保 softmax 输出连续
+        auto cTargets = m_savedTargets.contiguous();  // 20260319 ZJH 确保目标标签连续
+        // 20260319 ZJH 分配 logits 的梯度张量，形状 [batch, classes]
+        auto gradLogits = Tensor::zeros({m_nBatch, m_nClasses});
+        // 20260319 ZJH 调用 CPU 联合反向内核
+        CPUBackend::crossEntropySoftmaxBackward(
+            cSoftmax.floatDataPtr(), cTargets.floatDataPtr(),
+            gradLogits.mutableFloatDataPtr(), m_nBatch, m_nClasses);
+        // 20260319 ZJH gradOutput 是标量损失的梯度（通常为 1.0），需要乘以它
+        float fGradScale = gradOutput.item();  // 20260319 ZJH 获取标量梯度值
+        if (std::abs(fGradScale - 1.0f) > 1e-6f) {
+            // 20260319 ZJH 若标量梯度不为 1，则缩放梯度
+            CPUBackend::mulScalar(gradLogits.floatDataPtr(), fGradScale,
+                                  gradLogits.mutableFloatDataPtr(),
+                                  static_cast<size_t>(gradLogits.numel()));
+        }
+        return { gradLogits };  // 20260319 ZJH 返回 logits 的梯度
+    }
+};
+
 // 20260319 ZJH LeafAccumulator — 叶节点的 GradFunction
 // 叶节点（用户创建的 requiresGrad=true 的张量）的 gradFn 就是 LeafAccumulator
 // 它不做真正的 backward 计算，而是将梯度累加到 GradAccumulator 中

@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 20:58 - Phase 1D MNIST MLP 训练完整实现，63 个测试通过
+- **修改文件**: `src/hal/df.hal.cpu_backend.ixx`, `src/engine/df.engine.autograd.ixx`, `src/engine/df.engine.tensor_ops.ixx`, `src/engine/df.engine.mnist.ixx`, `src/main.cpp`, `CMakeLists.txt`
+- **修改类型**: 新增/修改
+- **修改内容**: CPUBackend 新增 7 个内核（relu/reluBackward/softmax/crossEntropy/crossEntropySoftmaxBackward/argmax/addBias）；autograd 新增 3 个 Backward 子类（ReLUBackward/AddBiasBackward/SoftmaxCrossEntropyBackward）；tensor_ops 新增 4 个运算函数（tensorReLU/tensorAddBias/tensorSoftmaxCrossEntropy/tensorArgmax）；新建 MNIST IDX 格式数据加载器模块（df.engine.mnist），支持图像归一化和标签 one-hot 编码；新建训练主程序 deepforge_train（两层 MLP：784->128->10，SGD 优化，batch_size=64, lr=0.01, epochs=10）；CMakeLists 添加 mnist 模块和 deepforge_train 可执行目标；9 个测试套件 63 个用例全部通过；训练程序在无 MNIST 数据时输出清晰的下载指引
+- **关联功能**: Phase 1D / MNIST MLP 训练 / 首个可运行的深度学习训练程序
+
 ### 20:36 - Phase 1C AutoGrad 自动微分系统完成，63 个测试全部通过
 - **修改文件**: `CMakeLists.txt`, `src/engine/df.engine.autograd.ixx`, `src/engine/df.engine.tensor.ixx`, `src/engine/df.engine.tensor_ops.ixx`, `tests/test_autograd.cpp`, `tests/test_tensor_ops.cpp`
 - **修改类型**: 新增/修改

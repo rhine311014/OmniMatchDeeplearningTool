@@ -86,10 +86,16 @@ target_sources(df_engine
             src/engine/df.engine.tensor.ixx
             src/engine/df.engine.autograd.ixx
             src/engine/df.engine.tensor_ops.ixx
+            src/engine/df.engine.mnist.ixx
 )
 
 target_include_directories(df_engine PUBLIC include)
 target_link_libraries(df_engine PUBLIC df_hal)
+
+# ---------- 训练可执行文件 ----------
+# 20260319 ZJH Phase 1D: MNIST MLP 训练程序
+add_executable(deepforge_train src/main.cpp)
+target_link_libraries(deepforge_train PRIVATE df_engine)
 
 # ---------- 测试 ----------
 if(DF_BUILD_TESTS)

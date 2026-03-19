@@ -352,4 +352,108 @@ void tensorZeroGrad(Tensor& t) {
     pAccum->zero();  // 20260319 ZJH 清零梯度
 }
 
+// =========================================================
+// Phase 1D: 激活函数、损失函数、广播运算
+// =========================================================
+
+// 20260319 ZJH tensorReLU — 逐元素 ReLU 激活，支持自动微分
+// 前向: out[i] = max(0, in[i])
+// 反向: grad_in[i] = grad_out[i] * (in[i] > 0 ? 1 : 0)
+Tensor tensorReLU(Tensor a) {
+    auto ca = a.contiguous();  // 20260319 ZJH 确保输入连续
+    auto result = Tensor::zeros(ca.shapeVec());  // 20260319 ZJH 分配输出张量
+    // 20260319 ZJH 调用 CPU ReLU 前向内核
+    CPUBackend::relu(ca.floatDataPtr(), result.mutableFloatDataPtr(),
+                     static_cast<size_t>(result.numel()));
+
+    // 20260319 ZJH AutoGrad: 如果输入需要梯度，创建 ReLUBackward 节点
+    if (a.requiresGrad()) {
+        auto pBackward = std::make_shared<ReLUBackward>();  // 20260319 ZJH 创建 ReLU 反向节点
+        pBackward->m_savedInput = ca;  // 20260319 ZJH 保存输入，反向时判断哪些位置 > 0
+        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));  // 20260319 ZJH 连接输入边
+        result.setGradFnRaw(pBackward);  // 20260319 ZJH 设置结果的 gradFn
+        result.setRequiresGrad(true);  // 20260319 ZJH 结果也需要梯度
+    }
+
+    return result;  // 20260319 ZJH 返回 ReLU 激活后的张量
+}
+
+// 20260319 ZJH tensorAddBias — 广播偏置加法，支持自动微分
+// 输入 a 形状 [batch, cols]，bias 形状 [1, cols]
+// 输出形状 [batch, cols]，每行加上 bias 的对应列值
+Tensor tensorAddBias(Tensor a, Tensor bias) {
+    auto ca = a.contiguous();  // 20260319 ZJH 确保输入连续
+    auto cb = bias.contiguous();  // 20260319 ZJH 确保偏置连续
+    int nBatch = ca.shape(0);  // 20260319 ZJH 批次大小
+    int nCols = ca.shape(1);   // 20260319 ZJH 特征维度
+
+    auto result = Tensor::zeros(ca.shapeVec());  // 20260319 ZJH 分配输出张量
+    // 20260319 ZJH 调用 CPU 广播加法内核：每行加偏置
+    CPUBackend::addBias(ca.floatDataPtr(), cb.floatDataPtr(),
+                        result.mutableFloatDataPtr(), nBatch, nCols);
+
+    // 20260319 ZJH AutoGrad: 如果任一输入需要梯度，创建 AddBiasBackward 节点
+    if (a.requiresGrad() || bias.requiresGrad()) {
+        auto pBackward = std::make_shared<AddBiasBackward>();  // 20260319 ZJH 创建广播加法反向节点
+        pBackward->m_nBatch = nBatch;  // 20260319 ZJH 保存批次大小
+        pBackward->m_nCols = nCols;    // 20260319 ZJH 保存列数
+        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));     // 20260319 ZJH 连接输入边
+        pBackward->m_vecInputEdges.push_back(makeEdge(bias, 0));  // 20260319 ZJH 连接偏置边
+        result.setGradFnRaw(pBackward);  // 20260319 ZJH 设置结果的 gradFn
+        result.setRequiresGrad(true);    // 20260319 ZJH 结果也需要梯度
+    }
+
+    return result;  // 20260319 ZJH 返回广播加法结果
+}
+
+// 20260319 ZJH tensorSoftmaxCrossEntropy — Softmax + 交叉熵联合损失，支持自动微分
+// logits: [batch, classes] 原始分数，targets: [batch, classes] one-hot 编码
+// 返回: 标量损失张量 (shape={1})，支持反向传播
+// 联合计算的好处：数值稳定性更好，反向梯度公式更简单
+Tensor tensorSoftmaxCrossEntropy(Tensor logits, const Tensor& targets) {
+    auto cLogits = logits.contiguous();   // 20260319 ZJH 确保 logits 连续
+    auto cTargets = targets.contiguous(); // 20260319 ZJH 确保 targets 连续
+    int nBatch = cLogits.shape(0);    // 20260319 ZJH 批次大小
+    int nClasses = cLogits.shape(1);  // 20260319 ZJH 类别数
+
+    // 20260319 ZJH 第一步：计算 softmax 概率
+    auto softmaxOut = Tensor::zeros({nBatch, nClasses});
+    CPUBackend::softmax(cLogits.floatDataPtr(), softmaxOut.mutableFloatDataPtr(),
+                        nBatch, nClasses);
+
+    // 20260319 ZJH 第二步：计算交叉熵损失
+    float fLoss = CPUBackend::crossEntropy(softmaxOut.floatDataPtr(), cTargets.floatDataPtr(),
+                                           nBatch, nClasses);
+
+    // 20260319 ZJH 创建标量损失张量
+    auto result = Tensor::full({1}, fLoss);
+
+    // 20260319 ZJH AutoGrad: 如果 logits 需要梯度，创建联合反向节点
+    if (logits.requiresGrad()) {
+        auto pBackward = std::make_shared<SoftmaxCrossEntropyBackward>();
+        pBackward->m_savedSoftmax = softmaxOut;   // 20260319 ZJH 保存 softmax 输出
+        pBackward->m_savedTargets = cTargets;      // 20260319 ZJH 保存 one-hot 目标
+        pBackward->m_nBatch = nBatch;              // 20260319 ZJH 保存批次大小
+        pBackward->m_nClasses = nClasses;          // 20260319 ZJH 保存类别数
+        pBackward->m_vecInputEdges.push_back(makeEdge(logits, 0));  // 20260319 ZJH 连接 logits 边
+        result.setGradFnRaw(pBackward);  // 20260319 ZJH 设置结果的 gradFn
+        result.setRequiresGrad(true);    // 20260319 ZJH 结果也需要梯度
+    }
+
+    return result;  // 20260319 ZJH 返回标量损失张量
+}
+
+// 20260319 ZJH tensorArgmax — 逐行返回最大值索引，不参与自动微分
+// 输入: t 形状 [batch, classes]
+// 返回: int 向量，长度为 batch，每个元素是该行最大值的列索引
+std::vector<int> tensorArgmax(const Tensor& t) {
+    auto ct = t.contiguous();  // 20260319 ZJH 确保输入连续
+    int nBatch = ct.shape(0);      // 20260319 ZJH 批次大小
+    int nClasses = ct.shape(1);    // 20260319 ZJH 类别数
+    std::vector<int> vecResult(static_cast<size_t>(nBatch));  // 20260319 ZJH 分配结果向量
+    // 20260319 ZJH 调用 CPU argmax 内核
+    CPUBackend::argmax(ct.floatDataPtr(), vecResult.data(), nBatch, nClasses);
+    return vecResult;  // 20260319 ZJH 返回各行最大值索引
+}
+
 }  // namespace df

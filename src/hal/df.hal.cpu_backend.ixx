@@ -112,6 +112,106 @@ public:
         return fMin;
     }
 
+    // ===== 激活函数 =====
+
+    // 20260319 ZJH ReLU 前向：out[i] = max(0, in[i])
+    // 将负值置零，正值直通，实现修正线性单元激活
+    static void relu(const float* pIn, float* pOut, size_t nCount) {
+        for (size_t i = 0; i < nCount; ++i)
+            pOut[i] = pIn[i] > 0.0f ? pIn[i] : 0.0f;  // 20260319 ZJH 正值直通，负值置零
+    }
+
+    // 20260319 ZJH ReLU 反向：grad_in[i] = grad_out[i] * (in[i] > 0 ? 1 : 0)
+    // 前向时输入大于零的位置梯度直通，否则梯度为零
+    static void reluBackward(const float* pIn, const float* pGradOut, float* pGradIn, size_t nCount) {
+        for (size_t i = 0; i < nCount; ++i)
+            pGradIn[i] = pIn[i] > 0.0f ? pGradOut[i] : 0.0f;  // 20260319 ZJH 正值梯度直通，负值梯度截断
+    }
+
+    // ===== Softmax / CrossEntropy =====
+
+    // 20260319 ZJH Softmax 前向：沿最后一维对 [nBatch, nClasses] 做 softmax
+    // 每行减最大值保证数值稳定性，再 exp + 归一化
+    static void softmax(const float* pIn, float* pOut, int nBatch, int nClasses) {
+        for (int b = 0; b < nBatch; ++b) {
+            const float* pRow = pIn + b * nClasses;  // 20260319 ZJH 当前行输入指针
+            float* pOutRow = pOut + b * nClasses;  // 20260319 ZJH 当前行输出指针
+            // 20260319 ZJH 查找当前行最大值，用于减去保证数值稳定
+            float fMax = pRow[0];
+            for (int j = 1; j < nClasses; ++j)
+                if (pRow[j] > fMax) fMax = pRow[j];
+            // 20260319 ZJH 对每个元素计算 exp(x - max) 并累加求和
+            float fSum = 0.0f;
+            for (int j = 0; j < nClasses; ++j) {
+                pOutRow[j] = std::exp(pRow[j] - fMax);  // 20260319 ZJH 减最大值后取指数
+                fSum += pOutRow[j];  // 20260319 ZJH 累加指数值
+            }
+            // 20260319 ZJH 归一化：除以指数之和，使概率总和为 1
+            for (int j = 0; j < nClasses; ++j)
+                pOutRow[j] /= fSum;
+        }
+    }
+
+    // 20260319 ZJH 交叉熵损失：-sum(target * log(pred)) / batch
+    // target 为 one-hot 编码 [nBatch, nClasses]，pred 为 softmax 输出
+    // 返回批次平均交叉熵损失值
+    static float crossEntropy(const float* pPred, const float* pTarget, int nBatch, int nClasses) {
+        float fLoss = 0.0f;  // 20260319 ZJH 累积损失
+        for (int b = 0; b < nBatch; ++b) {
+            for (int j = 0; j < nClasses; ++j) {
+                // 20260319 ZJH 仅对 target > 0.5 的位置（one-hot 中为 1 的类别）计算损失
+                if (pTarget[b * nClasses + j] > 0.5f) {
+                    float fP = pPred[b * nClasses + j];  // 20260319 ZJH 预测概率
+                    if (fP < 1e-7f) fP = 1e-7f;  // 20260319 ZJH 钳位防止 log(0)
+                    fLoss -= std::log(fP);  // 20260319 ZJH 累加负对数概率
+                }
+            }
+        }
+        return fLoss / static_cast<float>(nBatch);  // 20260319 ZJH 返回批次平均损失
+    }
+
+    // 20260319 ZJH Softmax + 交叉熵联合反向：grad = (softmax_output - target) / batch
+    // 联合计算避免分别求 softmax 和 CE 的梯度，数值更稳定且计算更简单
+    static void crossEntropySoftmaxBackward(const float* pSoftmax, const float* pTarget,
+                                             float* pGradInput, int nBatch, int nClasses) {
+        float fScale = 1.0f / static_cast<float>(nBatch);  // 20260319 ZJH 批次平均缩放因子
+        for (int i = 0; i < nBatch * nClasses; ++i) {
+            // 20260319 ZJH 联合梯度公式：(softmax - one_hot) / batch_size
+            pGradInput[i] = (pSoftmax[i] - pTarget[i]) * fScale;
+        }
+    }
+
+    // ===== Argmax =====
+
+    // 20260319 ZJH 逐行 argmax：返回每行最大值的索引
+    // pData: [nBatch, nClasses] 输入，pOut: [nBatch] 输出索引数组
+    static void argmax(const float* pData, int* pOut, int nBatch, int nClasses) {
+        for (int b = 0; b < nBatch; ++b) {
+            int nBestIdx = 0;  // 20260319 ZJH 当前行最大值索引
+            float fBest = pData[b * nClasses];  // 20260319 ZJH 当前行最大值
+            for (int j = 1; j < nClasses; ++j) {
+                if (pData[b * nClasses + j] > fBest) {
+                    fBest = pData[b * nClasses + j];  // 20260319 ZJH 更新最大值
+                    nBestIdx = j;  // 20260319 ZJH 更新最大值索引
+                }
+            }
+            pOut[b] = nBestIdx;  // 20260319 ZJH 记录当前行的 argmax 结果
+        }
+    }
+
+    // ===== 广播加法 =====
+
+    // 20260319 ZJH 行广播加法：matOut[b, j] = matA[b, j] + vecBias[j]
+    // 用于全连接层的偏置加法：matA 形状 [nBatch, nCols]，vecBias 形状 [nCols]
+    static void addBias(const float* pA, const float* pBias, float* pOut, int nBatch, int nCols) {
+        for (int b = 0; b < nBatch; ++b) {
+            for (int j = 0; j < nCols; ++j) {
+                // 20260319 ZJH 每行的每个元素加上对应列的偏置
+                pOut[b * nCols + j] = pA[b * nCols + j] + pBias[j];
+            }
+        }
+    }
+
     // ===== 数据拷贝 =====
     // 20260319 ZJH 连续内存拷贝：pSrc -> pDst，共 nCount 个 float
     static void copy(const float* pSrc, float* pDst, size_t nCount) {
