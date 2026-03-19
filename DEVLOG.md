@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 23:58 - Phase 1B-T5：TensorOps 运算模块实现与 14 个测试全部通过
+- **修改文件**: `src/engine/df.engine.tensor_ops.ixx`, `tests/test_tensor_ops.cpp`
+- **修改类型**: 修改（替换占位存根）
+- **修改内容**: 实现 tensor_ops 模块，导出 df 命名空间下 12 个运算函数：逐元素加/减/乘/除（tensorAdd/Sub/Mul/Div）、标量加/乘（tensorAddScalar/MulScalar）、矩阵乘法（tensorMatmul，调用 CPUBackend::matmul A[M,K]*B[K,N]->C[M,N]）、零拷贝 reshape（连续张量共享 Storage 创建 makeView，非连续先 contiguous 再 reshape）、零拷贝 transpose（交换两维 shape/strides 创建视图）、零拷贝 slice（调整 offset 和指定维度大小创建视图）、全局归约 sum/max/min（先连续化再调用 CPUBackend 内核）；编写 14 个 GTest 单元测试（Add/Sub/Mul/Div/Matmul2D/MatmulNonSquare/Reshape/ReshapeFlatten/Transpose/TransposeThenContiguous/Slice/SliceDim1/ScalarOps/Reductions），全部通过（14/14，0ms total）
+- **关联功能**: Phase 1B / 引擎层 TensorOps / Task 1B-T5
+
 ### 23:55 - Phase 1B-T4：Tensor 类实现与 11 个测试全部通过
 - **修改文件**: `src/engine/df.engine.tensor.ixx`, `tests/test_tensor.cpp`
 - **修改类型**: 修改（替换占位存根）
