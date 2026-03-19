@@ -84,6 +84,7 @@ target_sources(df_engine
         FILE_SET CXX_MODULES FILES
             src/engine/df.engine.tensor_storage.ixx
             src/engine/df.engine.tensor.ixx
+            src/engine/df.engine.autograd.ixx
             src/engine/df.engine.tensor_ops.ixx
 )
 
@@ -118,4 +119,5 @@ if(DF_BUILD_TESTS)
 
     df_add_engine_test(test_tensor tests/test_tensor.cpp)
     df_add_engine_test(test_tensor_ops tests/test_tensor_ops.cpp)
+    df_add_engine_test(test_autograd tests/test_autograd.cpp)
 endif()

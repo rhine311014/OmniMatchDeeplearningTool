@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 20:36 - Phase 1C AutoGrad 自动微分系统完成，63 个测试全部通过
+- **修改文件**: `CMakeLists.txt`, `src/engine/df.engine.autograd.ixx`, `src/engine/df.engine.tensor.ixx`, `src/engine/df.engine.tensor_ops.ixx`, `tests/test_autograd.cpp`, `tests/test_tensor_ops.cpp`
+- **修改类型**: 新增/修改
+- **修改内容**: 实现动态计算图自动微分引擎；新增 autograd 模块导出 Edge、GradFunction 基类、GradAccumulator 梯度累加器、8 个 Backward 子类（Add/Sub/Mul/MatMul/AddScalar/MulScalar/Sum/LeafAccumulator）、runBackward 拓扑排序反向传播；Tensor 类新增 requiresGrad/gradFnRaw/gradAccumRaw/item 等 AutoGrad 支持接口（类型擦除避免循环依赖）；tensor_ops 集成 AutoGrad——所有算术运算（add/sub/mul/matmul/addScalar/mulScalar）在输入需要梯度时自动构建计算图；tensorSum 返回类型从 float 改为 Tensor（标量 shape={1}）以参与计算图；新增 tensorBackward/tensorGetGrad/tensorZeroGrad/tensorSetRequiresGrad 用户接口；修复 test_tensor_ops 中 tensorSum 调用（添加 .item()）；编写 8 个 AutoGrad 测试（AddGradient/SubGradient/MulGradient/MatMulGradient 数值梯度检查/MulScalarGradient/ChainRule/ZeroGrad/OnlyLeafHasGrad），连同原有 55 个测试共 63 个全部通过（9 个测试套件 100%）
+- **关联功能**: Phase 1C / AutoGrad 自动微分
+
 ### 20:20 - Phase 1B 全量验证里程碑通过
 - **修改文件**: `DEVLOG.md`
 - **修改类型**: 记录

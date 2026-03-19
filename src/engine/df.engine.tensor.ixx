@@ -286,6 +286,49 @@ public:
         return m_nOffset;
     }
 
+    // =========================================================
+    // AutoGrad 支持（类型擦除，避免循环依赖）
+    // =========================================================
+
+    // 20260319 ZJH 设置是否需要梯度，若为 true 则懒创建 GradAccumulator
+    // GradAccumulator 以 shared_ptr<void> 类型擦除存储，避免 tensor.ixx 导入 autograd.ixx
+    void setRequiresGrad(bool b) {
+        m_bRequiresGrad = b;  // 20260319 ZJH 记录是否需要梯度
+        // 20260319 ZJH 注意: GradAccumulator 的实际创建由 tensor_ops 中的 ensureLeafAccumulator 完成
+    }
+
+    // 20260319 ZJH 返回当前张量是否需要梯度
+    bool requiresGrad() const {
+        return m_bRequiresGrad;
+    }
+
+    // 20260319 ZJH 设置类型擦除的 GradFunction（由 tensor_ops 在前向运算后调用）
+    void setGradFnRaw(std::shared_ptr<void> p) {
+        m_pGradFn = std::move(p);  // 20260319 ZJH 存储 GradFunction 的 shared_ptr<void>
+    }
+
+    // 20260319 ZJH 获取类型擦除的 GradFunction
+    std::shared_ptr<void> gradFnRaw() const {
+        return m_pGradFn;  // 20260319 ZJH 返回 shared_ptr<void>，由调用方 static_pointer_cast
+    }
+
+    // 20260319 ZJH 设置类型擦除的 GradAccumulator（叶节点的梯度累加器）
+    void setGradAccumRaw(std::shared_ptr<void> p) {
+        m_pGradAccumulator = std::move(p);  // 20260319 ZJH 存储 GradAccumulator 的 shared_ptr<void>
+    }
+
+    // 20260319 ZJH 获取类型擦除的 GradAccumulator
+    std::shared_ptr<void> gradAccumRaw() const {
+        return m_pGradAccumulator;  // 20260319 ZJH 返回 shared_ptr<void>
+    }
+
+    // 20260319 ZJH item — 从标量张量（numel()==1）中提取单个 float 值
+    // 用于 SumBackward 等需要读取标量梯度值的场景
+    float item() const {
+        assert(numel() == 1 && "Tensor::item — only scalar tensors (numel==1) supported");
+        return floatDataPtr()[0];  // 20260319 ZJH 返回第一个（也是唯一一个）元素
+    }
+
 private:
     // =========================================================
     // 私有成员
@@ -302,6 +345,17 @@ private:
 
     // 20260319 ZJH 存储起始偏移（元素单位）：视图操作后可能不从 0 开始
     int m_nOffset = 0;
+
+    // 20260319 ZJH 是否需要梯度（用户设置的叶节点标记）
+    bool m_bRequiresGrad = false;
+
+    // 20260319 ZJH 类型擦除的 GradFunction（实际类型为 shared_ptr<GradFunction>）
+    // 非叶节点由前向运算自动设置；叶节点由 ensureLeafAccumulator 设置为 LeafAccumulator
+    std::shared_ptr<void> m_pGradFn;
+
+    // 20260319 ZJH 类型擦除的 GradAccumulator（实际类型为 shared_ptr<GradAccumulator>）
+    // 仅叶节点持有，用于累积反向传播的梯度
+    std::shared_ptr<void> m_pGradAccumulator;
 
     // =========================================================
     // 私有辅助

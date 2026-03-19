@@ -171,7 +171,7 @@ TEST(TensorOpsTest, ScalarOps) {
 // 20260319 ZJH 测试全局 sum/max/min 归约：[1,2,3,4,5]
 TEST(TensorOpsTest, Reductions) {
     auto t = df::Tensor::fromData(std::vector<float>{1, 2, 3, 4, 5}.data(), {5});
-    EXPECT_FLOAT_EQ(df::tensorSum(t), 15.0f);  // 20260319 ZJH 1+2+3+4+5=15
+    EXPECT_FLOAT_EQ(df::tensorSum(t).item(), 15.0f);  // 20260319 ZJH 1+2+3+4+5=15，tensorSum 返回标量张量
     EXPECT_FLOAT_EQ(df::tensorMax(t), 5.0f);   // 20260319 ZJH 最大值为 5
     EXPECT_FLOAT_EQ(df::tensorMin(t), 1.0f);   // 20260319 ZJH 最小值为 1
 }

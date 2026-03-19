@@ -1,0 +1,362 @@
+// 20260319 ZJH AutoGrad 自动微分模块 — Phase 1C
+// 动态计算图：前向运算构建 GradFunction DAG，backward() 拓扑排序后反向传播梯度
+// 循环依赖解决方案：Tensor 以 shared_ptr<void> 类型擦除存储 GradFunction，
+// 仅 tensor_ops 同时了解 Tensor 和 GradFunction
+module;
+
+#include <vector>
+#include <memory>
+#include <cassert>
+#include <unordered_map>
+#include <unordered_set>
+#include <queue>
+#include <functional>
+#include <cstring>
+
+#include "df_types.h"
+
+export module df.engine.autograd;
+
+// 20260319 ZJH 导入依赖模块：存储层、张量类、CPU 计算内核
+import df.engine.tensor_storage;
+import df.engine.tensor;
+import df.hal.cpu_backend;
+
+export namespace df {
+
+// 20260319 ZJH 前向声明 GradFunction，供 Edge 引用
+class GradFunction;
+
+// 20260319 ZJH Edge — 计算图中的有向边，连接上游 GradFunction 及其输入索引
+// pGradFn: 指向上游梯度函数（产出该张量的反向运算节点）
+// nInputIndex: 该张量在上游 GradFunction 的输出中对应的索引位置
+struct Edge {
+    std::shared_ptr<GradFunction> pGradFn;  // 20260319 ZJH 上游梯度函数（可为 nullptr 表示叶节点）
+    int nInputIndex = 0;  // 20260319 ZJH 在上游 backward 输出向量中的索引
+};
+
+// 20260319 ZJH GradFunction — 计算图反向传播节点基类
+// 每个前向运算对应一个 GradFunction 子类，backward() 根据上游梯度计算下游梯度
+class GradFunction {
+public:
+    // 20260319 ZJH 虚析构，支持多态删除
+    virtual ~GradFunction() = default;
+
+    // 20260319 ZJH backward — 给定当前节点的梯度输出，计算各输入的梯度
+    // gradOutput: 从上游传来的梯度张量
+    // 返回: 各输入边对应的梯度向量，大小与 m_vecInputEdges 一致
+    virtual std::vector<Tensor> backward(const Tensor& gradOutput) = 0;
+
+    // 20260319 ZJH 输入边列表：记录当前运算的各个输入张量来自哪个上游 GradFunction
+    std::vector<Edge> m_vecInputEdges;
+};
+
+// 20260319 ZJH GradAccumulator — 叶节点梯度累加器
+// 持有一个梯度张量 m_grad，支持累加和清零操作
+// 叶节点（用户创建的 requiresGrad=true 的张量）通过 LeafAccumulator 持有此对象
+struct GradAccumulator {
+    Tensor m_grad;  // 20260319 ZJH 累积的梯度张量
+    bool m_bHasGrad = false;  // 20260319 ZJH 是否已有梯度（区分零梯度和无梯度）
+
+    // 20260319 ZJH accumulate — 累加梯度，首次调用时直接赋值，后续调用逐元素相加
+    void accumulate(const Tensor& grad) {
+        if (!m_bHasGrad) {
+            // 20260319 ZJH 首次累加：深拷贝梯度（避免共享存储导致覆盖）
+            m_grad = Tensor::fromData(grad.floatDataPtr(), grad.shapeVec());
+            m_bHasGrad = true;  // 20260319 ZJH 标记已有梯度
+        } else {
+            // 20260319 ZJH 后续累加：逐元素相加
+            auto cg = grad.contiguous();  // 20260319 ZJH 确保梯度连续
+            auto cm = m_grad.contiguous();  // 20260319 ZJH 确保已有梯度连续
+            auto result = Tensor::zeros(cm.shapeVec());  // 20260319 ZJH 分配结果张量
+            CPUBackend::add(cm.floatDataPtr(), cg.floatDataPtr(),
+                            result.mutableFloatDataPtr(), static_cast<size_t>(result.numel()));
+            m_grad = result;  // 20260319 ZJH 更新累积梯度
+        }
+    }
+
+    // 20260319 ZJH zero — 清零梯度并重置标记
+    void zero() {
+        m_bHasGrad = false;  // 20260319 ZJH 重置标记
+        m_grad = Tensor();  // 20260319 ZJH 释放梯度存储
+    }
+};
+
+// =========================================================
+// Backward 子类 — 各前向运算对应的反向梯度计算
+// =========================================================
+
+// 20260319 ZJH AddBackward — 加法反向：grad_a = gradOutput, grad_b = gradOutput
+// d(a+b)/da = 1, d(a+b)/db = 1
+class AddBackward : public GradFunction {
+public:
+    // 20260319 ZJH backward — 加法梯度直通，两个输入梯度均等于输出梯度
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        // 20260319 ZJH grad_a = gradOutput（深拷贝避免共享存储问题）
+        auto gradA = Tensor::fromData(gradOutput.floatDataPtr(), gradOutput.shapeVec());
+        // 20260319 ZJH grad_b = gradOutput（深拷贝）
+        auto gradB = Tensor::fromData(gradOutput.floatDataPtr(), gradOutput.shapeVec());
+        return {gradA, gradB};  // 20260319 ZJH 返回两个输入的梯度
+    }
+};
+
+// 20260319 ZJH SubBackward — 减法反向：grad_a = gradOutput, grad_b = -gradOutput
+// d(a-b)/da = 1, d(a-b)/db = -1
+class SubBackward : public GradFunction {
+public:
+    // 20260319 ZJH backward — 减法梯度：a 直通，b 取负
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cg = gradOutput.contiguous();  // 20260319 ZJH 确保梯度连续
+        // 20260319 ZJH grad_a = gradOutput
+        auto gradA = Tensor::fromData(cg.floatDataPtr(), cg.shapeVec());
+        // 20260319 ZJH grad_b = -gradOutput，乘以 -1
+        auto gradB = Tensor::zeros(cg.shapeVec());
+        CPUBackend::mulScalar(cg.floatDataPtr(), -1.0f,
+                              gradB.mutableFloatDataPtr(), static_cast<size_t>(gradB.numel()));
+        return {gradA, gradB};  // 20260319 ZJH 返回两个输入的梯度
+    }
+};
+
+// 20260319 ZJH MulBackward — 乘法反向：grad_a = gradOutput * b, grad_b = gradOutput * a
+// d(a*b)/da = b, d(a*b)/db = a（保存前向时的 a 和 b）
+class MulBackward : public GradFunction {
+public:
+    Tensor m_savedA;  // 20260319 ZJH 保存前向时的张量 a，用于计算 grad_b
+    Tensor m_savedB;  // 20260319 ZJH 保存前向时的张量 b，用于计算 grad_a
+
+    // 20260319 ZJH backward — 乘法梯度：交叉乘以对方保存的张量
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cg = gradOutput.contiguous();  // 20260319 ZJH 确保梯度连续
+        auto ca = m_savedA.contiguous();  // 20260319 ZJH 确保保存的 a 连续
+        auto cb = m_savedB.contiguous();  // 20260319 ZJH 确保保存的 b 连续
+
+        // 20260319 ZJH grad_a = gradOutput * b
+        auto gradA = Tensor::zeros(cg.shapeVec());
+        CPUBackend::mul(cg.floatDataPtr(), cb.floatDataPtr(),
+                        gradA.mutableFloatDataPtr(), static_cast<size_t>(gradA.numel()));
+
+        // 20260319 ZJH grad_b = gradOutput * a
+        auto gradB = Tensor::zeros(cg.shapeVec());
+        CPUBackend::mul(cg.floatDataPtr(), ca.floatDataPtr(),
+                        gradB.mutableFloatDataPtr(), static_cast<size_t>(gradB.numel()));
+
+        return {gradA, gradB};  // 20260319 ZJH 返回两个输入的梯度
+    }
+};
+
+// 20260319 ZJH MatMulBackward — 矩阵乘法反向
+// 前向: C = A @ B，其中 A[M,K], B[K,N], C[M,N]
+// 反向: grad_A = gradOutput @ B^T, grad_B = A^T @ gradOutput
+// 保存前向时的 A 和 B
+class MatMulBackward : public GradFunction {
+public:
+    Tensor m_savedA;  // 20260319 ZJH 保存前向时的矩阵 A [M,K]
+    Tensor m_savedB;  // 20260319 ZJH 保存前向时的矩阵 B [K,N]
+
+    // 20260319 ZJH backward — 矩阵乘法梯度，需要手动转置
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cGrad = gradOutput.contiguous();  // 20260319 ZJH gradOutput [M,N]
+        auto cA = m_savedA.contiguous();  // 20260319 ZJH A [M,K]
+        auto cB = m_savedB.contiguous();  // 20260319 ZJH B [K,N]
+
+        int nM = cA.shape(0);  // 20260319 ZJH 矩阵 A 的行数
+        int nK = cA.shape(1);  // 20260319 ZJH 矩阵 A 的列数 = B 的行数
+        int nN = cB.shape(1);  // 20260319 ZJH 矩阵 B 的列数
+
+        // 20260319 ZJH grad_A = gradOutput[M,N] @ B^T[N,K] -> [M,K]
+        // 先手动转置 B[K,N] -> B^T[N,K]
+        auto matBT = Tensor::zeros({nN, nK});  // 20260319 ZJH B 的转置
+        const float* pB = cB.floatDataPtr();  // 20260319 ZJH B 的数据指针
+        float* pBT = matBT.mutableFloatDataPtr();  // 20260319 ZJH B^T 的数据指针
+        for (int i = 0; i < nK; ++i) {
+            for (int j = 0; j < nN; ++j) {
+                // 20260319 ZJH B[i,j] = pB[i*nN+j] -> B^T[j,i] = pBT[j*nK+i]
+                pBT[j * nK + i] = pB[i * nN + j];
+            }
+        }
+        // 20260319 ZJH gradOutput[M,N] @ B^T[N,K] -> gradA[M,K]
+        auto gradA = Tensor::zeros({nM, nK});
+        CPUBackend::matmul(cGrad.floatDataPtr(), matBT.floatDataPtr(),
+                           gradA.mutableFloatDataPtr(), nM, nN, nK);
+
+        // 20260319 ZJH grad_B = A^T[K,M] @ gradOutput[M,N] -> [K,N]
+        // 先手动转置 A[M,K] -> A^T[K,M]
+        auto matAT = Tensor::zeros({nK, nM});  // 20260319 ZJH A 的转置
+        const float* pA = cA.floatDataPtr();  // 20260319 ZJH A 的数据指针
+        float* pAT = matAT.mutableFloatDataPtr();  // 20260319 ZJH A^T 的数据指针
+        for (int i = 0; i < nM; ++i) {
+            for (int j = 0; j < nK; ++j) {
+                // 20260319 ZJH A[i,j] = pA[i*nK+j] -> A^T[j,i] = pAT[j*nM+i]
+                pAT[j * nM + i] = pA[i * nK + j];
+            }
+        }
+        // 20260319 ZJH A^T[K,M] @ gradOutput[M,N] -> gradB[K,N]
+        auto gradB = Tensor::zeros({nK, nN});
+        CPUBackend::matmul(matAT.floatDataPtr(), cGrad.floatDataPtr(),
+                           gradB.mutableFloatDataPtr(), nK, nM, nN);
+
+        return {gradA, gradB};  // 20260319 ZJH 返回 A 和 B 的梯度
+    }
+};
+
+// 20260319 ZJH AddScalarBackward — 加标量反向：grad_a = gradOutput
+// d(a + scalar)/da = 1，标量无梯度
+class AddScalarBackward : public GradFunction {
+public:
+    // 20260319 ZJH backward — 加标量梯度直通
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        // 20260319 ZJH grad_a = gradOutput
+        auto gradA = Tensor::fromData(gradOutput.floatDataPtr(), gradOutput.shapeVec());
+        return {gradA};  // 20260319 ZJH 仅一个输入的梯度
+    }
+};
+
+// 20260319 ZJH MulScalarBackward — 乘标量反向：grad_a = gradOutput * scalar
+// d(a * scalar)/da = scalar
+class MulScalarBackward : public GradFunction {
+public:
+    float m_fScalar = 0.0f;  // 20260319 ZJH 保存前向时的标量值
+
+    // 20260319 ZJH backward — 乘标量梯度
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cg = gradOutput.contiguous();  // 20260319 ZJH 确保梯度连续
+        // 20260319 ZJH grad_a = gradOutput * scalar
+        auto gradA = Tensor::zeros(cg.shapeVec());
+        CPUBackend::mulScalar(cg.floatDataPtr(), m_fScalar,
+                              gradA.mutableFloatDataPtr(), static_cast<size_t>(gradA.numel()));
+        return {gradA};  // 20260319 ZJH 仅一个输入的梯度
+    }
+};
+
+// 20260319 ZJH SumBackward — 求和反向：grad_a = full(inputShape, gradOutput.item())
+// d(sum(a))/da_i = 1，gradOutput 是标量，需要广播到输入形状
+class SumBackward : public GradFunction {
+public:
+    std::vector<int> m_vecInputShape;  // 20260319 ZJH 保存前向时输入张量的形状
+
+    // 20260319 ZJH backward — 求和梯度：将标量梯度广播到输入形状
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        // 20260319 ZJH 从标量梯度中提取 float 值
+        float fGradVal = gradOutput.item();
+        // 20260319 ZJH 创建与输入同形状的全值张量，每个元素 = fGradVal
+        auto gradA = Tensor::full(m_vecInputShape, fGradVal);
+        return {gradA};  // 20260319 ZJH 仅一个输入的梯度
+    }
+};
+
+// 20260319 ZJH LeafAccumulator — 叶节点的 GradFunction
+// 叶节点（用户创建的 requiresGrad=true 的张量）的 gradFn 就是 LeafAccumulator
+// 它不做真正的 backward 计算，而是将梯度累加到 GradAccumulator 中
+class LeafAccumulator : public GradFunction {
+public:
+    std::shared_ptr<GradAccumulator> m_pAccumulator;  // 20260319 ZJH 指向叶节点的梯度累加器
+
+    // 20260319 ZJH backward — 将梯度累加到叶节点的 GradAccumulator
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        if (m_pAccumulator) {
+            m_pAccumulator->accumulate(gradOutput);  // 20260319 ZJH 累加梯度
+        }
+        return {};  // 20260319 ZJH 叶节点无下游输入，返回空
+    }
+};
+
+// =========================================================
+// runBackward — 反向传播引擎
+// =========================================================
+
+// 20260319 ZJH runBackward — 从根节点出发，拓扑排序后反向传播梯度
+// pRootGradFn: 根节点的 GradFunction（通常是 loss 的 gradFn）
+// rootGrad: 根节点的初始梯度（通常是全 1 标量）
+// 使用 Kahn 算法（BFS 拓扑排序）确保每个节点在所有后继节点处理后才处理
+void runBackward(std::shared_ptr<GradFunction> pRootGradFn, const Tensor& rootGrad) {
+    if (!pRootGradFn) return;  // 20260319 ZJH 无梯度函数则直接返回
+
+    // 20260319 ZJH 阶段 1：BFS 收集所有可达节点并计算入度（被引用次数）
+    // 入度 = 有多少其他节点的 inputEdges 指向该节点
+    std::unordered_map<GradFunction*, int> mapInDegree;  // 20260319 ZJH 节点 -> 入度
+    std::unordered_set<GradFunction*> setVisited;  // 20260319 ZJH 已访问标记
+    std::queue<GradFunction*> qBfs;  // 20260319 ZJH BFS 队列
+
+    // 20260319 ZJH 从根节点开始 BFS
+    qBfs.push(pRootGradFn.get());
+    setVisited.insert(pRootGradFn.get());
+    mapInDegree[pRootGradFn.get()] = 0;  // 20260319 ZJH 根节点入度初始化为 0
+
+    while (!qBfs.empty()) {
+        GradFunction* pCurr = qBfs.front();  // 20260319 ZJH 取出队首节点
+        qBfs.pop();
+
+        // 20260319 ZJH 遍历当前节点的所有输入边
+        for (const auto& edge : pCurr->m_vecInputEdges) {
+            if (edge.pGradFn) {
+                GradFunction* pNext = edge.pGradFn.get();  // 20260319 ZJH 下游节点
+                // 20260319 ZJH 增加下游节点的入度（被当前节点引用一次）
+                mapInDegree[pNext]++;
+                if (setVisited.find(pNext) == setVisited.end()) {
+                    // 20260319 ZJH 首次访问，加入 BFS 队列
+                    setVisited.insert(pNext);
+                    qBfs.push(pNext);
+                }
+            }
+        }
+    }
+
+    // 20260319 ZJH 阶段 2：Kahn 拓扑排序 + 反向梯度传播
+    // 从入度为 0 的节点（根节点）开始，逐步处理所有节点
+    std::unordered_map<GradFunction*, Tensor> mapGrads;  // 20260319 ZJH 节点 -> 累积梯度
+    mapGrads[pRootGradFn.get()] = rootGrad;  // 20260319 ZJH 根节点初始梯度
+
+    std::queue<GradFunction*> qTopo;  // 20260319 ZJH 拓扑排序处理队列
+    // 20260319 ZJH 将入度为 0 的节点加入处理队列（应只有根节点）
+    for (auto& [pNode, nDeg] : mapInDegree) {
+        if (nDeg == 0) {
+            qTopo.push(pNode);
+        }
+    }
+
+    while (!qTopo.empty()) {
+        GradFunction* pCurr = qTopo.front();  // 20260319 ZJH 取出入度为 0 的节点
+        qTopo.pop();
+
+        // 20260319 ZJH 获取当前节点的累积梯度
+        auto itGrad = mapGrads.find(pCurr);
+        if (itGrad == mapGrads.end()) continue;  // 20260319 ZJH 无梯度则跳过
+        Tensor currGrad = itGrad->second;  // 20260319 ZJH 当前节点的梯度
+
+        // 20260319 ZJH 调用当前节点的 backward 计算各输入的梯度
+        auto vecInputGrads = pCurr->backward(currGrad);
+
+        // 20260319 ZJH 将计算出的梯度传递给各下游节点
+        for (size_t i = 0; i < pCurr->m_vecInputEdges.size(); ++i) {
+            const auto& edge = pCurr->m_vecInputEdges[i];
+            if (!edge.pGradFn) continue;  // 20260319 ZJH 无下游节点则跳过
+
+            GradFunction* pNext = edge.pGradFn.get();  // 20260319 ZJH 下游节点指针
+
+            // 20260319 ZJH 将梯度累加到下游节点（可能有多条边汇聚）
+            auto itNextGrad = mapGrads.find(pNext);
+            if (itNextGrad == mapGrads.end()) {
+                // 20260319 ZJH 首次收到梯度，直接赋值
+                mapGrads[pNext] = vecInputGrads[i];
+            } else {
+                // 20260319 ZJH 已有梯度，逐元素累加
+                auto existing = itNextGrad->second.contiguous();
+                auto incoming = vecInputGrads[i].contiguous();
+                auto accumulated = Tensor::zeros(existing.shapeVec());
+                CPUBackend::add(existing.floatDataPtr(), incoming.floatDataPtr(),
+                                accumulated.mutableFloatDataPtr(),
+                                static_cast<size_t>(accumulated.numel()));
+                mapGrads[pNext] = accumulated;
+            }
+
+            // 20260319 ZJH 减少下游节点的入度
+            mapInDegree[pNext]--;
+            if (mapInDegree[pNext] == 0) {
+                // 20260319 ZJH 入度归零，加入处理队列
+                qTopo.push(pNext);
+            }
+        }
+    }
+}
+
+}  // namespace df
