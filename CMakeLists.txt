@@ -64,6 +64,32 @@ target_link_libraries(df_platform
         unofficial::sqlite3::sqlite3
 )
 
+# ---------- HAL 层静态库（Layer 2） ----------
+add_library(df_hal STATIC)
+
+target_sources(df_hal
+    PUBLIC
+        FILE_SET CXX_MODULES FILES
+            src/hal/df.hal.cpu_backend.ixx
+)
+
+target_include_directories(df_hal PUBLIC include)
+target_link_libraries(df_hal PUBLIC df_platform)
+
+# ---------- 引擎层静态库（Layer 3） ----------
+add_library(df_engine STATIC)
+
+target_sources(df_engine
+    PUBLIC
+        FILE_SET CXX_MODULES FILES
+            src/engine/df.engine.tensor_storage.ixx
+            src/engine/df.engine.tensor.ixx
+            src/engine/df.engine.tensor_ops.ixx
+)
+
+target_include_directories(df_engine PUBLIC include)
+target_link_libraries(df_engine PUBLIC df_hal)
+
 # ---------- 测试 ----------
 if(DF_BUILD_TESTS)
     enable_testing()
@@ -82,4 +108,14 @@ if(DF_BUILD_TESTS)
     df_add_test(test_memory tests/test_memory.cpp)
     df_add_test(test_thread_pool tests/test_thread_pool.cpp)
     df_add_test(test_database tests/test_database.cpp)
+
+    # 20260319 ZJH 引擎层测试需要链接 df_engine
+    function(df_add_engine_test TEST_NAME TEST_SOURCE)
+        add_executable(${TEST_NAME} ${TEST_SOURCE})
+        target_link_libraries(${TEST_NAME} PRIVATE df_engine GTest::gtest_main)
+        add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+    endfunction()
+
+    df_add_engine_test(test_tensor tests/test_tensor.cpp)
+    df_add_engine_test(test_tensor_ops tests/test_tensor_ops.cpp)
 endif()

@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 23:30 - Phase 1B T1-T3：CMake 配置 + TensorStorage + CPUBackend
+- **修改文件**: `CMakeLists.txt`, `src/engine/df.engine.tensor_storage.ixx`, `src/engine/df.engine.tensor.ixx`, `src/engine/df.engine.tensor_ops.ixx`, `src/hal/df.hal.cpu_backend.ixx`, `tests/test_tensor.cpp`, `tests/test_tensor_ops.cpp`
+- **修改类型**: 新增
+- **修改内容**: CMakeLists.txt 新增 df_hal（Layer 2）和 df_engine（Layer 3）两个静态库及 df_add_engine_test 函数；TensorStorage 模块实现 64 字节对齐内存分配（MSVC _aligned_malloc / 其他 std::aligned_alloc），支持拷贝构造与禁止复制；CPUBackend 模块实现 float32 填充（zeros/ones/value/randn）、逐元素运算（add/sub/mul/div/addScalar/mulScalar）、matmul（i-k-j 顺序）、归约（sum/max/min）、连续拷贝与 stridedCopy；tensor/tensor_ops 存根模块及两个测试占位文件；全量构建 27/27 步骤全部成功，无错误无警告
+- **关联功能**: Phase 1B / HAL 层 / 引擎层
+
 ### 19:45 - Phase 1A 全量构建验证通过
 - **修改文件**: `config/default_config.json`
 - **修改类型**: 新增
