@@ -1,0 +1,26 @@
+{
+  "app": {
+    "name": "DeepForge",
+    "version": "0.1.0"
+  },
+  "training": {
+    "default_batch_size": 16,
+    "default_learning_rate": 0.001,
+    "default_epochs": 100,
+    "default_optimizer": "adam",
+    "checkpoint_dir": "data/models/checkpoints"
+  },
+  "inference": {
+    "default_device": "cuda",
+    "fallback_device": "cpu"
+  },
+  "data": {
+    "dataset_dir": "data/datasets",
+    "model_dir": "data/models",
+    "database_path": "data/deepforge.db"
+  },
+  "ui": {
+    "theme": "dark",
+    "font_size": 16
+  }
+}

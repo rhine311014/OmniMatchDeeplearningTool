@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 19:45 - Phase 1A 全量构建验证通过
+- **修改文件**: `config/default_config.json`
+- **修改类型**: 新增
+- **修改内容**: 创建默认配置文件（app / training / inference / data / ui 五个配置节）；执行全量 cmake --preset windows-debug + cmake --build 构建成功（无错误无警告）；执行 ctest -V 运行全部 30 个单元测试，100% 通过（Logger 4 + Config 5 + FileSystem 6 + Memory 5 + ThreadPool 5 + Database 5 = 30/30，总耗时 0.19s）
+- **关联功能**: Phase 1A 验收 / Task 8
+
 ### 21:45 - Database 模块实现与测试通过
 - **修改文件**: `src/platform/df.platform.database.ixx`, `tests/test_database.cpp`
 - **修改类型**: 修改（替换占位存根）
