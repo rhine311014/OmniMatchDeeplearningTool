@@ -1,0 +1,11 @@
+{
+  "name": "deepforge",
+  "version": "0.1.0",
+  "description": "Pure C++ Deep Learning Vision Platform",
+  "dependencies": [
+    "spdlog",
+    "nlohmann-json",
+    "sqlite3",
+    "gtest"
+  ]
+}
