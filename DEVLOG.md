@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 21:45 - Database 模块实现与测试通过
+- **修改文件**: `src/platform/df.platform.database.ixx`, `tests/test_database.cpp`
+- **修改类型**: 修改（替换占位存根）
+- **修改内容**: 实现 SQLite RAII 封装模块；Database 类持有 sqlite3* 句柄，析构时自动调用 sqlite3_close；静态工厂方法 open(path) 返回 Result<Database>，支持 ":memory:" 内存数据库和磁盘文件数据库；open() 成功后立即执行 PRAGMA journal_mode=WAL 开启 WAL 日志模式（提升并发和崩溃恢复能力）；execute() 用于非查询语句（DDL/DML），返回 Result<void>；query() 用 sqlite3_exec + lambda 回调收集行数据，返回 Result<std::vector<Row>>，Row 为 unordered_map<string,string>，NULL 值映射为空字符串；移动构造/移动赋值均正确处理句柄转移和置空，禁止拷贝；编写 5 个 GTest 单元测试（OpenInMemory / CreateTableAndInsert / Query / FileDatabase / InvalidSQL），全部通过（5/5，51ms total）
+- **关联功能**: 数据库平台层 / Task 7
+
 ### 21:15 - ThreadPool 模块实现与测试通过
 - **修改文件**: `src/platform/df.platform.thread_pool.ixx`, `tests/test_thread_pool.cpp`
 - **修改类型**: 修改（替换占位存根）
