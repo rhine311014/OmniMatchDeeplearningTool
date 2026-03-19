@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 20:45 - MemoryPool 模块实现与测试通过
+- **修改文件**: `src/platform/df.platform.memory.ixx`, `tests/test_memory.cpp`
+- **修改类型**: 修改（替换占位存根）
+- **修改内容**: 实现线程安全 64 字节缓存行对齐内存池；MSVC 使用 _aligned_malloc/_aligned_free，其他平台使用 std::aligned_alloc/std::free；通过 std::mutex + std::unordered_map<void*, size_t> 追踪每块分配的字节数，支持 allocatedBytes() 实时统计；allocate(0) 返回 nullptr；编写 5 个 GTest 单元测试（AllocateAndDeallocate / MemoryIsUsable / ZeroSizeReturnsNull / MultipleAllocations / Statistics），全部通过（5/5）
+- **关联功能**: 内存平台层 / Task 5
+
 ### 20:15 - FileSystem 模块实现与测试通过
 - **修改文件**: `src/platform/df.platform.filesystem.ixx`, `tests/test_filesystem.cpp`
 - **修改类型**: 修改（替换占位存根）
