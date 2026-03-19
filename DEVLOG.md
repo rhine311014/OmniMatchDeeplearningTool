@@ -2,6 +2,12 @@
 
 ## [2026-03-19]
 
+### 21:15 - ThreadPool 模块实现与测试通过
+- **修改文件**: `src/platform/df.platform.thread_pool.ixx`, `tests/test_thread_pool.cpp`
+- **修改类型**: 修改（替换占位存根）
+- **修改内容**: 实现固定大小线程池；使用 std::jthread（C++20）自动管理线程生命周期，析构时自动 request_stop + join；submit() 模板方法接受任意可调用对象，通过 std::packaged_task + shared_ptr 跨模块边界安全传递，返回 std::future<ReturnType>；waitAll() 通过 std::atomic<int> m_nPendingTasks 计数配合 std::condition_variable 实现无忙等阻塞；析构时设置 m_bStopping 标志并 notify_all，工作线程在队列清空后退出；编写 5 个 GTest 单元测试（SubmitAndGetResult / MultipleTasks / AllTasksExecuted / ThreadCount / VoidTask），全部通过（5/5，2ms total）
+- **关联功能**: 线程池平台层 / Task 6
+
 ### 20:45 - MemoryPool 模块实现与测试通过
 - **修改文件**: `src/platform/df.platform.memory.ixx`, `tests/test_memory.cpp`
 - **修改类型**: 修改（替换占位存根）
