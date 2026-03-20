@@ -2,6 +2,12 @@
 
 ## [2026-03-20]
 
+### 09:15 - GUI 完全重写为 Halcon MVTec DL Tool 风格，全部 4 种任务可用
+- **修改文件**: `src/ui/app_main.cpp`
+- **修改类型**: 重构
+- **修改内容**: 完全重写 GUI 应用（2263 行），从仅分类可用 + 3 个"即将推出"占位页面，升级为全部 4 种任务类型（分类/检测/分割/异常检测）均可完整运行。主要变更：(1) Halcon 风格深色蓝灰主题（#1E2028 背景 / #262830 卡片 / #3B82F6 主色），带圆角卡片 UI 组件；(2) 顶部工具栏（新建/打开/保存/设置 + GPU 信息徽章）；(3) 左侧树形项目导航（4 种任务类型带状态圆点指示器）；(4) Halcon 风格步骤指示器（4 个编号圆圈 + 连接线，激活=蓝色填充，完成=绿色，未来=灰色轮廓）；(5) 4 个独立训练线程函数：classificationTrainFunc（MLP/ResNet-18 + MNIST/合成数据 + 混淆矩阵）、detectionTrainFunc（YOLOv5Nano + 合成检测数据 + YOLOLoss）、segmentationTrainFunc（UNet + 合成圆形 mask + MSELoss + mIoU 估算）、anomalyTrainFunc（ConvAutoEncoder + 合成条纹图案 + MSE 重建误差 + AUC/阈值计算）；(6) 每种任务类型的专属数据/配置/训练/评估 4 步面板（分类：混淆矩阵热力图+分类报告表格；检测：mAP 指标；分割：mIoU 指标；异常：AUC+阈值调节）；(7) 右侧属性面板根据步骤和任务类型动态切换；(8) 闪屏期间后台线程检测 GPU 并显示进度；(9) 训练日志带 [HH:MM:SS] 时间戳；(10) 所有 UI 文本中文化。导入新增 3 个引擎模块（df.engine.unet / df.engine.yolo / df.engine.autoencoder）。构建验证通过，98 个测试全部通过
+- **关联功能**: Phase 4 / Halcon 风格 GUI / 全任务类型训练
+
 ### 08:24 - Phase 3 U-Net/YOLO/AutoEncoder 三大模型完成，98 个测试通过
 - **修改文件**: `src/hal/df.hal.cpu_backend.ixx`, `src/engine/df.engine.autograd.ixx`, `src/engine/df.engine.tensor_ops.ixx`, `src/engine/df.engine.activations.ixx`, `src/engine/df.engine.conv.ixx`, `src/engine/df.engine.loss.ixx`, `src/engine/df.engine.unet.ixx`, `src/engine/df.engine.yolo.ixx`, `src/engine/df.engine.autoencoder.ixx`, `tests/test_models.cpp`, `CMakeLists.txt`
 - **修改类型**: 新增/修改
