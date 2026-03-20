@@ -305,6 +305,45 @@ struct TrainingState {
 };
 
 // ============================================================================
+// 20260320 ZJH 训练历史记录条目（用于训练历史面板）
+// ============================================================================
+struct TrainingHistoryEntry {
+    std::string strModel;       // 20260320 ZJH 模型名称
+    float fAccuracy = 0.0f;     // 20260320 ZJH 最终准确率
+    float fLoss = 0.0f;         // 20260320 ZJH 最终损失
+    std::string strDate;        // 20260320 ZJH 完成日期
+    std::string strModelPath;   // 20260320 ZJH 模型保存路径
+};
+
+// ============================================================================
+// 20260320 ZJH 批量推理状态（批量推理弹窗使用）
+// ============================================================================
+struct BatchInferenceState {
+    char arrModelPath[512] = {};     // 20260320 ZJH 模型文件路径
+    char arrImageFolder[512] = {};   // 20260320 ZJH 图片文件夹路径
+    bool bRunning = false;           // 20260320 ZJH 是否正在运行推理
+    struct Result {
+        std::string strFilename;     // 20260320 ZJH 文件名
+        std::string strClass;        // 20260320 ZJH 预测类别
+        float fConfidence = 0.0f;    // 20260320 ZJH 置信度
+    };
+    std::vector<Result> vecResults;  // 20260320 ZJH 推理结果列表
+};
+
+// ============================================================================
+// 20260320 ZJH 设置状态（设置弹窗使用）
+// ============================================================================
+struct SettingsState {
+    int nTheme = 0;                  // 20260320 ZJH 0=深色, 1=浅色
+    float fFontSize = 16.0f;         // 20260320 ZJH 字体大小
+    char arrProjectPath[512] = "projects";  // 20260320 ZJH 默认项目路径
+    char arrModelPath[512] = "models";      // 20260320 ZJH 默认模型路径
+    int nGpuDevice = 0;             // 20260320 ZJH GPU 设备索引
+    int nVramLimitMB = 0;           // 20260320 ZJH 显存限制 (0=无限制)
+    int nLanguage = 0;              // 20260320 ZJH 0=简体中文
+};
+
+// ============================================================================
 // 20260320 ZJH 全局应用状态（Halcon MVTec 风格 UI）
 // ============================================================================
 struct AppState {
@@ -383,6 +422,38 @@ struct AppState {
     // 20260320 ZJH 底部日志面板高度
     float fLogPanelHeight = 80.0f;            // 20260320 ZJH 日志面板默认高度
     bool bLogExpanded = false;                // 20260320 ZJH 日志面板是否展开
+
+    // 20260320 ZJH Part 1 新增：菜单与弹窗控制
+    bool bShowAboutPopup = false;             // 20260320 ZJH 是否显示关于弹窗
+    bool bShowBatchInference = false;         // 20260320 ZJH 是否显示批量推理弹窗
+    bool bShowModelViewer = false;            // 20260320 ZJH 是否显示模型架构查看器
+    bool bShowGpuInfo = false;                // 20260320 ZJH 是否显示 GPU 信息弹窗
+    bool bShowNavPanel = true;                // 20260320 ZJH 项目导航面板可见
+    bool bShowPropsPanel = true;              // 20260320 ZJH 属性面板可见
+    bool bShowLogPanel = true;                // 20260320 ZJH 日志面板可见
+    bool bFullscreen = false;                 // 20260320 ZJH 全屏模式
+
+    // 20260320 ZJH 超参数预设索引（0=快速, 1=标准, 2=精确）
+    int nPresetIndex = 1;                     // 20260320 ZJH 默认标准训练
+
+    // 20260320 ZJH 高级设置
+    float fDropout = 0.0f;                    // 20260320 ZJH Dropout 率
+    bool bEarlyStop = false;                  // 20260320 ZJH 早停开关
+    int nEarlyStopPatience = 5;               // 20260320 ZJH 早停耐心值
+    bool bSaveEveryEpoch = false;             // 20260320 ZJH 每轮保存检查点
+    bool bSaveBestOnly = true;                // 20260320 ZJH 只保存最佳模型
+
+    // 20260320 ZJH 训练历史
+    std::vector<TrainingHistoryEntry> vecTrainHistory;  // 20260320 ZJH 已完成训练记录
+
+    // 20260320 ZJH 批量推理
+    BatchInferenceState batchInference;       // 20260320 ZJH 批量推理状态
+
+    // 20260320 ZJH 设置
+    SettingsState settings;                   // 20260320 ZJH 应用设置
+
+    // 20260320 ZJH 步骤指示器动画
+    float fStepPulseTimer = 0.0f;             // 20260320 ZJH 脉冲动画计时器
 };
 
 // ============================================================================
@@ -392,6 +463,11 @@ static void setupImGuiStyle();
 static void drawStatusBar(AppState& state);
 static void startTraining(AppState& state);
 static void checkDatasets(AppState& state);
+static void drawMainMenuBar(AppState& state);
+static void drawSettingsDialog(AppState& state);
+static void drawAboutDialog(AppState& state);
+static void drawBatchInferenceDialog(AppState& state);
+static void handleKeyboardShortcuts(AppState& state, SDL_Window* pWindow);
 
 // ============================================================================
 // 20260320 ZJH Halcon 风格颜色常量定义
@@ -439,64 +515,70 @@ static void endCard() {
 // ============================================================================
 // 20260320 ZJH 绘制 Halcon 风格步骤指示器（带连接线的编号圆圈）
 // ============================================================================
-static void drawStepIndicator(int nActiveStep, bool bStep0Done, bool bStep1Done, bool bTrainComplete) {
-    ImDrawList* pDraw = ImGui::GetWindowDrawList();
-    ImVec2 pos = ImGui::GetCursorScreenPos();
-    float fStartX = pos.x + 40.0f;  // 20260320 ZJH 左侧起始位置
-    float fY = pos.y + 18.0f;       // 20260320 ZJH 圆心 Y
-    float fRadius = 14.0f;          // 20260320 ZJH 圆圈半径
-    float fSpacing = 120.0f;        // 20260320 ZJH 圆圈间距
-    ImFont* pFont = ImGui::GetFont();
+static void drawStepIndicator(int nActiveStep, bool bStep0Done, bool bStep1Done, bool bTrainComplete, float fPulseTimer = 0.0f) {
+    ImDrawList* pDraw = ImGui::GetWindowDrawList();  // 20260320 ZJH 获取绘制列表
+    ImVec2 pos = ImGui::GetCursorScreenPos();  // 20260320 ZJH 当前光标屏幕坐标
+    float fStartX = pos.x + 50.0f;   // 20260320 ZJH 左侧起始位置（加大间距）
+    float fY = pos.y + 22.0f;        // 20260320 ZJH 圆心 Y（增大）
+    float fRadius = 18.0f;           // 20260320 ZJH 圆圈半径（从14增大到18）
+    float fSpacing = 130.0f;         // 20260320 ZJH 圆圈间距（增大）
+    ImFont* pFont = ImGui::GetFont();  // 20260320 ZJH 当前字体
 
-    // 20260320 ZJH 步骤标签
-    const char* arrLabels[] = {"\xe6\x95\xb0\xe6\x8d\xae", "\xe9\x85\x8d\xe7\xbd\xae", "\xe8\xae\xad\xe7\xbb\x83", "\xe8\xaf\x84\xe4\xbc\xb0"};  // 数据/配置/训练/评估
+    // 20260320 ZJH 步骤标签（数据/配置/训练/评估）
+    const char* arrLabels[] = {"\xe6\x95\xb0\xe6\x8d\xae", "\xe9\x85\x8d\xe7\xbd\xae", "\xe8\xae\xad\xe7\xbb\x83", "\xe8\xaf\x84\xe4\xbc\xb0"};
     const char* arrNums[] = {"1", "2", "3", "4"};
 
     // 20260320 ZJH 各步骤完成状态
     bool arrDone[4] = {bStep0Done, bStep1Done, bTrainComplete, false};
 
+    // 20260320 ZJH 脉冲动画：当前激活步骤的圆圈呼吸效果
+    float fPulse = 0.5f + 0.5f * std::sin(fPulseTimer * 3.0f);  // 20260320 ZJH 0~1 正弦脉冲
+
     for (int i = 0; i < 4; ++i) {
-        float fCx = fStartX + static_cast<float>(i) * fSpacing;
-        bool bActive = (nActiveStep == i);          // 20260320 ZJH 当前激活
+        float fCx = fStartX + static_cast<float>(i) * fSpacing;  // 20260320 ZJH 当前圆心 X
+        bool bActive = (nActiveStep == i);  // 20260320 ZJH 是否为当前激活步骤
         bool bDone = arrDone[i] && (i < nActiveStep);  // 20260320 ZJH 已完成且非当前步骤
 
-        // 20260320 ZJH 绘制连接线（到下一个圆圈）
+        // 20260320 ZJH 绘制连接线（加粗到3像素）
         if (i < 3) {
-            float fNextCx = fStartX + static_cast<float>(i + 1) * fSpacing;
+            float fNextCx = fStartX + static_cast<float>(i + 1) * fSpacing;  // 20260320 ZJH 下一个圆心
             ImU32 nLineColor = (i < nActiveStep) ? IM_COL32(59, 130, 246, 255) : IM_COL32(80, 85, 100, 255);
-            pDraw->AddLine(ImVec2(fCx + fRadius + 4, fY), ImVec2(fNextCx - fRadius - 4, fY), nLineColor, 2.0f);
+            pDraw->AddLine(ImVec2(fCx + fRadius + 4, fY), ImVec2(fNextCx - fRadius - 4, fY), nLineColor, 3.0f);
         }
 
         // 20260320 ZJH 绘制圆圈
         if (bActive) {
-            // 20260320 ZJH 激活状态：填充蓝色
+            // 20260320 ZJH 激活状态：脉冲光晕 + 填充蓝色
+            int nGlowAlpha = (int)(60.0f * fPulse);  // 20260320 ZJH 光晕透明度随脉冲变化
+            pDraw->AddCircleFilled(ImVec2(fCx, fY), fRadius + 4.0f, IM_COL32(59, 130, 246, nGlowAlpha));
             pDraw->AddCircleFilled(ImVec2(fCx, fY), fRadius, IM_COL32(59, 130, 246, 255));
-            // 20260320 ZJH 白色数字
-            ImVec2 numSize = pFont->CalcTextSizeA(16.0f, FLT_MAX, 0.0f, arrNums[i]);
-            pDraw->AddText(pFont, 16.0f, ImVec2(fCx - numSize.x * 0.5f, fY - numSize.y * 0.5f),
+            // 20260320 ZJH 白色数字居中
+            ImVec2 numSize = pFont->CalcTextSizeA(17.0f, FLT_MAX, 0.0f, arrNums[i]);
+            pDraw->AddText(pFont, 17.0f, ImVec2(fCx - numSize.x * 0.5f, fY - numSize.y * 0.5f),
                           IM_COL32(255, 255, 255, 255), arrNums[i]);
         } else if (bDone) {
-            // 20260320 ZJH 已完成：填充绿色 + 对勾
+            // 20260320 ZJH 已完成步骤：填充绿色 + 对勾符号
             pDraw->AddCircleFilled(ImVec2(fCx, fY), fRadius, IM_COL32(50, 220, 80, 255));
-            ImVec2 chkSize = pFont->CalcTextSizeA(14.0f, FLT_MAX, 0.0f, "OK");
-            pDraw->AddText(pFont, 14.0f, ImVec2(fCx - chkSize.x * 0.5f, fY - chkSize.y * 0.5f),
-                          IM_COL32(255, 255, 255, 255), "OK");
+            // 20260320 ZJH 绘制对勾线条（两段折线模拟 checkmark）
+            float fS = fRadius * 0.4f;  // 20260320 ZJH 对勾缩放因子
+            pDraw->AddLine(ImVec2(fCx - fS, fY), ImVec2(fCx - fS * 0.3f, fY + fS * 0.7f), IM_COL32(255, 255, 255, 255), 2.5f);
+            pDraw->AddLine(ImVec2(fCx - fS * 0.3f, fY + fS * 0.7f), ImVec2(fCx + fS, fY - fS * 0.5f), IM_COL32(255, 255, 255, 255), 2.5f);
         } else {
-            // 20260320 ZJH 未来步骤：灰色轮廓
-            pDraw->AddCircle(ImVec2(fCx, fY), fRadius, IM_COL32(80, 85, 100, 255), 0, 2.0f);
-            ImVec2 numSize = pFont->CalcTextSizeA(16.0f, FLT_MAX, 0.0f, arrNums[i]);
-            pDraw->AddText(pFont, 16.0f, ImVec2(fCx - numSize.x * 0.5f, fY - numSize.y * 0.5f),
+            // 20260320 ZJH 未来步骤：灰色轮廓（加粗）
+            pDraw->AddCircle(ImVec2(fCx, fY), fRadius, IM_COL32(80, 85, 100, 255), 0, 2.5f);
+            ImVec2 numSize = pFont->CalcTextSizeA(17.0f, FLT_MAX, 0.0f, arrNums[i]);
+            pDraw->AddText(pFont, 17.0f, ImVec2(fCx - numSize.x * 0.5f, fY - numSize.y * 0.5f),
                           IM_COL32(100, 105, 120, 255), arrNums[i]);
         }
 
-        // 20260320 ZJH 步骤名称（在圆圈下方）
-        ImVec2 labSize = pFont->CalcTextSizeA(13.0f, FLT_MAX, 0.0f, arrLabels[i]);
+        // 20260320 ZJH 步骤名称（圆圈下方）
+        ImVec2 labSize = pFont->CalcTextSizeA(14.0f, FLT_MAX, 0.0f, arrLabels[i]);
         ImU32 nLabColor = bActive ? IM_COL32(226, 232, 240, 255) : IM_COL32(148, 163, 184, 255);
-        pDraw->AddText(pFont, 13.0f, ImVec2(fCx - labSize.x * 0.5f, fY + fRadius + 4), nLabColor, arrLabels[i]);
+        pDraw->AddText(pFont, 14.0f, ImVec2(fCx - labSize.x * 0.5f, fY + fRadius + 5), nLabColor, arrLabels[i]);
     }
 
-    // 20260320 ZJH 为步骤指示器预留空间
-    ImGui::Dummy(ImVec2(0, 52));
+    // 20260320 ZJH 为步骤指示器预留空间（增大高度）
+    ImGui::Dummy(ImVec2(0, 60));
 }
 
 // ============================================================================
@@ -1077,6 +1159,331 @@ static void anomalyTrainFunc(AppState& state) {
 }
 
 // ============================================================================
+// 20260320 ZJH 绘制主菜单栏（文件/编辑/视图/工具/帮助）
+// ============================================================================
+static void drawMainMenuBar(AppState& state) {
+    if (ImGui::BeginMainMenuBar()) {
+        // 20260320 ZJH 文件菜单
+        if (ImGui::BeginMenu("\xe6\x96\x87\xe4\xbb\xb6")) {
+            if (ImGui::MenuItem("\xe6\x96\xb0\xe5\xbb\xba\xe9\xa1\xb9\xe7\x9b\xae", "Ctrl+N")) {
+                // 20260320 ZJH 重置状态
+                if (!state.trainState.bRunning.load()) {
+                    state.trainState.reset();
+                    state.nActiveStep = 0;
+                }
+            }
+            if (ImGui::MenuItem("\xe6\x89\x93\xe5\xbc\x80\xe9\xa1\xb9\xe7\x9b\xae", "Ctrl+O")) { /* 20260320 ZJH 占位 */ }
+            if (ImGui::MenuItem("\xe4\xbf\x9d\xe5\xad\x98\xe9\xa1\xb9\xe7\x9b\xae", "Ctrl+S")) { /* 20260320 ZJH 占位 */ }
+            if (ImGui::MenuItem("\xe5\x8f\xa6\xe5\xad\x98\xe4\xb8\xba")) { /* 20260320 ZJH 占位 */ }
+            ImGui::Separator();
+            if (ImGui::BeginMenu("\xe6\x9c\x80\xe8\xbf\x91\xe9\xa1\xb9\xe7\x9b\xae")) {
+                ImGui::MenuItem("(\xe6\x97\xa0)", nullptr, false, false);  // 20260320 ZJH 暂无最近项目
+                ImGui::EndMenu();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("\xe5\xaf\xbc\xe5\x87\xba\xe6\xa8\xa1\xe5\x9e\x8b")) { /* 20260320 ZJH 占位 */ }
+            ImGui::Separator();
+            if (ImGui::MenuItem("\xe9\x80\x80\xe5\x87\xba", "Alt+F4")) {
+                SDL_Event quitEv;  // 20260320 ZJH 发送退出事件
+                quitEv.type = SDL_EVENT_QUIT;
+                SDL_PushEvent(&quitEv);
+            }
+            ImGui::EndMenu();
+        }
+        // 20260320 ZJH 编辑菜单
+        if (ImGui::BeginMenu("\xe7\xbc\x96\xe8\xbe\x91")) {
+            if (ImGui::MenuItem("\xe6\x92\xa4\xe9\x94\x80", "Ctrl+Z", false, false)) {}
+            if (ImGui::MenuItem("\xe9\x87\x8d\xe5\x81\x9a", "Ctrl+Y", false, false)) {}
+            ImGui::Separator();
+            if (ImGui::MenuItem("\xe6\xb8\x85\xe9\x99\xa4\xe8\xae\xad\xe7\xbb\x83\xe5\x8e\x86\xe5\x8f\xb2")) {
+                state.vecTrainHistory.clear();  // 20260320 ZJH 清空训练历史
+            }
+            ImGui::EndMenu();
+        }
+        // 20260320 ZJH 视图菜单
+        if (ImGui::BeginMenu("\xe8\xa7\x86\xe5\x9b\xbe")) {
+            ImGui::MenuItem("\xe9\xa1\xb9\xe7\x9b\xae\xe5\xaf\xbc\xe8\x88\xaa", nullptr, &state.bShowNavPanel);
+            ImGui::MenuItem("\xe5\xb1\x9e\xe6\x80\xa7\xe9\x9d\xa2\xe6\x9d\xbf", nullptr, &state.bShowPropsPanel);
+            ImGui::MenuItem("\xe6\x97\xa5\xe5\xbf\x97\xe9\x9d\xa2\xe6\x9d\xbf", nullptr, &state.bShowLogPanel);
+            ImGui::Separator();
+            if (ImGui::MenuItem("\xe9\x87\x8d\xe7\xbd\xae\xe5\xb8\x83\xe5\xb1\x80")) {
+                // 20260320 ZJH 恢复默认面板可见性
+                state.bShowNavPanel = true;
+                state.bShowPropsPanel = true;
+                state.bShowLogPanel = true;
+            }
+            ImGui::EndMenu();
+        }
+        // 20260320 ZJH 工具菜单
+        if (ImGui::BeginMenu("\xe5\xb7\xa5\xe5\x85\xb7")) {
+            if (ImGui::MenuItem("\xe6\x95\xb0\xe6\x8d\xae\xe5\xa2\x9e\xe5\xbc\xba\xe9\xa2\x84\xe8\xa7\x88")) { /* 20260320 ZJH 占位 */ }
+            if (ImGui::MenuItem("\xe6\xa8\xa1\xe5\x9e\x8b\xe6\x9e\xb6\xe6\x9e\x84\xe6\x9f\xa5\xe7\x9c\x8b\xe5\x99\xa8")) {
+                state.bShowModelViewer = !state.bShowModelViewer;  // 20260320 ZJH 切换模型查看器
+            }
+            if (ImGui::MenuItem("GPU \xe4\xbf\xa1\xe6\x81\xaf")) {
+                state.bShowGpuInfo = true;  // 20260320 ZJH 显示 GPU 信息
+            }
+            if (ImGui::MenuItem("\xe6\x89\xb9\xe9\x87\x8f\xe6\x8e\xa8\xe7\x90\x86")) {
+                state.bShowBatchInference = true;  // 20260320 ZJH 显示批量推理
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("\xe8\xae\xbe\xe7\xbd\xae", "Ctrl+,")) {
+                state.bShowSettingsPopup = true;  // 20260320 ZJH 打开设置弹窗
+            }
+            ImGui::EndMenu();
+        }
+        // 20260320 ZJH 帮助菜单
+        if (ImGui::BeginMenu("\xe5\xb8\xae\xe5\x8a\xa9")) {
+            if (ImGui::MenuItem("\xe7\x94\xa8\xe6\x88\xb7\xe6\x89\x8b\xe5\x86\x8c", "F1")) { /* 20260320 ZJH 占位 */ }
+            if (ImGui::MenuItem("\xe5\xbf\xab\xe6\x8d\xb7\xe9\x94\xae\xe5\x8f\x82\xe8\x80\x83")) { /* 20260320 ZJH 占位 */ }
+            ImGui::Separator();
+            if (ImGui::MenuItem("\xe6\xa3\x80\xe6\x9f\xa5\xe6\x9b\xb4\xe6\x96\xb0")) { /* 20260320 ZJH 占位 */ }
+            ImGui::Separator();
+            if (ImGui::MenuItem("\xe5\x85\xb3\xe4\xba\x8e DeepForge")) {
+                state.bShowAboutPopup = true;  // 20260320 ZJH 显示关于弹窗
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndMainMenuBar();
+    }
+}
+
+// ============================================================================
+// 20260320 ZJH 设置弹窗（模态对话框）
+// ============================================================================
+static void drawSettingsDialog(AppState& state) {
+    // 20260320 ZJH 居中弹窗
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_Appearing);
+
+    if (ImGui::BeginPopupModal("\xe8\xae\xbe\xe7\xbd\xae##Modal", nullptr, ImGuiWindowFlags_NoResize)) {
+        auto& s = state.settings;  // 20260320 ZJH 设置状态引用
+
+        if (ImGui::BeginTabBar("##SettingsTabs")) {
+            // 20260320 ZJH 常规选项卡
+            if (ImGui::BeginTabItem("\xe5\xb8\xb8\xe8\xa7\x84")) {
+                ImGui::Spacing();
+                const char* arrLangs[] = {"\xe7\xae\x80\xe4\xbd\x93\xe4\xb8\xad\xe6\x96\x87"};
+                ImGui::Combo("\xe8\xaf\xad\xe8\xa8\x80", &s.nLanguage, arrLangs, 1);
+                ImGui::EndTabItem();
+            }
+            // 20260320 ZJH 外观选项卡
+            if (ImGui::BeginTabItem("\xe5\xa4\x96\xe8\xa7\x82")) {
+                ImGui::Spacing();
+                const char* arrThemes[] = {"\xe6\xb7\xb1\xe8\x89\xb2", "\xe6\xb5\x85\xe8\x89\xb2"};
+                ImGui::Combo("\xe4\xb8\xbb\xe9\xa2\x98", &s.nTheme, arrThemes, 2);
+                ImGui::SliderFloat("\xe5\xad\x97\xe4\xbd\x93\xe5\xa4\xa7\xe5\xb0\x8f", &s.fFontSize, 12.0f, 24.0f, "%.0f");
+                ImGui::EndTabItem();
+            }
+            // 20260320 ZJH 路径选项卡
+            if (ImGui::BeginTabItem("\xe8\xb7\xaf\xe5\xbe\x84")) {
+                ImGui::Spacing();
+                ImGui::InputText("\xe9\xbb\x98\xe8\xae\xa4\xe9\xa1\xb9\xe7\x9b\xae\xe8\xb7\xaf\xe5\xbe\x84", s.arrProjectPath, sizeof(s.arrProjectPath));
+                ImGui::InputText("\xe9\xbb\x98\xe8\xae\xa4\xe6\xa8\xa1\xe5\x9e\x8b\xe8\xb7\xaf\xe5\xbe\x84", s.arrModelPath, sizeof(s.arrModelPath));
+                ImGui::EndTabItem();
+            }
+            // 20260320 ZJH GPU 选项卡
+            if (ImGui::BeginTabItem("GPU")) {
+                ImGui::Spacing();
+                if (state.bGpuDetected && !state.vecGpuDevices.empty()) {
+                    // 20260320 ZJH 构建 GPU 设备名称列表
+                    std::string strDevices;
+                    for (auto& dev : state.vecGpuDevices) strDevices += dev.strName + '\0';
+                    strDevices += '\0';
+                    ImGui::Combo("\xe8\xae\xbe\xe5\xa4\x87", &s.nGpuDevice, strDevices.c_str());
+                    ImGui::SliderInt("\xe6\x98\xbe\xe5\xad\x98\xe9\x99\x90\xe5\x88\xb6 (MB)", &s.nVramLimitMB, 0, 16384);
+                    if (s.nVramLimitMB == 0) ImGui::TextDisabled("\xe6\x97\xa0\xe9\x99\x90\xe5\x88\xb6");
+                } else {
+                    ImGui::TextDisabled("\xe6\x9c\xaa\xe6\xa3\x80\xe6\xb5\x8b\xe5\x88\xb0 GPU");
+                }
+                ImGui::EndTabItem();
+            }
+            // 20260320 ZJH 高级选项卡
+            if (ImGui::BeginTabItem("\xe9\xab\x98\xe7\xba\xa7")) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("\xe6\x9a\x82\xe6\x97\xa0\xe9\xab\x98\xe7\xba\xa7\xe8\xae\xbe\xe7\xbd\xae");
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // 20260320 ZJH 底部按钮
+        float fBtnW = 80.0f;  // 20260320 ZJH 按钮宽度
+        ImGui::SetCursorPosX(ImGui::GetContentRegionAvail().x - fBtnW * 3 - 16);
+        if (ImGui::Button("\xe6\x81\xa2\xe5\xa4\x8d\xe9\xbb\x98\xe8\xae\xa4", ImVec2(fBtnW, 0))) {
+            s = SettingsState{};  // 20260320 ZJH 重置为默认值
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("\xe5\x8f\x96\xe6\xb6\x88", ImVec2(fBtnW, 0))) {
+            ImGui::CloseCurrentPopup();  // 20260320 ZJH 关闭弹窗
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("\xe7\xa1\xae\xe5\xae\x9a", ImVec2(fBtnW, 0))) {
+            ImGui::CloseCurrentPopup();  // 20260320 ZJH 保存并关闭
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// ============================================================================
+// 20260320 ZJH 关于弹窗
+// ============================================================================
+static void drawAboutDialog(AppState& state) {
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_Appearing);
+
+    if (ImGui::BeginPopupModal("\xe5\x85\xb3\xe4\xba\x8e DeepForge##About", nullptr, ImGuiWindowFlags_NoResize)) {
+        // 20260320 ZJH Logo 文字
+        ImGui::PushStyleColor(ImGuiCol_Text, s_colAccent);
+        ImGui::SetWindowFontScale(1.8f);
+        float fTextW = ImGui::CalcTextSize("DeepForge").x;  // 20260320 ZJH 计算文本宽度
+        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - fTextW) * 0.5f);
+        ImGui::Text("DeepForge");
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::PopStyleColor();
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // 20260320 ZJH 版本信息
+        ImGui::Text("\xe7\x89\x88\xe6\x9c\xac: v0.1.0");
+        ImGui::Spacing();
+        // 20260320 ZJH 技术栈
+        ImGui::Text("\xe6\x8a\x80\xe6\x9c\xaf\xe6\xa0\x88:");
+        ImGui::BulletText("C++23 Modules");
+        ImGui::BulletText("SDL3 + Dear ImGui + ImPlot");
+        ImGui::BulletText("\xe8\x87\xaa\xe7\xa0\x94\xe6\xb7\xb1\xe5\xba\xa6\xe5\xad\xa6\xe4\xb9\xa0\xe5\xbc\x95\xe6\x93\x8e (df.engine)");
+        ImGui::Spacing();
+        // 20260320 ZJH 版权
+        ImGui::TextDisabled("\xc2\xa9 2026 ZJH. All rights reserved.");
+
+        ImGui::Spacing();
+        float fBtnW2 = 80.0f;  // 20260320 ZJH 按钮宽度
+        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - fBtnW2) * 0.5f);
+        if (ImGui::Button("\xe7\xa1\xae\xe5\xae\x9a", ImVec2(fBtnW2, 0))) {
+            ImGui::CloseCurrentPopup();  // 20260320 ZJH 关闭关于弹窗
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// ============================================================================
+// 20260320 ZJH 批量推理弹窗
+// ============================================================================
+static void drawBatchInferenceDialog(AppState& state) {
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(600, 450), ImGuiCond_Appearing);
+
+    if (ImGui::BeginPopupModal("\xe6\x89\xb9\xe9\x87\x8f\xe6\x8e\xa8\xe7\x90\x86##BatchInf", nullptr, ImGuiWindowFlags_None)) {
+        auto& bi = state.batchInference;  // 20260320 ZJH 批量推理状态引用
+
+        // 20260320 ZJH 输入区域
+        ImGui::InputText("\xe6\xa8\xa1\xe5\x9e\x8b\xe8\xb7\xaf\xe5\xbe\x84", bi.arrModelPath, sizeof(bi.arrModelPath));
+        ImGui::InputText("\xe5\x9b\xbe\xe7\x89\x87\xe6\x96\x87\xe4\xbb\xb6\xe5\xa4\xb9", bi.arrImageFolder, sizeof(bi.arrImageFolder));
+
+        ImGui::Spacing();
+        // 20260320 ZJH 开始推理按钮
+        if (!bi.bRunning) {
+            if (ImGui::Button("\xe5\xbc\x80\xe5\xa7\x8b\xe6\x8e\xa8\xe7\x90\x86", ImVec2(120, 30))) {
+                // 20260320 ZJH 模拟推理结果
+                bi.vecResults.clear();
+                bi.vecResults.push_back({"sample_001.png", "\xe7\xb1\xbb\xe5\x88\xab_0", 0.95f});
+                bi.vecResults.push_back({"sample_002.png", "\xe7\xb1\xbb\xe5\x88\xab_3", 0.87f});
+                bi.vecResults.push_back({"sample_003.png", "\xe7\xb1\xbb\xe5\x88\xab_7", 0.92f});
+            }
+        }
+
+        ImGui::Spacing();
+
+        // 20260320 ZJH 结果表格
+        if (!bi.vecResults.empty()) {
+            if (ImGui::BeginTable("##InfResults", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, 250))) {
+                ImGui::TableSetupColumn("\xe6\x96\x87\xe4\xbb\xb6\xe5\x90\x8d");
+                ImGui::TableSetupColumn("\xe9\xa2\x84\xe6\xb5\x8b\xe7\xb1\xbb\xe5\x88\xab");
+                ImGui::TableSetupColumn("\xe7\xbd\xae\xe4\xbf\xa1\xe5\xba\xa6");
+                ImGui::TableHeadersRow();
+                for (auto& r : bi.vecResults) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0); ImGui::Text("%s", r.strFilename.c_str());
+                    ImGui::TableSetColumnIndex(1); ImGui::Text("%s", r.strClass.c_str());
+                    ImGui::TableSetColumnIndex(2); ImGui::Text("%.2f%%", (double)(r.fConfidence * 100.0f));
+                }
+                ImGui::EndTable();
+            }
+            // 20260320 ZJH 导出 CSV 按钮
+            if (ImGui::Button("\xe5\xaf\xbc\xe5\x87\xba CSV")) { /* 20260320 ZJH 占位 */ }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        // 20260320 ZJH 关闭按钮居右
+        ImGui::SetCursorPosX(ImGui::GetContentRegionAvail().x - 80);
+        if (ImGui::Button("\xe5\x85\xb3\xe9\x97\xad", ImVec2(80, 0))) {
+            ImGui::CloseCurrentPopup();  // 20260320 ZJH 关闭批量推理
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// ============================================================================
+// 20260320 ZJH 键盘快捷键处理
+// ============================================================================
+static void handleKeyboardShortcuts(AppState& state, SDL_Window* pWindow) {
+    ImGuiIO& io = ImGui::GetIO();  // 20260320 ZJH 获取 IO 状态
+    // 20260320 ZJH 仅在没有输入框激活时处理快捷键
+    if (io.WantTextInput) return;
+
+    bool bCtrl = io.KeyCtrl;  // 20260320 ZJH Ctrl 键是否按下
+
+    // 20260320 ZJH Ctrl+N: 新建项目
+    if (bCtrl && ImGui::IsKeyPressed(ImGuiKey_N)) {
+        if (!state.trainState.bRunning.load()) {
+            state.trainState.reset();
+            state.nActiveStep = 0;
+        }
+    }
+    // 20260320 ZJH Ctrl+S: 保存项目（占位）
+    if (bCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) { /* 20260320 ZJH 占位 */ }
+    // 20260320 ZJH F5: 开始训练
+    if (ImGui::IsKeyPressed(ImGuiKey_F5) && !state.trainState.bRunning.load()) {
+        state.nActiveStep = 2;  // 20260320 ZJH 跳到训练步骤
+        startTraining(state);
+    }
+    // 20260320 ZJH F6: 暂停/恢复训练
+    if (ImGui::IsKeyPressed(ImGuiKey_F6) && state.trainState.bRunning.load()) {
+        state.trainState.bPaused.store(!state.trainState.bPaused.load());
+    }
+    // 20260320 ZJH F7: 停止训练
+    if (ImGui::IsKeyPressed(ImGuiKey_F7) && state.trainState.bRunning.load()) {
+        state.trainState.bStopRequested.store(true);
+        state.trainState.bPaused.store(false);
+    }
+    // 20260320 ZJH Ctrl+1/2/3/4: 跳到对应步骤
+    if (bCtrl && ImGui::IsKeyPressed(ImGuiKey_1)) state.nActiveStep = 0;
+    if (bCtrl && ImGui::IsKeyPressed(ImGuiKey_2)) state.nActiveStep = 1;
+    if (bCtrl && ImGui::IsKeyPressed(ImGuiKey_3)) state.nActiveStep = 2;
+    if (bCtrl && ImGui::IsKeyPressed(ImGuiKey_4)) state.nActiveStep = 3;
+    // 20260320 ZJH Ctrl+,: 打开设置
+    if (bCtrl && ImGui::IsKeyPressed(ImGuiKey_Comma)) {
+        state.bShowSettingsPopup = true;
+    }
+    // 20260320 ZJH F11: 全屏切换
+    if (ImGui::IsKeyPressed(ImGuiKey_F11)) {
+        state.bFullscreen = !state.bFullscreen;
+        SDL_SetWindowFullscreen(pWindow, state.bFullscreen);
+    }
+}
+
+// ============================================================================
 // 20260320 ZJH 设置 Halcon 风格深色主题
 // ============================================================================
 static void setupImGuiStyle() {
@@ -1283,6 +1690,16 @@ static void drawProjectNav(AppState& state) {
             state.trainState.reset();
         }
 
+        // 20260320 ZJH 右键上下文菜单
+        if (ImGui::BeginPopupContextItem()) {
+            if (ImGui::MenuItem("\xe6\x9f\xa5\xe7\x9c\x8b\xe8\xaf\xa6\xe6\x83\x85")) {
+                state.activeTask = arrTasks[i].type;  // 20260320 ZJH 切换到该任务
+                state.nActiveStep = 0;
+            }
+            if (ImGui::MenuItem("\xe5\x88\xa0\xe9\x99\xa4")) { /* 20260320 ZJH 占位 */ }
+            ImGui::EndPopup();
+        }
+
         if (bOpen) {
             ImGui::TextDisabled("    %s", arrTasks[i].strModel);
             ImGui::TextDisabled("    %s", arrTasks[i].strDataset);
@@ -1401,6 +1818,31 @@ static void drawStepConfig(AppState& state) {
 
     switch (state.activeTask) {
     case TaskType::Classification: {
+        // 20260320 ZJH 超参数预设选择器
+        if (beginCard("\xe8\xae\xad\xe7\xbb\x83\xe9\xa2\x84\xe8\xae\xbe")) {  // "训练预设"
+            const char* arrPresets[] = {"\xe5\xbf\xab\xe9\x80\x9f\xe8\xae\xad\xe7\xbb\x83", "\xe6\xa0\x87\xe5\x87\x86\xe8\xae\xad\xe7\xbb\x83", "\xe7\xb2\xbe\xe7\xa1\xae\xe8\xae\xad\xe7\xbb\x83"};
+            if (ImGui::Combo("\xe9\xa2\x84\xe8\xae\xbe\xe6\x96\xb9\xe6\xa1\x88", &state.nPresetIndex, arrPresets, 3)) {
+                // 20260320 ZJH 根据预设自动设置超参数
+                if (state.nPresetIndex == 0) {
+                    // 20260320 ZJH 快速训练：小轮数、大学习率、大批次
+                    state.nClsEpochs = 5; state.fClsLR = 0.01f; state.nClsBatchSize = 128;
+                } else if (state.nPresetIndex == 1) {
+                    // 20260320 ZJH 标准训练：中等参数
+                    state.nClsEpochs = 20; state.fClsLR = 0.001f; state.nClsBatchSize = 64;
+                } else {
+                    // 20260320 ZJH 精确训练：大轮数、小学习率、小批次、余弦退火
+                    state.nClsEpochs = 50; state.fClsLR = 0.0001f; state.nClsBatchSize = 32;
+                    state.nClsLRSchedule = 1;
+                }
+            }
+            // 20260320 ZJH 显示预设说明
+            const char* arrDesc[] = {
+                "epochs=5, lr=0.01, batch=128",
+                "epochs=20, lr=0.001, batch=64",
+                "epochs=50, lr=0.0001, batch=32, cosine"};
+            ImGui::TextDisabled("%s", arrDesc[state.nPresetIndex]);
+        } endCard();
+
         if (beginCard("\xe6\xa8\xa1\xe5\x9e\x8b\xe6\x9e\xb6\xe6\x9e\x84")) {  // "模型架构"
             ImGui::Text("\xe4\xbb\xbb\xe5\x8a\xa1\xe7\xb1\xbb\xe5\x9e\x8b: \xe5\x9b\xbe\xe5\x83\x8f\xe5\x88\x86\xe7\xb1\xbb");
             const char* m[] = {"MLP (784->128->10)", "ResNet-18 (11.2M \xe5\x8f\x82\xe6\x95\xb0)", "ResNet-34 (21.3M \xe5\x8f\x82\xe6\x95\xb0)"};
@@ -1471,6 +1913,85 @@ static void drawStepConfig(AppState& state) {
         } endCard();
         break;
     }
+    }
+
+    // 20260320 ZJH 高级设置（可折叠）
+    if (ImGui::CollapsingHeader("\xe9\xab\x98\xe7\xba\xa7\xe8\xae\xbe\xe7\xbd\xae")) {
+        ImGui::Indent(10.0f);
+        ImGui::InputFloat("\xe6\x9d\x83\xe9\x87\x8d\xe8\xa1\xb0\xe5\x87\x8f##adv", &state.fClsWeightDecay, 0.0001f, 0.001f, "%.5f");
+        ImGui::InputFloat("Dropout \xe7\x8e\x87", &state.fDropout, 0.05f, 0.1f, "%.2f");
+        if (state.fDropout < 0.0f) state.fDropout = 0.0f;  // 20260320 ZJH 下限
+        if (state.fDropout > 0.9f) state.fDropout = 0.9f;  // 20260320 ZJH 上限
+        ImGui::Spacing();
+        // 20260320 ZJH 早停设置
+        ImGui::Checkbox("\xe5\x90\xaf\xe7\x94\xa8\xe6\x97\xa9\xe5\x81\x9c", &state.bEarlyStop);
+        if (state.bEarlyStop) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(100);
+            ImGui::InputInt("patience", &state.nEarlyStopPatience);
+            if (state.nEarlyStopPatience < 1) state.nEarlyStopPatience = 1;  // 20260320 ZJH 最小值
+        }
+        ImGui::Spacing();
+        // 20260320 ZJH 检查点设置
+        ImGui::Checkbox("\xe6\xaf\x8f\xe8\xbd\xae\xe4\xbf\x9d\xe5\xad\x98\xe6\xa3\x80\xe6\x9f\xa5\xe7\x82\xb9", &state.bSaveEveryEpoch);
+        ImGui::Checkbox("\xe4\xbb\x85\xe4\xbf\x9d\xe5\xad\x98\xe6\x9c\x80\xe4\xbc\x98\xe6\xa8\xa1\xe5\x9e\x8b", &state.bSaveBestOnly);
+        ImGui::Unindent(10.0f);
+        ImGui::Spacing();
+    }
+
+    // 20260320 ZJH 模型架构查看器（可折叠）
+    if (state.bShowModelViewer && ImGui::CollapsingHeader("\xe6\xa8\xa1\xe5\x9e\x8b\xe6\x9e\xb6\xe6\x9e\x84\xe8\xaf\xa6\xe6\x83\x85")) {
+        ImGui::Indent(10.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, s_colSubtle);
+        switch (state.activeTask) {
+        case TaskType::Classification:
+            if (state.nClsModel == 0) {
+                // 20260320 ZJH MLP 层级结构
+                ImGui::Text("Input:  784 (28x28 \xe7\x81\xb0\xe5\xba\xa6)");
+                ImGui::Text("  -> Linear(784, 128)");
+                ImGui::Text("  -> ReLU");
+                ImGui::Text("  -> Linear(128, 10)");
+                ImGui::Text("Output: 10 (\xe7\xb1\xbb\xe5\x88\xab)");
+                ImGui::Text("\xe6\x80\xbb\xe5\x8f\x82\xe6\x95\xb0: ~101K");
+            } else {
+                // 20260320 ZJH ResNet-18 层级结构
+                ImGui::Text("Input:  1x28x28");
+                ImGui::Text("  -> Conv2d(1, 64, 7x7, s=2)");
+                ImGui::Text("  -> BatchNorm -> ReLU -> MaxPool");
+                ImGui::Text("  -> ResBlock x2 (64)");
+                ImGui::Text("  -> ResBlock x2 (128, s=2)");
+                ImGui::Text("  -> ResBlock x2 (256, s=2)");
+                ImGui::Text("  -> ResBlock x2 (512, s=2)");
+                ImGui::Text("  -> AdaptiveAvgPool -> FC(512, 10)");
+                ImGui::Text("Output: 10 (\xe7\xb1\xbb\xe5\x88\xab)");
+                ImGui::Text("\xe6\x80\xbb\xe5\x8f\x82\xe6\x95\xb0: ~11.2M");
+            }
+            break;
+        case TaskType::Detection:
+            ImGui::Text("Input:  3x%dx%d", state.nDetImgSize, state.nDetImgSize);
+            ImGui::Text("  -> Backbone (CSPDarknet-Nano)");
+            ImGui::Text("  -> Neck (PANet)");
+            ImGui::Text("  -> Head (3 scales)");
+            ImGui::Text("Output: %d \xe7\xb1\xbb + bbox", state.nDetClasses);
+            break;
+        case TaskType::Segmentation:
+            ImGui::Text("Input:  1x%dx%d", state.nSegImgSize, state.nSegImgSize);
+            ImGui::Text("  -> Encoder (4x Down)");
+            ImGui::Text("  -> Bottleneck (512)");
+            ImGui::Text("  -> Decoder (4x Up + Skip)");
+            ImGui::Text("Output: %dx%dx%d", state.nSegClasses, state.nSegImgSize, state.nSegImgSize);
+            break;
+        case TaskType::AnomalyDetection:
+            ImGui::Text("Input:  1x28x28");
+            ImGui::Text("  -> Conv(1,32) -> Conv(32,64)");
+            ImGui::Text("  -> FC(%d) [bottleneck]", state.nAeLatentDim);
+            ImGui::Text("  -> Deconv(64,32) -> Deconv(32,1)");
+            ImGui::Text("Output: 1x28x28 (\xe9\x87\x8d\xe5\xbb\xba)");
+            break;
+        }
+        ImGui::PopStyleColor();
+        ImGui::Unindent(10.0f);
+        ImGui::Spacing();
     }
 
     // 20260320 ZJH 通用：数据增强（所有任务共享）
@@ -1621,7 +2142,7 @@ static void drawStepTrain(AppState& state) {
     }
     ImGui::EndChild();
 
-    // 20260320 ZJH 训练日志
+    // 20260320 ZJH 训练日志（带右键菜单）
     if (beginCard("\xe8\xae\xad\xe7\xbb\x83\xe6\x97\xa5\xe5\xbf\x97")) {  // "训练日志"
         ImGui::BeginChild("##LogTxt", ImVec2(0, 120), ImGuiChildFlags_None);
         { std::lock_guard<std::mutex> lk(ts.mutex);
@@ -1629,8 +2150,62 @@ static void drawStepTrain(AppState& state) {
           if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20.0f)
               ImGui::SetScrollHereY(1.0f);
         }
+        // 20260320 ZJH 日志区右键菜单
+        if (ImGui::BeginPopupContextWindow("##LogCtx")) {
+            if (ImGui::MenuItem("\xe5\xa4\x8d\xe5\x88\xb6")) {
+                std::lock_guard<std::mutex> lk(ts.mutex);
+                ImGui::SetClipboardText(ts.strLog.c_str());  // 20260320 ZJH 复制日志到剪贴板
+            }
+            if (ImGui::MenuItem("\xe6\xb8\x85\xe9\x99\xa4")) {
+                std::lock_guard<std::mutex> lk(ts.mutex);
+                ts.strLog.clear();  // 20260320 ZJH 清除日志
+            }
+            if (ImGui::MenuItem("\xe4\xbf\x9d\xe5\xad\x98\xe5\x88\xb0\xe6\x96\x87\xe4\xbb\xb6")) {
+                // 20260320 ZJH 保存日志到文件
+                std::lock_guard<std::mutex> lk(ts.mutex);
+                std::ofstream ofs("training_log.txt");
+                if (ofs.is_open()) ofs << ts.strLog;
+            }
+            ImGui::EndPopup();
+        }
         ImGui::EndChild();
     } endCard();
+
+    // 20260320 ZJH 训练历史面板
+    if (!state.vecTrainHistory.empty()) {
+        if (beginCard("\xe8\xae\xad\xe7\xbb\x83\xe5\x8e\x86\xe5\x8f\xb2")) {  // "训练历史"
+            if (ImGui::BeginTable("##TrainHist", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, 120))) {
+                ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 30);
+                ImGui::TableSetupColumn("\xe6\xa8\xa1\xe5\x9e\x8b");
+                ImGui::TableSetupColumn("\xe5\x87\x86\xe7\xa1\xae\xe7\x8e\x87");
+                ImGui::TableSetupColumn("\xe6\x8d\x9f\xe5\xa4\xb1");
+                ImGui::TableSetupColumn("\xe6\x97\xa5\xe6\x9c\x9f");
+                ImGui::TableHeadersRow();
+                // 20260320 ZJH 查找最佳准确率
+                float fBestAcc = 0.0f;
+                int nBestIdx = -1;
+                for (int i = 0; i < (int)state.vecTrainHistory.size(); ++i) {
+                    if (state.vecTrainHistory[i].fAccuracy > fBestAcc) {
+                        fBestAcc = state.vecTrainHistory[i].fAccuracy;
+                        nBestIdx = i;
+                    }
+                }
+                for (int i = 0; i < (int)state.vecTrainHistory.size(); ++i) {
+                    auto& h = state.vecTrainHistory[i];
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    // 20260320 ZJH 最佳记录用星号标记
+                    if (i == nBestIdx) ImGui::TextColored(s_colOrange, "%s%d", "\xe2\x98\x85", i + 1);
+                    else ImGui::Text("%d", i + 1);
+                    ImGui::TableSetColumnIndex(1); ImGui::Text("%s", h.strModel.c_str());
+                    ImGui::TableSetColumnIndex(2); ImGui::Text("%.2f%%", (double)h.fAccuracy);
+                    ImGui::TableSetColumnIndex(3); ImGui::Text("%.4f", (double)h.fLoss);
+                    ImGui::TableSetColumnIndex(4); ImGui::Text("%s", h.strDate.c_str());
+                }
+                ImGui::EndTable();
+            }
+        } endCard();
+    }
 }
 
 // ============================================================================
@@ -2117,6 +2692,7 @@ int main(int, char**) {
     AppState appState;
     appState.vecGpuDevices = vecGpuResult;
     appState.bGpuDetected = !vecGpuResult.empty();
+    bool bPrevCompleted = false;  // 20260320 ZJH 上一帧训练完成状态（用于检测完成事件）
 
     // ===== 主循环 =====
     bool bRunning = true;
@@ -2143,6 +2719,15 @@ int main(int, char**) {
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
+        // 20260320 ZJH 主菜单栏（在所有窗口之前渲染）
+        drawMainMenuBar(appState);
+
+        // 20260320 ZJH 键盘快捷键处理
+        handleKeyboardShortcuts(appState, pWindow);
+
+        // 20260320 ZJH 更新脉冲动画计时器
+        appState.fStepPulseTimer += io.DeltaTime;
+
         ImGuiViewport* pVP = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(pVP->WorkPos);
         ImGui::SetNextWindowSize(ImVec2(pVP->WorkSize.x, pVP->WorkSize.y - 26.0f));
@@ -2158,43 +2743,72 @@ int main(int, char**) {
         // ============================================================
         drawToolbar(appState);
 
-        // 20260320 ZJH 设置弹窗
+        // 20260320 ZJH 弹窗打开逻辑
         if (appState.bShowSettingsPopup) {
-            ImGui::OpenPopup("\xe8\xae\xbe\xe7\xbd\xae");
+            ImGui::OpenPopup("\xe8\xae\xbe\xe7\xbd\xae##Modal");
             appState.bShowSettingsPopup = false;
         }
-        if (ImGui::BeginPopup("\xe8\xae\xbe\xe7\xbd\xae")) {
-            ImGui::TextColored(s_colAccent, "\xe5\xba\x94\xe7\x94\xa8\xe8\xae\xbe\xe7\xbd\xae");
+        if (appState.bShowAboutPopup) {
+            ImGui::OpenPopup("\xe5\x85\xb3\xe4\xba\x8e DeepForge##About");
+            appState.bShowAboutPopup = false;
+        }
+        if (appState.bShowBatchInference) {
+            ImGui::OpenPopup("\xe6\x89\xb9\xe9\x87\x8f\xe6\x8e\xa8\xe7\x90\x86##BatchInf");
+            appState.bShowBatchInference = false;
+        }
+
+        // 20260320 ZJH 渲染各弹窗
+        drawSettingsDialog(appState);
+        drawAboutDialog(appState);
+        drawBatchInferenceDialog(appState);
+
+        // 20260320 ZJH GPU 信息弹窗
+        if (appState.bShowGpuInfo) {
+            ImGui::OpenPopup("GPU \xe4\xbf\xa1\xe6\x81\xaf##GpuDlg");
+            appState.bShowGpuInfo = false;
+        }
+        if (ImGui::BeginPopup("GPU \xe4\xbf\xa1\xe6\x81\xaf##GpuDlg")) {
+            ImGui::TextColored(s_colAccent, "GPU \xe8\xae\xbe\xe5\xa4\x87\xe4\xbf\xa1\xe6\x81\xaf");
             ImGui::Separator();
-            ImGui::TextDisabled("\xe4\xb8\xbb\xe9\xa2\x98: Halcon \xe6\xb7\xb1\xe8\x89\xb2");
-            ImGui::TextDisabled("\xe8\xaf\xad\xe8\xa8\x80: \xe7\xae\x80\xe4\xbd\x93\xe4\xb8\xad\xe6\x96\x87");
+            if (appState.bGpuDetected && !appState.vecGpuDevices.empty()) {
+                for (size_t gi = 0; gi < appState.vecGpuDevices.size(); ++gi) {
+                    auto& gpu = appState.vecGpuDevices[gi];
+                    ImGui::Text("GPU %zu: %s", gi, gpu.strName.c_str());
+                    ImGui::Text("  \xe6\x98\xbe\xe5\xad\x98: %zu MB", gpu.nTotalMemoryMB);
+                    ImGui::Text("  \xe7\xae\x97\xe5\x8a\x9b: %d.%d", gpu.nComputeCapMajor, gpu.nComputeCapMinor);
+                }
+            } else {
+                ImGui::TextDisabled("\xe6\x9c\xaa\xe6\xa3\x80\xe6\xb5\x8b\xe5\x88\xb0 GPU");
+            }
             ImGui::EndPopup();
         }
 
         // ============================================================
-        // 20260320 ZJH 三栏布局
+        // 20260320 ZJH 三栏布局（面板可见性受视图菜单控制）
         // ============================================================
-        float fSideW = 180.0f;
-        float fPropW = 200.0f;
+        float fSideW = appState.bShowNavPanel ? 180.0f : 0.0f;   // 20260320 ZJH 左侧面板宽度
+        float fPropW = appState.bShowPropsPanel ? 200.0f : 0.0f;  // 20260320 ZJH 右侧面板宽度
         float fContentH = ImGui::GetContentRegionAvail().y;
 
-        // 20260320 ZJH 左侧项目导航
-        ImGui::BeginChild("##Nav", ImVec2(fSideW, fContentH), ImGuiChildFlags_Borders);
-        drawProjectNav(appState);
-        ImGui::EndChild();
-
-        ImGui::SameLine();
+        // 20260320 ZJH 左侧项目导航（可隐藏）
+        if (appState.bShowNavPanel) {
+            ImGui::BeginChild("##Nav", ImVec2(fSideW, fContentH), ImGuiChildFlags_Borders);
+            drawProjectNav(appState);
+            ImGui::EndChild();
+            ImGui::SameLine();
+        }
 
         // 20260320 ZJH 中间主内容区
-        float fMainW = ImGui::GetContentRegionAvail().x - fPropW - 4;
+        float fMainW = ImGui::GetContentRegionAvail().x - (appState.bShowPropsPanel ? fPropW + 4 : 0);
         ImGui::BeginChild("##Center", ImVec2(fMainW, fContentH), ImGuiChildFlags_Borders);
         {
-            // 20260320 ZJH Halcon 风格步骤指示器
+            // 20260320 ZJH Halcon 风格步骤指示器（带脉冲动画）
             ImGui::Spacing();
             drawStepIndicator(appState.nActiveStep,
                 appState.trainState.bStepDataDone,
                 appState.trainState.bStepConfigDone,
-                appState.trainState.bCompleted.load());
+                appState.trainState.bCompleted.load(),
+                appState.fStepPulseTimer);
 
             // 20260320 ZJH 步骤按钮（可点击）
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 5));
@@ -2222,17 +2836,41 @@ int main(int, char**) {
         }
         ImGui::EndChild();
 
-        ImGui::SameLine();
-
-        // 20260320 ZJH 右侧属性面板
-        ImGui::BeginChild("##Props", ImVec2(0, fContentH), ImGuiChildFlags_Borders);
-        drawPropertiesPanel(appState);
-        ImGui::EndChild();
+        // 20260320 ZJH 右侧属性面板（可隐藏）
+        if (appState.bShowPropsPanel) {
+            ImGui::SameLine();
+            ImGui::BeginChild("##Props", ImVec2(0, fContentH), ImGuiChildFlags_Borders);
+            drawPropertiesPanel(appState);
+            ImGui::EndChild();
+        }
 
         ImGui::End();  // ##Main
 
         // 20260320 ZJH 底部状态栏
         drawStatusBar(appState);
+
+        // 20260320 ZJH 训练完成时自动记录训练历史
+        bool bNowCompleted = appState.trainState.bCompleted.load();
+        if (bNowCompleted && !bPrevCompleted) {
+            // 20260320 ZJH 训练刚完成，添加历史记录
+            TrainingHistoryEntry entry;
+            const char* arrTaskModels[] = {"MLP/ResNet", "YOLOv5", "U-Net", "AutoEncoder"};
+            entry.strModel = arrTaskModels[(int)appState.activeTask];
+            entry.fAccuracy = appState.trainState.fTestAcc.load();
+            entry.fLoss = appState.trainState.fBestValLoss;
+            // 20260320 ZJH 获取当前日期作为记录日期
+            auto now = std::chrono::system_clock::now();
+            auto nTime = std::chrono::system_clock::to_time_t(now);
+            struct tm tmLocal;
+            localtime_s(&tmLocal, &nTime);
+            char arrDateBuf[32];
+            std::snprintf(arrDateBuf, sizeof(arrDateBuf), "%04d-%02d-%02d %02d:%02d",
+                tmLocal.tm_year + 1900, tmLocal.tm_mon + 1, tmLocal.tm_mday,
+                tmLocal.tm_hour, tmLocal.tm_min);
+            entry.strDate = arrDateBuf;
+            appState.vecTrainHistory.push_back(entry);
+        }
+        bPrevCompleted = bNowCompleted;
 
         // 20260320 ZJH 渲染
         ImGui::Render();

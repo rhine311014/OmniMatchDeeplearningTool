@@ -2,6 +2,12 @@
 
 ## [2026-03-20]
 
+### 17:30 - Part 1 Halcon 风格 UI 增强（菜单/弹窗/快捷键/预设/历史）
+- **修改文件**: `src/ui/app_main.cpp`
+- **修改类型**: 修改
+- **修改内容**: 在现有 Halcon 风格 UI 基础上新增 11 项功能增强（2263->2901 行）：(1) 完整菜单栏（文件/编辑/视图/工具/帮助，含快捷键标注和子菜单）；(2) 模态设置弹窗（5 个选项卡：常规/外观/路径/GPU/高级，含恢复默认/取消/确定按钮）；(3) 关于弹窗（Logo/版本/技术栈/版权信息）；(4) 键盘快捷键处理（Ctrl+N/S/1234, F5/F6/F7 训练控制, F11 全屏, Ctrl+, 设置）；(5) 超参数预设选择器（快速/标准/精确三档，自动填充 epochs/lr/batch 参数）；(6) 可折叠高级设置区（权重衰减/Dropout/早停+patience/检查点策略）；(7) 训练历史面板（完成训练自动记录，表格显示模型/准确率/损失/日期，最佳记录星号标记）；(8) 批量推理弹窗（模型路径/图片文件夹输入，结果表格，导出 CSV）；(9) 右键上下文菜单（项目树：查看详情/删除；日志区：复制/清除/保存到文件）；(10) 步骤指示器增强（半径 14->18, 线宽 2->3, 完成步骤绘制对勾线条, 激活步骤脉冲光晕动画）；(11) 可折叠模型架构查看器（按任务类型显示逐层结构文本）。新增 3 个结构体（TrainingHistoryEntry/BatchInferenceState/SettingsState）和 5 个函数（drawMainMenuBar/drawSettingsDialog/drawAboutDialog/drawBatchInferenceDialog/handleKeyboardShortcuts）。面板可见性受视图菜单控制。构建验证通过
+- **关联功能**: Phase 4 / Halcon 风格 UI 增强 / Part 1
+
 ### 09:15 - GUI 完全重写为 Halcon MVTec DL Tool 风格，全部 4 种任务可用
 - **修改文件**: `src/ui/app_main.cpp`
 - **修改类型**: 重构
