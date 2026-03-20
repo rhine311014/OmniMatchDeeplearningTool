@@ -2,6 +2,12 @@
 
 ## [2026-03-20]
 
+### 21:30 - 实现全部占位按钮和菜单项功能
+- **修改文件**: `src/ui/app_main.cpp`
+- **修改类型**: 修改
+- **修改内容**: 实现全部 27 项占位/非功能控件：(1) 文件菜单：打开项目(Ctrl+O)通过路径输入弹窗加载JSON项目文件并恢复AppState；保存项目(Ctrl+S)序列化当前状态为JSON；另存为弹出新路径输入；导出模型复制.dfm文件到指定路径；最近项目列表支持点击加载(最多5条)；(2) 编辑菜单：撤销/重做添加"暂不支持"tooltip；清除训练历史同时清空日志和图表数据；(3) 工具菜单：数据增强预览弹窗含5种增强类型复选框+效果描述文本；(4) 帮助菜单：用户手册弹窗含快速参考指南(步骤说明/任务类型/快捷操作)；快捷键参考弹窗含11组快捷键表格；检查更新弹窗显示"当前已是最新版本 v0.1.0"；(5) 工具栏：新建项目清除项目路径；打开/保存按钮与菜单一致；(6) 设置对话框：恢复默认重置SettingsState；确定按钮保存设置到config/settings.json并应用主题变更；(7) 批量推理：实现真实推理流程(加载.dfm模型→stb_image读取图片→28x28缩放→归一化→模型forward→softmax→argmax)；导出CSV写入filename/predicted_class/confidence；(8) 项目导航右键删除：确认弹窗→清除训练状态→移除训练历史记录；(9) Step4导出.dfm按钮显示已保存路径或弹出导出弹窗；导出ONNX按钮添加tooltip；(10) 训练日志：保存到文件使用时间戳命名存入data/logs/；(11) 数据集导入：扫描文件夹统计子目录(类别)和图片数量(.png/.jpg/.bmp)；(12) 键盘快捷键：新增Ctrl+O打开和F1用户手册。新增5个辅助函数(saveProject/loadProject/exportModelToPath/runBatchInference/scanImportFolder)和jsonGetValue JSON解析辅助函数。新增AppState字段(strProjectPath/vecRecentProjects/文件对话框状态/弹窗控制/数据集导入状态)。构建验证通过
+- **关联功能**: Phase 4 / 全部占位功能实现
+
 ### 17:30 - Part 1 Halcon 风格 UI 增强（菜单/弹窗/快捷键/预设/历史）
 - **修改文件**: `src/ui/app_main.cpp`
 - **修改类型**: 修改

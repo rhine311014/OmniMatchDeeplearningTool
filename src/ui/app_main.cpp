@@ -454,6 +454,29 @@ struct AppState {
 
     // 20260320 ZJH 步骤指示器动画
     float fStepPulseTimer = 0.0f;             // 20260320 ZJH 脉冲动画计时器
+
+    // 20260320 ZJH 项目文件路径
+    std::string strProjectPath;               // 20260320 ZJH 当前项目 .json 文件路径
+    std::vector<std::string> vecRecentProjects;  // 20260320 ZJH 最近打开的项目列表
+
+    // 20260320 ZJH 文件对话框状态（用于路径输入弹窗）
+    bool bShowFileDialog = false;             // 20260320 ZJH 是否显示文件路径输入弹窗
+    char arrFileDialogPath[512] = "";         // 20260320 ZJH 文件路径输入缓冲区
+    int nFileDialogPurpose = 0;               // 20260320 ZJH 0=打开项目, 1=保存项目, 2=另存为, 3=导出模型, 4=导出CSV
+
+    // 20260320 ZJH 信息弹窗控制
+    bool bShowUserManual = false;             // 20260320 ZJH 是否显示用户手册弹窗
+    bool bShowShortcuts = false;              // 20260320 ZJH 是否显示快捷键参考弹窗
+    bool bShowUpdateCheck = false;            // 20260320 ZJH 是否显示检查更新弹窗
+    bool bShowAugPreview = false;             // 20260320 ZJH 是否显示数据增强预览弹窗
+    bool bShowDeleteConfirm = false;          // 20260320 ZJH 是否显示删除确认弹窗
+    int nDeleteTargetTask = -1;               // 20260320 ZJH 待删除的任务索引
+
+    // 20260320 ZJH 自定义数据集导入
+    char arrImportPath[512] = "";             // 20260320 ZJH 导入的数据集文件夹路径
+    int nImportImageCount = 0;                // 20260320 ZJH 导入的图片数量
+    std::vector<std::string> vecImportClasses; // 20260320 ZJH 导入的类别名称列表
+    bool bImportScanned = false;              // 20260320 ZJH 是否已扫描导入文件夹
 };
 
 // ============================================================================
@@ -468,6 +491,11 @@ static void drawSettingsDialog(AppState& state);
 static void drawAboutDialog(AppState& state);
 static void drawBatchInferenceDialog(AppState& state);
 static void handleKeyboardShortcuts(AppState& state, SDL_Window* pWindow);
+static void saveProject(AppState& state, const std::string& strPath);
+static void loadProject(AppState& state, const std::string& strPath);
+static void exportModelToPath(AppState& state, const std::string& strPath);
+static void runBatchInference(AppState& state);
+static void scanImportFolder(AppState& state, const std::string& strFolder);
 
 // ============================================================================
 // 20260320 ZJH Halcon 风格颜色常量定义
@@ -1159,6 +1187,431 @@ static void anomalyTrainFunc(AppState& state) {
 }
 
 // ============================================================================
+// 20260320 ZJH 保存项目到 JSON 文件
+// 参数: state - 应用状态, strPath - 保存文件路径
+// ============================================================================
+static void saveProject(AppState& state, const std::string& strPath) {
+    try {
+        // 20260320 ZJH 确保目录存在
+        std::filesystem::path p(strPath);
+        if (p.has_parent_path()) {
+            std::filesystem::create_directories(p.parent_path());
+        }
+
+        std::ofstream ofs(strPath);  // 20260320 ZJH 打开文件写入
+        if (!ofs.is_open()) {
+            state.trainState.appendLog("保存失败: 无法打开文件 " + strPath);
+            return;
+        }
+
+        // 20260320 ZJH 手动构建 JSON 字符串
+        ofs << "{\n";
+        ofs << "  \"version\": \"0.1.0\",\n";
+        ofs << "  \"task_type\": " << (int)state.activeTask << ",\n";
+        ofs << "  \"model_index\": " << state.nClsModel << ",\n";
+        ofs << "  \"epochs\": " << state.nClsEpochs << ",\n";
+        ofs << "  \"batch_size\": " << state.nClsBatchSize << ",\n";
+        ofs << "  \"learning_rate\": " << state.fClsLR << ",\n";
+        ofs << "  \"weight_decay\": " << state.fClsWeightDecay << ",\n";
+        ofs << "  \"optimizer\": " << state.nClsOptimizer << ",\n";
+        ofs << "  \"lr_schedule\": " << state.nClsLRSchedule << ",\n";
+        ofs << "  \"preset\": " << state.nPresetIndex << ",\n";
+        ofs << "  \"warmup\": " << state.nClsWarmup << ",\n";
+        ofs << "  \"dataset\": " << state.nClsDataset << ",\n";
+        // 20260320 ZJH 检测参数
+        ofs << "  \"det_epochs\": " << state.nDetEpochs << ",\n";
+        ofs << "  \"det_batch_size\": " << state.nDetBatchSize << ",\n";
+        ofs << "  \"det_lr\": " << state.fDetLR << ",\n";
+        ofs << "  \"det_classes\": " << state.nDetClasses << ",\n";
+        ofs << "  \"det_img_size\": " << state.nDetImgSize << ",\n";
+        // 20260320 ZJH 分割参数
+        ofs << "  \"seg_epochs\": " << state.nSegEpochs << ",\n";
+        ofs << "  \"seg_batch_size\": " << state.nSegBatchSize << ",\n";
+        ofs << "  \"seg_lr\": " << state.fSegLR << ",\n";
+        ofs << "  \"seg_classes\": " << state.nSegClasses << ",\n";
+        ofs << "  \"seg_img_size\": " << state.nSegImgSize << ",\n";
+        // 20260320 ZJH 异常检测参数
+        ofs << "  \"ae_epochs\": " << state.nAeEpochs << ",\n";
+        ofs << "  \"ae_batch_size\": " << state.nAeBatchSize << ",\n";
+        ofs << "  \"ae_lr\": " << state.fAeLR << ",\n";
+        ofs << "  \"ae_latent_dim\": " << state.nAeLatentDim << ",\n";
+        ofs << "  \"ae_threshold\": " << state.fAeThreshold << ",\n";
+        // 20260320 ZJH 数据增强设置
+        ofs << "  \"augmentation\": {\n";
+        ofs << "    \"flip\": " << (state.bAugFlip ? "true" : "false") << ",\n";
+        ofs << "    \"rotate\": " << (state.bAugRotate ? "true" : "false") << ",\n";
+        ofs << "    \"color_jitter\": " << (state.bAugColorJitter ? "true" : "false") << ",\n";
+        ofs << "    \"crop\": " << (state.bAugCrop ? "true" : "false") << ",\n";
+        ofs << "    \"noise\": " << (state.bAugNoise ? "true" : "false") << "\n";
+        ofs << "  },\n";
+        // 20260320 ZJH 数据分割比例
+        ofs << "  \"data_split\": {\n";
+        ofs << "    \"train\": " << (int)(state.fTrainSplit * 100) << ",\n";
+        ofs << "    \"val\": " << (int)(state.fValSplit * 100) << ",\n";
+        ofs << "    \"test\": " << (int)(state.fTestSplit * 100) << "\n";
+        ofs << "  },\n";
+        // 20260320 ZJH 高级设置
+        ofs << "  \"dropout\": " << state.fDropout << ",\n";
+        ofs << "  \"early_stop\": " << (state.bEarlyStop ? "true" : "false") << ",\n";
+        ofs << "  \"early_stop_patience\": " << state.nEarlyStopPatience << ",\n";
+        // 20260320 ZJH 训练历史
+        ofs << "  \"training_history\": [\n";
+        for (size_t i = 0; i < state.vecTrainHistory.size(); ++i) {
+            auto& h = state.vecTrainHistory[i];
+            ofs << "    {\"model\": \"" << h.strModel << "\", \"accuracy\": " << h.fAccuracy
+                << ", \"loss\": " << h.fLoss << ", \"timestamp\": \"" << h.strDate << "\"}";
+            if (i + 1 < state.vecTrainHistory.size()) ofs << ",";
+            ofs << "\n";
+        }
+        ofs << "  ]\n";
+        ofs << "}\n";
+        ofs.close();
+
+        // 20260320 ZJH 保存成功，更新项目路径
+        state.strProjectPath = strPath;
+        state.trainState.appendLog("项目已保存: " + strPath);
+
+        // 20260320 ZJH 添加到最近项目列表（去重）
+        auto it = std::find(state.vecRecentProjects.begin(), state.vecRecentProjects.end(), strPath);
+        if (it != state.vecRecentProjects.end()) state.vecRecentProjects.erase(it);
+        state.vecRecentProjects.insert(state.vecRecentProjects.begin(), strPath);
+        if (state.vecRecentProjects.size() > 5) state.vecRecentProjects.resize(5);  // 20260320 ZJH 最多保留5个
+    } catch (const std::exception& e) {
+        state.trainState.appendLog(std::string("保存失败: ") + e.what());
+    }
+}
+
+// ============================================================================
+// 20260320 ZJH 简单 JSON 值提取辅助函数（不依赖第三方 JSON 库）
+// 从 JSON 字符串中提取指定 key 对应的 value 子串
+// ============================================================================
+static std::string jsonGetValue(const std::string& strJson, const std::string& strKey) {
+    std::string strSearch = "\"" + strKey + "\"";  // 20260320 ZJH 构造 "key" 搜索串
+    size_t pos = strJson.find(strSearch);
+    if (pos == std::string::npos) return "";
+    pos = strJson.find(':', pos + strSearch.size());  // 20260320 ZJH 找到冒号
+    if (pos == std::string::npos) return "";
+    pos++;  // 20260320 ZJH 跳过冒号
+    // 20260320 ZJH 跳过空白
+    while (pos < strJson.size() && (strJson[pos] == ' ' || strJson[pos] == '\t' || strJson[pos] == '\n' || strJson[pos] == '\r')) pos++;
+    if (pos >= strJson.size()) return "";
+    // 20260320 ZJH 如果是字符串值
+    if (strJson[pos] == '"') {
+        size_t end = strJson.find('"', pos + 1);
+        if (end == std::string::npos) return "";
+        return strJson.substr(pos + 1, end - pos - 1);
+    }
+    // 20260320 ZJH 如果是数值或布尔值
+    size_t end = strJson.find_first_of(",}\n\r", pos);
+    if (end == std::string::npos) end = strJson.size();
+    std::string val = strJson.substr(pos, end - pos);
+    // 20260320 ZJH 去除尾部空白
+    while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.pop_back();
+    return val;
+}
+
+// ============================================================================
+// 20260320 ZJH 从 JSON 文件加载项目状态
+// 参数: state - 应用状态, strPath - 加载文件路径
+// ============================================================================
+static void loadProject(AppState& state, const std::string& strPath) {
+    try {
+        std::ifstream ifs(strPath);  // 20260320 ZJH 打开 JSON 文件
+        if (!ifs.is_open()) {
+            state.trainState.appendLog("打开失败: 无法读取文件 " + strPath);
+            return;
+        }
+        // 20260320 ZJH 读取整个文件内容
+        std::string strJson((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        ifs.close();
+
+        // 20260320 ZJH 解析各字段
+        std::string v;
+        v = jsonGetValue(strJson, "task_type");
+        if (!v.empty()) state.activeTask = static_cast<TaskType>(std::stoi(v));
+
+        v = jsonGetValue(strJson, "model_index");
+        if (!v.empty()) state.nClsModel = std::stoi(v);
+
+        v = jsonGetValue(strJson, "epochs");
+        if (!v.empty()) state.nClsEpochs = std::stoi(v);
+
+        v = jsonGetValue(strJson, "batch_size");
+        if (!v.empty()) state.nClsBatchSize = std::stoi(v);
+
+        v = jsonGetValue(strJson, "learning_rate");
+        if (!v.empty()) state.fClsLR = std::stof(v);
+
+        v = jsonGetValue(strJson, "weight_decay");
+        if (!v.empty()) state.fClsWeightDecay = std::stof(v);
+
+        v = jsonGetValue(strJson, "optimizer");
+        if (!v.empty()) state.nClsOptimizer = std::stoi(v);
+
+        v = jsonGetValue(strJson, "lr_schedule");
+        if (!v.empty()) state.nClsLRSchedule = std::stoi(v);
+
+        v = jsonGetValue(strJson, "preset");
+        if (!v.empty()) state.nPresetIndex = std::stoi(v);
+
+        v = jsonGetValue(strJson, "warmup");
+        if (!v.empty()) state.nClsWarmup = std::stoi(v);
+
+        v = jsonGetValue(strJson, "dataset");
+        if (!v.empty()) state.nClsDataset = std::stoi(v);
+
+        // 20260320 ZJH 检测参数
+        v = jsonGetValue(strJson, "det_epochs");
+        if (!v.empty()) state.nDetEpochs = std::stoi(v);
+        v = jsonGetValue(strJson, "det_batch_size");
+        if (!v.empty()) state.nDetBatchSize = std::stoi(v);
+        v = jsonGetValue(strJson, "det_lr");
+        if (!v.empty()) state.fDetLR = std::stof(v);
+        v = jsonGetValue(strJson, "det_classes");
+        if (!v.empty()) state.nDetClasses = std::stoi(v);
+        v = jsonGetValue(strJson, "det_img_size");
+        if (!v.empty()) state.nDetImgSize = std::stoi(v);
+
+        // 20260320 ZJH 分割参数
+        v = jsonGetValue(strJson, "seg_epochs");
+        if (!v.empty()) state.nSegEpochs = std::stoi(v);
+        v = jsonGetValue(strJson, "seg_batch_size");
+        if (!v.empty()) state.nSegBatchSize = std::stoi(v);
+        v = jsonGetValue(strJson, "seg_lr");
+        if (!v.empty()) state.fSegLR = std::stof(v);
+        v = jsonGetValue(strJson, "seg_classes");
+        if (!v.empty()) state.nSegClasses = std::stoi(v);
+        v = jsonGetValue(strJson, "seg_img_size");
+        if (!v.empty()) state.nSegImgSize = std::stoi(v);
+
+        // 20260320 ZJH 异常检测参数
+        v = jsonGetValue(strJson, "ae_epochs");
+        if (!v.empty()) state.nAeEpochs = std::stoi(v);
+        v = jsonGetValue(strJson, "ae_batch_size");
+        if (!v.empty()) state.nAeBatchSize = std::stoi(v);
+        v = jsonGetValue(strJson, "ae_lr");
+        if (!v.empty()) state.fAeLR = std::stof(v);
+        v = jsonGetValue(strJson, "ae_latent_dim");
+        if (!v.empty()) state.nAeLatentDim = std::stoi(v);
+        v = jsonGetValue(strJson, "ae_threshold");
+        if (!v.empty()) state.fAeThreshold = std::stof(v);
+
+        // 20260320 ZJH 数据增强
+        v = jsonGetValue(strJson, "flip");
+        if (!v.empty()) state.bAugFlip = (v == "true");
+        v = jsonGetValue(strJson, "rotate");
+        if (!v.empty()) state.bAugRotate = (v == "true");
+        v = jsonGetValue(strJson, "color_jitter");
+        if (!v.empty()) state.bAugColorJitter = (v == "true");
+        v = jsonGetValue(strJson, "crop");
+        if (!v.empty()) state.bAugCrop = (v == "true");
+        v = jsonGetValue(strJson, "noise");
+        if (!v.empty()) state.bAugNoise = (v == "true");
+
+        // 20260320 ZJH 数据分割
+        v = jsonGetValue(strJson, "train");
+        if (!v.empty()) state.fTrainSplit = std::stof(v) / 100.0f;
+        v = jsonGetValue(strJson, "val");
+        if (!v.empty()) state.fValSplit = std::stof(v) / 100.0f;
+        v = jsonGetValue(strJson, "test");
+        if (!v.empty()) state.fTestSplit = std::stof(v) / 100.0f;
+
+        // 20260320 ZJH 高级设置
+        v = jsonGetValue(strJson, "dropout");
+        if (!v.empty()) state.fDropout = std::stof(v);
+        v = jsonGetValue(strJson, "early_stop");
+        if (!v.empty()) state.bEarlyStop = (v == "true");
+        v = jsonGetValue(strJson, "early_stop_patience");
+        if (!v.empty()) state.nEarlyStopPatience = std::stoi(v);
+
+        // 20260320 ZJH 更新项目路径
+        state.strProjectPath = strPath;
+        state.nActiveStep = 0;
+        state.trainState.appendLog("项目已加载: " + strPath);
+
+        // 20260320 ZJH 添加到最近项目列表
+        auto it = std::find(state.vecRecentProjects.begin(), state.vecRecentProjects.end(), strPath);
+        if (it != state.vecRecentProjects.end()) state.vecRecentProjects.erase(it);
+        state.vecRecentProjects.insert(state.vecRecentProjects.begin(), strPath);
+        if (state.vecRecentProjects.size() > 5) state.vecRecentProjects.resize(5);
+    } catch (const std::exception& e) {
+        state.trainState.appendLog(std::string("加载失败: ") + e.what());
+    }
+}
+
+// ============================================================================
+// 20260320 ZJH 导出训练好的模型到指定路径
+// ============================================================================
+static void exportModelToPath(AppState& state, const std::string& strPath) {
+    auto& ts = state.trainState;
+    std::lock_guard<std::mutex> lk(ts.mutex);
+    if (ts.strSavedModelPath.empty()) {
+        ts.strLog += getTimestamp() + " 导出失败: 没有已训练的模型\n";
+        return;
+    }
+    try {
+        // 20260320 ZJH 确保目标目录存在
+        std::filesystem::path p(strPath);
+        if (p.has_parent_path()) {
+            std::filesystem::create_directories(p.parent_path());
+        }
+        // 20260320 ZJH 复制已保存的模型文件到目标路径
+        std::filesystem::copy_file(ts.strSavedModelPath, strPath, std::filesystem::copy_options::overwrite_existing);
+        ts.strLog += getTimestamp() + " 模型已导出: " + strPath + "\n";
+    } catch (const std::exception& e) {
+        ts.strLog += getTimestamp() + " 导出失败: " + std::string(e.what()) + "\n";
+    }
+}
+
+// ============================================================================
+// 20260320 ZJH 批量推理功能实现
+// 扫描指定文件夹中的图片，用训练好的模型逐一推理
+// ============================================================================
+static void runBatchInference(AppState& state) {
+    auto& bi = state.batchInference;
+    auto& ts = state.trainState;
+    bi.vecResults.clear();
+
+    std::string strModelPath(bi.arrModelPath);  // 20260320 ZJH 模型文件路径
+    std::string strImageFolder(bi.arrImageFolder);  // 20260320 ZJH 图片文件夹路径
+
+    // 20260320 ZJH 检查模型文件是否存在
+    if (strModelPath.empty() || !std::filesystem::exists(strModelPath)) {
+        ts.appendLog("批量推理失败: 模型文件不存在 - " + strModelPath);
+        return;
+    }
+    // 20260320 ZJH 检查图片文件夹是否存在
+    if (strImageFolder.empty() || !std::filesystem::is_directory(strImageFolder)) {
+        ts.appendLog("批量推理失败: 图片文件夹不存在 - " + strImageFolder);
+        return;
+    }
+
+    try {
+        // 20260320 ZJH 构建与加载模型
+        bool bIsResNet = (strModelPath.find("resnet") != std::string::npos);
+        auto pModel = std::make_shared<df::Sequential>();
+        if (bIsResNet) {
+            // 20260320 ZJH 构建 ResNet-18 结构（默认 10 分类）
+            pModel->add(std::make_shared<df::ResNet18>(10));
+        } else {
+            // 20260320 ZJH 构建 MLP 结构
+            pModel->add(std::make_shared<df::Linear>(784, 128));
+            pModel->add(std::make_shared<df::ReLU>());
+            pModel->add(std::make_shared<df::Linear>(128, 10));
+        }
+        // 20260320 ZJH 加载模型权重
+        df::ModelSerializer::load(*pModel, strModelPath);
+        ts.appendLog("模型已加载: " + strModelPath);
+
+        // 20260320 ZJH 扫描文件夹中的图片文件
+        int nProcessed = 0;
+        for (auto& entry : std::filesystem::directory_iterator(strImageFolder)) {
+            if (!entry.is_regular_file()) continue;
+            std::string ext = entry.path().extension().string();
+            // 20260320 ZJH 转小写比较扩展名
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".bmp") continue;
+
+            std::string strFilePath = entry.path().string();
+            std::string strFilename = entry.path().filename().string();
+
+            // 20260320 ZJH 使用 stb_image 加载图像为灰度
+            int nW = 0, nH = 0, nC = 0;
+            unsigned char* pData = stbi_load(strFilePath.c_str(), &nW, &nH, &nC, 1);  // 20260320 ZJH 强制单通道灰度
+            if (!pData) continue;
+
+            // 20260320 ZJH 将图像缩放到 28x28（简单最近邻缩放）
+            std::vector<float> vecPixels(784, 0.0f);
+            for (int y = 0; y < 28; ++y) {
+                for (int x = 0; x < 28; ++x) {
+                    int srcX = x * nW / 28;  // 20260320 ZJH 最近邻映射
+                    int srcY = y * nH / 28;
+                    vecPixels[y * 28 + x] = static_cast<float>(pData[srcY * nW + srcX]) / 255.0f;
+                }
+            }
+            stbi_image_free(pData);  // 20260320 ZJH 释放图像数据
+
+            // 20260320 ZJH 构建输入张量并前向传播
+            df::Tensor input;
+            if (bIsResNet) {
+                input = df::Tensor::fromData(vecPixels.data(), {1, 1, 28, 28});  // 20260320 ZJH ResNet 需要 4D 输入
+            } else {
+                input = df::Tensor::fromData(vecPixels.data(), {1, 784});  // 20260320 ZJH MLP 需要 2D 输入
+            }
+            df::Tensor output = pModel->forward(input);  // 20260320 ZJH 模型前向传播
+
+            // 20260320 ZJH Softmax 并找到最大类别
+            const float* pOut = output.floatDataPtr();
+            int nSize = output.numel();
+            float fMax = -1e30f;
+            int nMaxIdx = 0;
+            float fSum = 0.0f;
+            // 20260320 ZJH 先找最大值用于数值稳定的 softmax
+            for (int i = 0; i < nSize; ++i) {
+                if (pOut[i] > fMax) { fMax = pOut[i]; nMaxIdx = i; }
+            }
+            for (int i = 0; i < nSize; ++i) {
+                fSum += std::exp(pOut[i] - fMax);
+            }
+            float fConfidence = 1.0f / fSum;  // 20260320 ZJH exp(0) / sum = 1/sum 就是最大类别的概率
+
+            // 20260320 ZJH 存储推理结果
+            BatchInferenceState::Result res;
+            res.strFilename = strFilename;
+            res.strClass = std::to_string(nMaxIdx);
+            res.fConfidence = fConfidence;
+            bi.vecResults.push_back(res);
+            nProcessed++;
+        }
+        ts.appendLog("批量推理完成: 处理了 " + std::to_string(nProcessed) + " 张图片");
+    } catch (const std::exception& e) {
+        ts.appendLog(std::string("批量推理失败: ") + e.what());
+    }
+}
+
+// ============================================================================
+// 20260320 ZJH 扫描导入的数据集文件夹
+// 统计子文件夹（类别）和图片数量
+// ============================================================================
+static void scanImportFolder(AppState& state, const std::string& strFolder) {
+    state.vecImportClasses.clear();
+    state.nImportImageCount = 0;
+    state.bImportScanned = false;
+
+    if (strFolder.empty() || !std::filesystem::is_directory(strFolder)) {
+        state.trainState.appendLog("扫描失败: 文件夹不存在 - " + strFolder);
+        return;
+    }
+
+    try {
+        // 20260320 ZJH 遍历子文件夹作为类别
+        for (auto& entry : std::filesystem::directory_iterator(strFolder)) {
+            if (!entry.is_directory()) continue;
+            std::string strClassName = entry.path().filename().string();
+            int nCount = 0;
+            // 20260320 ZJH 统计该子文件夹中的图片文件数量
+            for (auto& img : std::filesystem::directory_iterator(entry.path())) {
+                if (!img.is_regular_file()) continue;
+                std::string ext = img.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp") {
+                    nCount++;
+                }
+            }
+            if (nCount > 0) {
+                state.vecImportClasses.push_back(strClassName + " (" + std::to_string(nCount) + ")");
+                state.nImportImageCount += nCount;
+            }
+        }
+        state.bImportScanned = true;
+        state.trainState.appendLog("数据集扫描完成: " + std::to_string(state.nImportImageCount) +
+            " 张图片, " + std::to_string(state.vecImportClasses.size()) + " 个类别");
+    } catch (const std::exception& e) {
+        state.trainState.appendLog(std::string("扫描失败: ") + e.what());
+    }
+}
+
+// ============================================================================
 // 20260320 ZJH 绘制主菜单栏（文件/编辑/视图/工具/帮助）
 // ============================================================================
 static void drawMainMenuBar(AppState& state) {
@@ -1166,22 +1619,55 @@ static void drawMainMenuBar(AppState& state) {
         // 20260320 ZJH 文件菜单
         if (ImGui::BeginMenu("\xe6\x96\x87\xe4\xbb\xb6")) {
             if (ImGui::MenuItem("\xe6\x96\xb0\xe5\xbb\xba\xe9\xa1\xb9\xe7\x9b\xae", "Ctrl+N")) {
-                // 20260320 ZJH 重置状态
+                // 20260320 ZJH 重置状态和项目路径
                 if (!state.trainState.bRunning.load()) {
                     state.trainState.reset();
                     state.nActiveStep = 0;
+                    state.strProjectPath.clear();
                 }
             }
-            if (ImGui::MenuItem("\xe6\x89\x93\xe5\xbc\x80\xe9\xa1\xb9\xe7\x9b\xae", "Ctrl+O")) { /* 20260320 ZJH 占位 */ }
-            if (ImGui::MenuItem("\xe4\xbf\x9d\xe5\xad\x98\xe9\xa1\xb9\xe7\x9b\xae", "Ctrl+S")) { /* 20260320 ZJH 占位 */ }
-            if (ImGui::MenuItem("\xe5\x8f\xa6\xe5\xad\x98\xe4\xb8\xba")) { /* 20260320 ZJH 占位 */ }
+            if (ImGui::MenuItem("\xe6\x89\x93\xe5\xbc\x80\xe9\xa1\xb9\xe7\x9b\xae", "Ctrl+O")) {
+                // 20260320 ZJH 打开项目：弹出路径输入框
+                state.nFileDialogPurpose = 0;
+                strncpy_s(state.arrFileDialogPath, sizeof(state.arrFileDialogPath), "projects/project.json", _TRUNCATE);
+                state.bShowFileDialog = true;
+            }
+            if (ImGui::MenuItem("\xe4\xbf\x9d\xe5\xad\x98\xe9\xa1\xb9\xe7\x9b\xae", "Ctrl+S")) {
+                // 20260320 ZJH 保存项目：如果已有路径直接保存，否则弹出路径输入框
+                if (!state.strProjectPath.empty()) {
+                    saveProject(state, state.strProjectPath);
+                } else {
+                    state.nFileDialogPurpose = 1;
+                    strncpy_s(state.arrFileDialogPath, sizeof(state.arrFileDialogPath), "projects/project.json", _TRUNCATE);
+                    state.bShowFileDialog = true;
+                }
+            }
+            if (ImGui::MenuItem("\xe5\x8f\xa6\xe5\xad\x98\xe4\xb8\xba")) {
+                // 20260320 ZJH 另存为：始终弹出路径输入框
+                state.nFileDialogPurpose = 2;
+                strncpy_s(state.arrFileDialogPath, sizeof(state.arrFileDialogPath), "projects/project.json", _TRUNCATE);
+                state.bShowFileDialog = true;
+            }
             ImGui::Separator();
             if (ImGui::BeginMenu("\xe6\x9c\x80\xe8\xbf\x91\xe9\xa1\xb9\xe7\x9b\xae")) {
-                ImGui::MenuItem("(\xe6\x97\xa0)", nullptr, false, false);  // 20260320 ZJH 暂无最近项目
+                if (state.vecRecentProjects.empty()) {
+                    ImGui::MenuItem("(\xe6\x97\xa0)", nullptr, false, false);  // 20260320 ZJH 暂无最近项目
+                } else {
+                    for (auto& rp : state.vecRecentProjects) {
+                        if (ImGui::MenuItem(rp.c_str())) {
+                            loadProject(state, rp);  // 20260320 ZJH 点击加载最近项目
+                        }
+                    }
+                }
                 ImGui::EndMenu();
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("\xe5\xaf\xbc\xe5\x87\xba\xe6\xa8\xa1\xe5\x9e\x8b")) { /* 20260320 ZJH 占位 */ }
+            if (ImGui::MenuItem("\xe5\xaf\xbc\xe5\x87\xba\xe6\xa8\xa1\xe5\x9e\x8b")) {
+                // 20260320 ZJH 导出模型：弹出路径输入框
+                state.nFileDialogPurpose = 3;
+                strncpy_s(state.arrFileDialogPath, sizeof(state.arrFileDialogPath), "data/models/model_export.dfm", _TRUNCATE);
+                state.bShowFileDialog = true;
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("\xe9\x80\x80\xe5\x87\xba", "Alt+F4")) {
                 SDL_Event quitEv;  // 20260320 ZJH 发送退出事件
@@ -1192,11 +1678,23 @@ static void drawMainMenuBar(AppState& state) {
         }
         // 20260320 ZJH 编辑菜单
         if (ImGui::BeginMenu("\xe7\xbc\x96\xe8\xbe\x91")) {
-            if (ImGui::MenuItem("\xe6\x92\xa4\xe9\x94\x80", "Ctrl+Z", false, false)) {}
-            if (ImGui::MenuItem("\xe9\x87\x8d\xe5\x81\x9a", "Ctrl+Y", false, false)) {}
+            ImGui::MenuItem("\xe6\x92\xa4\xe9\x94\x80", "Ctrl+Z", false, false);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("\xe6\x9a\x82\xe4\xb8\x8d\xe6\x94\xaf\xe6\x8c\x81");  // 20260320 ZJH "暂不支持"
+            ImGui::MenuItem("\xe9\x87\x8d\xe5\x81\x9a", "Ctrl+Y", false, false);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("\xe6\x9a\x82\xe4\xb8\x8d\xe6\x94\xaf\xe6\x8c\x81");  // 20260320 ZJH "暂不支持"
             ImGui::Separator();
             if (ImGui::MenuItem("\xe6\xb8\x85\xe9\x99\xa4\xe8\xae\xad\xe7\xbb\x83\xe5\x8e\x86\xe5\x8f\xb2")) {
                 state.vecTrainHistory.clear();  // 20260320 ZJH 清空训练历史
+                // 20260320 ZJH 同时清除训练日志和图表数据
+                std::lock_guard<std::mutex> lk(state.trainState.mutex);
+                state.trainState.strLog.clear();
+                state.trainState.vecLossHistory.clear();
+                state.trainState.vecValLossHistory.clear();
+                state.trainState.vecTrainAccHistory.clear();
+                state.trainState.vecTestAccHistory.clear();
+                state.trainState.vecMIoUHistory.clear();
+                state.trainState.arrConfusionMatrix = {};
+                state.trainState.bHasConfusionMatrix = false;
             }
             ImGui::EndMenu();
         }
@@ -1216,7 +1714,9 @@ static void drawMainMenuBar(AppState& state) {
         }
         // 20260320 ZJH 工具菜单
         if (ImGui::BeginMenu("\xe5\xb7\xa5\xe5\x85\xb7")) {
-            if (ImGui::MenuItem("\xe6\x95\xb0\xe6\x8d\xae\xe5\xa2\x9e\xe5\xbc\xba\xe9\xa2\x84\xe8\xa7\x88")) { /* 20260320 ZJH 占位 */ }
+            if (ImGui::MenuItem("\xe6\x95\xb0\xe6\x8d\xae\xe5\xa2\x9e\xe5\xbc\xba\xe9\xa2\x84\xe8\xa7\x88")) {
+                state.bShowAugPreview = true;  // 20260320 ZJH 打开数据增强预览弹窗
+            }
             if (ImGui::MenuItem("\xe6\xa8\xa1\xe5\x9e\x8b\xe6\x9e\xb6\xe6\x9e\x84\xe6\x9f\xa5\xe7\x9c\x8b\xe5\x99\xa8")) {
                 state.bShowModelViewer = !state.bShowModelViewer;  // 20260320 ZJH 切换模型查看器
             }
@@ -1234,10 +1734,16 @@ static void drawMainMenuBar(AppState& state) {
         }
         // 20260320 ZJH 帮助菜单
         if (ImGui::BeginMenu("\xe5\xb8\xae\xe5\x8a\xa9")) {
-            if (ImGui::MenuItem("\xe7\x94\xa8\xe6\x88\xb7\xe6\x89\x8b\xe5\x86\x8c", "F1")) { /* 20260320 ZJH 占位 */ }
-            if (ImGui::MenuItem("\xe5\xbf\xab\xe6\x8d\xb7\xe9\x94\xae\xe5\x8f\x82\xe8\x80\x83")) { /* 20260320 ZJH 占位 */ }
+            if (ImGui::MenuItem("\xe7\x94\xa8\xe6\x88\xb7\xe6\x89\x8b\xe5\x86\x8c", "F1")) {
+                state.bShowUserManual = true;  // 20260320 ZJH 打开用户手册弹窗
+            }
+            if (ImGui::MenuItem("\xe5\xbf\xab\xe6\x8d\xb7\xe9\x94\xae\xe5\x8f\x82\xe8\x80\x83")) {
+                state.bShowShortcuts = true;  // 20260320 ZJH 打开快捷键参考弹窗
+            }
             ImGui::Separator();
-            if (ImGui::MenuItem("\xe6\xa3\x80\xe6\x9f\xa5\xe6\x9b\xb4\xe6\x96\xb0")) { /* 20260320 ZJH 占位 */ }
+            if (ImGui::MenuItem("\xe6\xa3\x80\xe6\x9f\xa5\xe6\x9b\xb4\xe6\x96\xb0")) {
+                state.bShowUpdateCheck = true;  // 20260320 ZJH 打开检查更新弹窗
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("\xe5\x85\xb3\xe4\xba\x8e DeepForge")) {
                 state.bShowAboutPopup = true;  // 20260320 ZJH 显示关于弹窗
@@ -1324,7 +1830,32 @@ static void drawSettingsDialog(AppState& state) {
         }
         ImGui::SameLine();
         if (ImGui::Button("\xe7\xa1\xae\xe5\xae\x9a", ImVec2(fBtnW, 0))) {
-            ImGui::CloseCurrentPopup();  // 20260320 ZJH 保存并关闭
+            // 20260320 ZJH 应用设置：保存到配置文件
+            try {
+                std::filesystem::create_directories("config");
+                std::ofstream ofs("config/settings.json");
+                if (ofs.is_open()) {
+                    ofs << "{\n";
+                    ofs << "  \"theme\": " << s.nTheme << ",\n";
+                    ofs << "  \"font_size\": " << s.fFontSize << ",\n";
+                    ofs << "  \"project_path\": \"" << s.arrProjectPath << "\",\n";
+                    ofs << "  \"model_path\": \"" << s.arrModelPath << "\",\n";
+                    ofs << "  \"gpu_device\": " << s.nGpuDevice << ",\n";
+                    ofs << "  \"vram_limit\": " << s.nVramLimitMB << ",\n";
+                    ofs << "  \"language\": " << s.nLanguage << "\n";
+                    ofs << "}\n";
+                    ofs.close();
+                    state.trainState.appendLog("设置已保存到 config/settings.json");
+                }
+            } catch (...) {}
+            // 20260320 ZJH 应用主题变更
+            if (s.nTheme == 0) {
+                ImGui::StyleColorsDark();
+                setupImGuiStyle();
+            } else {
+                ImGui::StyleColorsLight();
+            }
+            ImGui::CloseCurrentPopup();  // 20260320 ZJH 关闭弹窗
         }
         ImGui::EndPopup();
     }
@@ -1393,11 +1924,8 @@ static void drawBatchInferenceDialog(AppState& state) {
         // 20260320 ZJH 开始推理按钮
         if (!bi.bRunning) {
             if (ImGui::Button("\xe5\xbc\x80\xe5\xa7\x8b\xe6\x8e\xa8\xe7\x90\x86", ImVec2(120, 30))) {
-                // 20260320 ZJH 模拟推理结果
-                bi.vecResults.clear();
-                bi.vecResults.push_back({"sample_001.png", "\xe7\xb1\xbb\xe5\x88\xab_0", 0.95f});
-                bi.vecResults.push_back({"sample_002.png", "\xe7\xb1\xbb\xe5\x88\xab_3", 0.87f});
-                bi.vecResults.push_back({"sample_003.png", "\xe7\xb1\xbb\xe5\x88\xab_7", 0.92f});
+                // 20260320 ZJH 执行批量推理
+                runBatchInference(state);
             }
         }
 
@@ -1419,7 +1947,25 @@ static void drawBatchInferenceDialog(AppState& state) {
                 ImGui::EndTable();
             }
             // 20260320 ZJH 导出 CSV 按钮
-            if (ImGui::Button("\xe5\xaf\xbc\xe5\x87\xba CSV")) { /* 20260320 ZJH 占位 */ }
+            if (ImGui::Button("\xe5\xaf\xbc\xe5\x87\xba CSV")) {
+                // 20260320 ZJH 将推理结果导出为 CSV 文件
+                try {
+                    std::string strCsvPath = std::string(bi.arrImageFolder) + "/inference_results.csv";
+                    std::ofstream csvFile(strCsvPath);
+                    if (csvFile.is_open()) {
+                        csvFile << "filename,predicted_class,confidence\n";
+                        for (auto& r : bi.vecResults) {
+                            csvFile << r.strFilename << "," << r.strClass << "," << r.fConfidence << "\n";
+                        }
+                        csvFile.close();
+                        state.trainState.appendLog("CSV 已导出: " + strCsvPath);
+                    } else {
+                        state.trainState.appendLog("CSV 导出失败: 无法创建文件");
+                    }
+                } catch (const std::exception& e) {
+                    state.trainState.appendLog(std::string("CSV 导出失败: ") + e.what());
+                }
+            }
         }
 
         ImGui::Spacing();
@@ -1449,10 +1995,29 @@ static void handleKeyboardShortcuts(AppState& state, SDL_Window* pWindow) {
         if (!state.trainState.bRunning.load()) {
             state.trainState.reset();
             state.nActiveStep = 0;
+            state.strProjectPath.clear();
         }
     }
-    // 20260320 ZJH Ctrl+S: 保存项目（占位）
-    if (bCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) { /* 20260320 ZJH 占位 */ }
+    // 20260320 ZJH Ctrl+O: 打开项目
+    if (bCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) {
+        state.nFileDialogPurpose = 0;
+        strncpy_s(state.arrFileDialogPath, sizeof(state.arrFileDialogPath), "projects/project.json", _TRUNCATE);
+        state.bShowFileDialog = true;
+    }
+    // 20260320 ZJH F1: 用户手册
+    if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
+        state.bShowUserManual = true;
+    }
+    // 20260320 ZJH Ctrl+S: 保存项目
+    if (bCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) {
+        if (!state.strProjectPath.empty()) {
+            saveProject(state, state.strProjectPath);
+        } else {
+            state.nFileDialogPurpose = 1;
+            strncpy_s(state.arrFileDialogPath, sizeof(state.arrFileDialogPath), "projects/project.json", _TRUNCATE);
+            state.bShowFileDialog = true;
+        }
+    }
     // 20260320 ZJH F5: 开始训练
     if (ImGui::IsKeyPressed(ImGuiKey_F5) && !state.trainState.bRunning.load()) {
         state.nActiveStep = 2;  // 20260320 ZJH 跳到训练步骤
@@ -1599,19 +2164,30 @@ static void drawToolbar(AppState& state) {
 
     // 20260320 ZJH 工具栏按钮
     if (ImGui::Button("\xe6\x96\xb0\xe5\xbb\xba\xe9\xa1\xb9\xe7\x9b\xae")) {
-        // 20260320 ZJH 重置训练状态
+        // 20260320 ZJH 重置训练状态和项目路径
         if (!state.trainState.bRunning.load()) {
             state.trainState.reset();
             state.nActiveStep = 0;
+            state.strProjectPath.clear();  // 20260320 ZJH 清除项目路径
         }
     }
     ImGui::SameLine();
     if (ImGui::Button("\xe6\x89\x93\xe5\xbc\x80\xe9\xa1\xb9\xe7\x9b\xae")) {
-        // 20260320 ZJH 占位
+        // 20260320 ZJH 打开项目：弹出路径输入框（与菜单一致）
+        state.nFileDialogPurpose = 0;
+        strncpy_s(state.arrFileDialogPath, sizeof(state.arrFileDialogPath), "projects/project.json", _TRUNCATE);
+        state.bShowFileDialog = true;
     }
     ImGui::SameLine();
     if (ImGui::Button("\xe4\xbf\x9d\xe5\xad\x98\xe9\xa1\xb9\xe7\x9b\xae")) {
-        // 20260320 ZJH 占位
+        // 20260320 ZJH 保存项目（与菜单一致）
+        if (!state.strProjectPath.empty()) {
+            saveProject(state, state.strProjectPath);
+        } else {
+            state.nFileDialogPurpose = 1;
+            strncpy_s(state.arrFileDialogPath, sizeof(state.arrFileDialogPath), "projects/project.json", _TRUNCATE);
+            state.bShowFileDialog = true;
+        }
     }
     ImGui::SameLine();
     if (ImGui::Button("\xe8\xae\xbe\xe7\xbd\xae")) {
@@ -1696,7 +2272,11 @@ static void drawProjectNav(AppState& state) {
                 state.activeTask = arrTasks[i].type;  // 20260320 ZJH 切换到该任务
                 state.nActiveStep = 0;
             }
-            if (ImGui::MenuItem("\xe5\x88\xa0\xe9\x99\xa4")) { /* 20260320 ZJH 占位 */ }
+            if (ImGui::MenuItem("\xe5\x88\xa0\xe9\x99\xa4")) {
+                // 20260320 ZJH 弹出删除确认弹窗
+                state.bShowDeleteConfirm = true;
+                state.nDeleteTargetTask = i;
+            }
             ImGui::EndPopup();
         }
 
@@ -1806,6 +2386,22 @@ static void drawStepData(AppState& state) {
         break;
     }
     }
+    // 20260320 ZJH 数据集导入区域（适用于所有任务类型）
+    if (beginCard("\xe6\x95\xb0\xe6\x8d\xae\xe9\x9b\x86\xe5\xaf\xbc\xe5\x85\xa5")) {  // "数据集导入"
+        ImGui::InputText("\xe6\x96\x87\xe4\xbb\xb6\xe5\xa4\xb9\xe8\xb7\xaf\xe5\xbe\x84##import", state.arrImportPath, sizeof(state.arrImportPath));
+        ImGui::SameLine();
+        if (ImGui::Button("\xe6\x89\xab\xe6\x8f\x8f")) {  // "扫描"
+            scanImportFolder(state, std::string(state.arrImportPath));
+        }
+        if (state.bImportScanned) {
+            ImGui::TextColored(s_colGreen, "\xe6\x89\xab\xe6\x8f\x8f\xe7\xbb\x93\xe6\x9e\x9c: %d \xe5\xbc\xa0\xe5\x9b\xbe\xe7\x89\x87, %d \xe4\xb8\xaa\xe7\xb1\xbb\xe5\x88\xab",
+                state.nImportImageCount, (int)state.vecImportClasses.size());
+            for (auto& cls : state.vecImportClasses) {
+                ImGui::BulletText("%s", cls.c_str());
+            }
+        }
+    } endCard();
+
     state.trainState.bStepDataDone = true;
 }
 
@@ -2161,10 +2757,23 @@ static void drawStepTrain(AppState& state) {
                 ts.strLog.clear();  // 20260320 ZJH 清除日志
             }
             if (ImGui::MenuItem("\xe4\xbf\x9d\xe5\xad\x98\xe5\x88\xb0\xe6\x96\x87\xe4\xbb\xb6")) {
-                // 20260320 ZJH 保存日志到文件
+                // 20260320 ZJH 保存日志到带时间戳的文件
                 std::lock_guard<std::mutex> lk(ts.mutex);
-                std::ofstream ofs("training_log.txt");
-                if (ofs.is_open()) ofs << ts.strLog;
+                try {
+                    std::filesystem::create_directories("data/logs");
+                    auto now = std::chrono::system_clock::now();
+                    auto t = std::chrono::system_clock::to_time_t(now);
+                    struct tm tmL; localtime_s(&tmL, &t);
+                    char arrTimeBuf[64];
+                    std::strftime(arrTimeBuf, sizeof(arrTimeBuf), "%Y%m%d_%H%M%S", &tmL);
+                    std::string strLogPath = std::string("data/logs/training_log_") + arrTimeBuf + ".txt";
+                    std::ofstream ofs(strLogPath);
+                    if (ofs.is_open()) {
+                        ofs << ts.strLog;
+                        ofs.close();
+                        ts.strLog += getTimestamp() + " 日志已保存: " + strLogPath + "\n";
+                    }
+                } catch (...) {}
             }
             ImGui::EndPopup();
         }
@@ -2345,12 +2954,25 @@ static void drawStepEvaluate(AppState& state) {
     // 20260320 ZJH 通用导出按钮
     if (beginCard("\xe6\xa8\xa1\xe5\x9e\x8b\xe5\xaf\xbc\xe5\x87\xba")) {  // "模型导出"
         if (ImGui::Button("\xe5\xaf\xbc\xe5\x87\xba .dfm \xe6\xa8\xa1\xe5\x9e\x8b", ImVec2(180, 30))) {
-            // 20260320 ZJH 模型已在训练时自动保存
+            // 20260320 ZJH 导出训练好的模型到默认路径
+            auto& ts2 = state.trainState;
+            std::lock_guard<std::mutex> lk2(ts2.mutex);
+            if (!ts2.strSavedModelPath.empty() && std::filesystem::exists(ts2.strSavedModelPath)) {
+                ts2.strLog += getTimestamp() + " 模型已保存在: " + ts2.strSavedModelPath + "\n";
+            } else {
+                // 20260320 ZJH 弹出导出路径输入框
+                state.nFileDialogPurpose = 3;
+                strncpy_s(state.arrFileDialogPath, sizeof(state.arrFileDialogPath), "data/models/model_export.dfm", _TRUNCATE);
+                state.bShowFileDialog = true;
+            }
         }
         ImGui::SameLine();
         ImGui::BeginDisabled();
         ImGui::Button("\xe5\xaf\xbc\xe5\x87\xba ONNX (\xe5\x8d\xb3\xe5\xb0\x86\xe6\x8e\xa8\xe5\x87\xba)", ImVec2(200, 30));
         ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("ONNX \xe5\xaf\xbc\xe5\x87\xba\xe5\xb0\x86\xe5\x9c\xa8\xe5\x90\x8e\xe7\xbb\xad\xe7\x89\x88\xe6\x9c\xac\xe4\xb8\xad\xe6\x94\xaf\xe6\x8c\x81");  // 20260320 ZJH "ONNX 导出将在后续版本中支持"
+        }
     } endCard();
 }
 
@@ -2779,6 +3401,252 @@ int main(int, char**) {
                 }
             } else {
                 ImGui::TextDisabled("\xe6\x9c\xaa\xe6\xa3\x80\xe6\xb5\x8b\xe5\x88\xb0 GPU");
+            }
+            ImGui::EndPopup();
+        }
+
+        // 20260320 ZJH 文件路径输入弹窗
+        if (appState.bShowFileDialog) {
+            ImGui::OpenPopup("\xe6\x96\x87\xe4\xbb\xb6\xe8\xb7\xaf\xe5\xbe\x84##FileDialog");
+            appState.bShowFileDialog = false;
+        }
+        {
+            ImVec2 fdCenter = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(fdCenter, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(450, 150), ImGuiCond_Appearing);
+        }
+        if (ImGui::BeginPopupModal("\xe6\x96\x87\xe4\xbb\xb6\xe8\xb7\xaf\xe5\xbe\x84##FileDialog", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            // 20260320 ZJH 根据用途显示不同标题
+            const char* arrPurposeTitles[] = {
+                "\xe6\x89\x93\xe5\xbc\x80\xe9\xa1\xb9\xe7\x9b\xae",   // 0: 打开项目
+                "\xe4\xbf\x9d\xe5\xad\x98\xe9\xa1\xb9\xe7\x9b\xae",   // 1: 保存项目
+                "\xe5\x8f\xa6\xe5\xad\x98\xe4\xb8\xba",               // 2: 另存为
+                "\xe5\xaf\xbc\xe5\x87\xba\xe6\xa8\xa1\xe5\x9e\x8b",   // 3: 导出模型
+                "\xe5\xaf\xbc\xe5\x87\xba CSV"                         // 4: 导出CSV
+            };
+            int nPurpose = appState.nFileDialogPurpose;
+            if (nPurpose >= 0 && nPurpose <= 4) {
+                ImGui::TextColored(s_colAccent, "%s", arrPurposeTitles[nPurpose]);
+            }
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::InputText("\xe8\xb7\xaf\xe5\xbe\x84", appState.arrFileDialogPath, sizeof(appState.arrFileDialogPath));
+            ImGui::Spacing();
+            if (ImGui::Button("\xe7\xa1\xae\xe5\xae\x9a", ImVec2(80, 0))) {
+                std::string strPath(appState.arrFileDialogPath);
+                switch (nPurpose) {
+                    case 0: loadProject(appState, strPath); break;         // 20260320 ZJH 打开项目
+                    case 1: saveProject(appState, strPath); break;         // 20260320 ZJH 保存项目
+                    case 2: saveProject(appState, strPath); break;         // 20260320 ZJH 另存为
+                    case 3: exportModelToPath(appState, strPath); break;   // 20260320 ZJH 导出模型
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("\xe5\x8f\x96\xe6\xb6\x88", ImVec2(80, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // 20260320 ZJH 用户手册弹窗
+        if (appState.bShowUserManual) {
+            ImGui::OpenPopup("\xe7\x94\xa8\xe6\x88\xb7\xe6\x89\x8b\xe5\x86\x8c##Manual");
+            appState.bShowUserManual = false;
+        }
+        {
+            ImVec2 mCenter = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(mCenter, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(500, 420), ImGuiCond_Appearing);
+        }
+        if (ImGui::BeginPopupModal("\xe7\x94\xa8\xe6\x88\xb7\xe6\x89\x8b\xe5\x86\x8c##Manual", nullptr, ImGuiWindowFlags_None)) {
+            ImGui::TextColored(s_colAccent, "DeepForge \xe5\xbf\xab\xe9\x80\x9f\xe5\x8f\x82\xe8\x80\x83\xe6\x8c\x87\xe5\x8d\x97");
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextWrapped("\xe6\xac\xa2\xe8\xbf\x8e\xe4\xbd\xbf\xe7\x94\xa8 DeepForge \xe6\xb7\xb1\xe5\xba\xa6\xe5\xad\xa6\xe4\xb9\xa0\xe5\xb7\xa5\xe5\x85\xb7\xef\xbc\x81");  // 欢迎使用 DeepForge 深度学习工具！
+            ImGui::Spacing();
+            ImGui::BulletText("\xe6\xad\xa5\xe9\xaa\xa4 1 - \xe6\x95\xb0\xe6\x8d\xae: \xe9\x80\x89\xe6\x8b\xa9\xe6\x95\xb0\xe6\x8d\xae\xe9\x9b\x86\xe5\xb9\xb6\xe9\x85\x8d\xe7\xbd\xae\xe5\x88\x86\xe5\x89\xb2\xe6\xaf\x94\xe4\xbe\x8b");  // 步骤 1 - 数据
+            ImGui::BulletText("\xe6\xad\xa5\xe9\xaa\xa4 2 - \xe9\x85\x8d\xe7\xbd\xae: \xe9\x80\x89\xe6\x8b\xa9\xe6\xa8\xa1\xe5\x9e\x8b\xe5\xb9\xb6\xe8\xb0\x83\xe6\x95\xb4\xe8\xb6\x85\xe5\x8f\x82\xe6\x95\xb0");  // 步骤 2 - 配置
+            ImGui::BulletText("\xe6\xad\xa5\xe9\xaa\xa4 3 - \xe8\xae\xad\xe7\xbb\x83: \xe7\x82\xb9\xe5\x87\xbb\xe5\xbc\x80\xe5\xa7\x8b\xe8\xae\xad\xe7\xbb\x83\xe5\xb9\xb6\xe7\x9b\x91\xe6\x8e\xa7\xe8\xbf\x9b\xe5\xba\xa6");  // 步骤 3 - 训练
+            ImGui::BulletText("\xe6\xad\xa5\xe9\xaa\xa4 4 - \xe8\xaf\x84\xe4\xbc\xb0: \xe6\x9f\xa5\xe7\x9c\x8b\xe6\xb7\xb7\xe6\xb7\x86\xe7\x9f\xa9\xe9\x98\xb5\xe5\x92\x8c\xe6\x80\xa7\xe8\x83\xbd\xe6\x8c\x87\xe6\xa0\x87");  // 步骤 4 - 评估
+            ImGui::Spacing();
+            ImGui::TextColored(s_colAccent, "\xe6\x94\xaf\xe6\x8c\x81\xe7\x9a\x84\xe4\xbb\xbb\xe5\x8a\xa1\xe7\xb1\xbb\xe5\x9e\x8b:");  // 支持的任务类型:
+            ImGui::BulletText("\xe5\x9b\xbe\xe5\x83\x8f\xe5\x88\x86\xe7\xb1\xbb - MLP / ResNet-18 (MNIST)");
+            ImGui::BulletText("\xe7\x9b\xae\xe6\xa0\x87\xe6\xa3\x80\xe6\xb5\x8b - YOLOv5-Nano");
+            ImGui::BulletText("\xe8\xaf\xad\xe4\xb9\x89\xe5\x88\x86\xe5\x89\xb2 - U-Net");
+            ImGui::BulletText("\xe5\xbc\x82\xe5\xb8\xb8\xe6\xa3\x80\xe6\xb5\x8b - ConvAutoEncoder");
+            ImGui::Spacing();
+            ImGui::TextColored(s_colAccent, "\xe5\xbf\xab\xe6\x8d\xb7\xe6\x93\x8d\xe4\xbd\x9c:");  // 快捷操作:
+            ImGui::BulletText("F5 \xe5\xbc\x80\xe5\xa7\x8b\xe8\xae\xad\xe7\xbb\x83 / F6 \xe6\x9a\x82\xe5\x81\x9c / F7 \xe5\x81\x9c\xe6\xad\xa2");
+            ImGui::BulletText("Ctrl+1/2/3/4 \xe5\x88\x87\xe6\x8d\xa2\xe6\xad\xa5\xe9\xaa\xa4");
+            ImGui::BulletText("Ctrl+S \xe4\xbf\x9d\xe5\xad\x98 / Ctrl+O \xe6\x89\x93\xe5\xbc\x80");
+            ImGui::Spacing();
+            ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - 80) * 0.5f);
+            if (ImGui::Button("\xe5\x85\xb3\xe9\x97\xad", ImVec2(80, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        // 20260320 ZJH 快捷键参考弹窗
+        if (appState.bShowShortcuts) {
+            ImGui::OpenPopup("\xe5\xbf\xab\xe6\x8d\xb7\xe9\x94\xae\xe5\x8f\x82\xe8\x80\x83##Shortcuts");
+            appState.bShowShortcuts = false;
+        }
+        {
+            ImVec2 sCenter = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(sCenter, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(400, 380), ImGuiCond_Appearing);
+        }
+        if (ImGui::BeginPopupModal("\xe5\xbf\xab\xe6\x8d\xb7\xe9\x94\xae\xe5\x8f\x82\xe8\x80\x83##Shortcuts", nullptr, ImGuiWindowFlags_None)) {
+            ImGui::TextColored(s_colAccent, "\xe9\x94\xae\xe7\x9b\x98\xe5\xbf\xab\xe6\x8d\xb7\xe9\x94\xae");  // 键盘快捷键
+            ImGui::Separator();
+            ImGui::Spacing();
+            if (ImGui::BeginTable("##ShortcutTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                ImGui::TableSetupColumn("\xe5\xbf\xab\xe6\x8d\xb7\xe9\x94\xae", ImGuiTableColumnFlags_WidthFixed, 120);
+                ImGui::TableSetupColumn("\xe5\x8a\x9f\xe8\x83\xbd");
+                ImGui::TableHeadersRow();
+                // 20260320 ZJH 快捷键列表
+                auto addRow = [](const char* key, const char* desc) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0); ImGui::Text("%s", key);
+                    ImGui::TableSetColumnIndex(1); ImGui::Text("%s", desc);
+                };
+                addRow("Ctrl+N", "\xe6\x96\xb0\xe5\xbb\xba\xe9\xa1\xb9\xe7\x9b\xae");
+                addRow("Ctrl+O", "\xe6\x89\x93\xe5\xbc\x80\xe9\xa1\xb9\xe7\x9b\xae");
+                addRow("Ctrl+S", "\xe4\xbf\x9d\xe5\xad\x98\xe9\xa1\xb9\xe7\x9b\xae");
+                addRow("Ctrl+,", "\xe8\xae\xbe\xe7\xbd\xae");
+                addRow("Ctrl+1/2/3/4", "\xe5\x88\x87\xe6\x8d\xa2\xe6\xad\xa5\xe9\xaa\xa4");
+                addRow("F1", "\xe7\x94\xa8\xe6\x88\xb7\xe6\x89\x8b\xe5\x86\x8c");
+                addRow("F5", "\xe5\xbc\x80\xe5\xa7\x8b\xe8\xae\xad\xe7\xbb\x83");
+                addRow("F6", "\xe6\x9a\x82\xe5\x81\x9c/\xe6\x81\xa2\xe5\xa4\x8d\xe8\xae\xad\xe7\xbb\x83");
+                addRow("F7", "\xe5\x81\x9c\xe6\xad\xa2\xe8\xae\xad\xe7\xbb\x83");
+                addRow("F11", "\xe5\x85\xa8\xe5\xb1\x8f\xe5\x88\x87\xe6\x8d\xa2");
+                addRow("Alt+F4", "\xe9\x80\x80\xe5\x87\xba");
+                ImGui::EndTable();
+            }
+            ImGui::Spacing();
+            ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - 80) * 0.5f);
+            if (ImGui::Button("\xe5\x85\xb3\xe9\x97\xad", ImVec2(80, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        // 20260320 ZJH 检查更新弹窗
+        if (appState.bShowUpdateCheck) {
+            ImGui::OpenPopup("\xe6\xa3\x80\xe6\x9f\xa5\xe6\x9b\xb4\xe6\x96\xb0##Update");
+            appState.bShowUpdateCheck = false;
+        }
+        {
+            ImVec2 uCenter = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(uCenter, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        }
+        if (ImGui::BeginPopupModal("\xe6\xa3\x80\xe6\x9f\xa5\xe6\x9b\xb4\xe6\x96\xb0##Update", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Spacing();
+            ImGui::TextColored(s_colGreen, "\xe5\xbd\x93\xe5\x89\x8d\xe5\xb7\xb2\xe6\x98\xaf\xe6\x9c\x80\xe6\x96\xb0\xe7\x89\x88\xe6\x9c\xac v0.1.0");  // 当前已是最新版本 v0.1.0
+            ImGui::Spacing();
+            ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - 80) * 0.5f);
+            if (ImGui::Button("\xe7\xa1\xae\xe5\xae\x9a", ImVec2(80, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        // 20260320 ZJH 数据增强预览弹窗
+        if (appState.bShowAugPreview) {
+            ImGui::OpenPopup("\xe6\x95\xb0\xe6\x8d\xae\xe5\xa2\x9e\xe5\xbc\xba\xe9\xa2\x84\xe8\xa7\x88##AugPreview");
+            appState.bShowAugPreview = false;
+        }
+        {
+            ImVec2 aCenter = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(aCenter, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(450, 380), ImGuiCond_Appearing);
+        }
+        if (ImGui::BeginPopupModal("\xe6\x95\xb0\xe6\x8d\xae\xe5\xa2\x9e\xe5\xbc\xba\xe9\xa2\x84\xe8\xa7\x88##AugPreview", nullptr, ImGuiWindowFlags_None)) {
+            ImGui::TextColored(s_colAccent, "\xe6\x95\xb0\xe6\x8d\xae\xe5\xa2\x9e\xe5\xbc\xba\xe8\xae\xbe\xe7\xbd\xae");  // 数据增强设置
+            ImGui::Separator();
+            ImGui::Spacing();
+            // 20260320 ZJH 增强选项复选框
+            ImGui::Checkbox("\xe6\xb0\xb4\xe5\xb9\xb3\xe7\xbf\xbb\xe8\xbd\xac", &appState.bAugFlip);
+            if (appState.bAugFlip) {
+                ImGui::SameLine(250);
+                ImGui::TextDisabled("\xe5\xb7\xa6\xe5\x8f\xb3\xe9\x95\x9c\xe5\x83\x8f\xe7\xbf\xbb\xe8\xbd\xac\xe5\x9b\xbe\xe5\x83\x8f");  // 左右镜像翻转图像
+            }
+            ImGui::Checkbox("\xe9\x9a\x8f\xe6\x9c\xba\xe6\x97\x8b\xe8\xbd\xac", &appState.bAugRotate);
+            if (appState.bAugRotate) {
+                ImGui::SameLine(250);
+                ImGui::TextDisabled("\xc2\xb1" "15\xc2\xb0 \xe9\x9a\x8f\xe6\x9c\xba\xe6\x97\x8b\xe8\xbd\xac");  // +/-15度 随机旋转
+            }
+            ImGui::Checkbox("\xe8\x89\xb2\xe5\xbd\xa9\xe6\x8a\x96\xe5\x8a\xa8", &appState.bAugColorJitter);
+            if (appState.bAugColorJitter) {
+                ImGui::SameLine(250);
+                ImGui::TextDisabled("\xe4\xba\xae\xe5\xba\xa6/\xe5\xaf\xb9\xe6\xaf\x94\xe5\xba\xa6 \xc2\xb1" "10%%");  // 亮度/对比度 +/-10%
+            }
+            ImGui::Checkbox("\xe9\x9a\x8f\xe6\x9c\xba\xe8\xa3\x81\xe5\x89\xaa", &appState.bAugCrop);
+            if (appState.bAugCrop) {
+                ImGui::SameLine(250);
+                ImGui::TextDisabled("\xe9\x9a\x8f\xe6\x9c\xba\xe8\xa3\x81\xe5\x89\xaa 80%%~100%% \xe5\x8c\xba\xe5\x9f\x9f");  // 随机裁剪 80%-100% 区域
+            }
+            ImGui::Checkbox("\xe9\xab\x98\xe6\x96\xaf\xe5\x99\xaa\xe5\xa3\xb0", &appState.bAugNoise);
+            if (appState.bAugNoise) {
+                ImGui::SameLine(250);
+                ImGui::TextDisabled("sigma=0.01 \xe9\xab\x98\xe6\x96\xaf\xe5\x99\xaa\xe5\xa3\xb0");  // sigma=0.01 高斯噪声
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            // 20260320 ZJH 效果描述
+            ImGui::TextColored(s_colAccent, "\xe5\xa2\x9e\xe5\xbc\xba\xe6\x95\x88\xe6\x9e\x9c\xe8\xaf\xb4\xe6\x98\x8e:");  // 增强效果说明:
+            int nEnabled = 0;
+            if (appState.bAugFlip) nEnabled++;
+            if (appState.bAugRotate) nEnabled++;
+            if (appState.bAugColorJitter) nEnabled++;
+            if (appState.bAugCrop) nEnabled++;
+            if (appState.bAugNoise) nEnabled++;
+            ImGui::Text("\xe5\xb7\xb2\xe5\x90\xaf\xe7\x94\xa8 %d \xe7\xa7\x8d\xe5\xa2\x9e\xe5\xbc\xba\xe6\x96\xb9\xe5\xbc\x8f", nEnabled);  // 已启用 N 种增强方式
+            if (nEnabled > 0) {
+                ImGui::TextWrapped("\xe6\xaf\x8f\xe4\xb8\xaa\xe8\xae\xad\xe7\xbb\x83\xe6\xa0\xb7\xe6\x9c\xac\xe5\xb0\x86\xe9\x9a\x8f\xe6\x9c\xba\xe5\xba\x94\xe7\x94\xa8\xe4\xbb\xa5\xe4\xb8\x8a\xe5\xa2\x9e\xe5\xbc\xba\xef\xbc\x8c\xe7\xad\x89\xe6\x95\x88\xe6\x89\xa9\xe5\x85\x85\xe6\x95\xb0\xe6\x8d\xae\xe9\x9b\x86\xe8\xa7\x84\xe6\xa8\xa1\xe7\xba\xa6 %dx", nEnabled + 1);
+                // 每个训练样本将随机应用以上增强，等效扩充数据集规模约 Nx
+            } else {
+                ImGui::TextDisabled("\xe6\x9c\xaa\xe5\x90\xaf\xe7\x94\xa8\xe4\xbb\xbb\xe4\xbd\x95\xe5\xa2\x9e\xe5\xbc\xba");  // 未启用任何增强
+            }
+            ImGui::Spacing();
+            ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - 80) * 0.5f);
+            if (ImGui::Button("\xe5\x85\xb3\xe9\x97\xad", ImVec2(80, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        // 20260320 ZJH 删除确认弹窗
+        if (appState.bShowDeleteConfirm) {
+            ImGui::OpenPopup("\xe7\xa1\xae\xe8\xae\xa4\xe5\x88\xa0\xe9\x99\xa4##DeleteConfirm");
+            appState.bShowDeleteConfirm = false;
+        }
+        {
+            ImVec2 dCenter = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(dCenter, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        }
+        if (ImGui::BeginPopupModal("\xe7\xa1\xae\xe8\xae\xa4\xe5\x88\xa0\xe9\x99\xa4##DeleteConfirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("\xe7\xa1\xae\xe5\xae\x9a\xe8\xa6\x81\xe5\x88\xa0\xe9\x99\xa4\xe8\xaf\xa5\xe4\xbb\xbb\xe5\x8a\xa1\xe7\x9a\x84\xe6\x95\xb0\xe6\x8d\xae\xe5\x90\x97\xef\xbc\x9f");  // 确定要删除该任务的数据吗？
+            ImGui::Spacing();
+            if (ImGui::Button("\xe7\xa1\xae\xe5\xae\x9a", ImVec2(80, 0))) {
+                // 20260320 ZJH 执行删除操作
+                int nTarget = appState.nDeleteTargetTask;
+                if (nTarget >= 0 && nTarget < 4) {
+                    // 20260320 ZJH 如果删除当前活动任务，重置其训练状态
+                    TaskType targetType = static_cast<TaskType>(nTarget);
+                    if (appState.activeTask == targetType) {
+                        appState.trainState.reset();
+                        appState.nActiveStep = 0;
+                    }
+                    // 20260320 ZJH 从训练历史中移除该任务类型的记录
+                    const char* arrModelNames[] = {"MLP/ResNet", "YOLOv5", "U-Net", "AutoEncoder"};
+                    std::string strTargetModel = arrModelNames[nTarget];
+                    appState.vecTrainHistory.erase(
+                        std::remove_if(appState.vecTrainHistory.begin(), appState.vecTrainHistory.end(),
+                            [&](const TrainingHistoryEntry& e) { return e.strModel == strTargetModel; }),
+                        appState.vecTrainHistory.end());
+                    appState.trainState.appendLog("已删除任务数据: " + strTargetModel);
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("\xe5\x8f\x96\xe6\xb6\x88", ImVec2(80, 0))) {
+                ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();
         }
