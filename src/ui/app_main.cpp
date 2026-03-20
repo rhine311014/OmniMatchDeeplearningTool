@@ -1,7 +1,8 @@
-// 20260319 ZJH DeepForge Phase 4 — SDL3 + ImGui 桌面 GUI 应用程序
-// 主界面：4 个工作台（训练/推理/数据/模型仓库）+ 状态栏
+// 20260320 ZJH DeepForge Phase 4 — SDL3 + ImGui 桌面 GUI 应用程序
+// 主界面：4 个工作台（训练/推理/数据管理/模型仓库）+ 状态栏 + 启动闪屏
 // 使用 ImGui Docking 布局，ImPlot 实时绘制损失/准确率曲线
 // 训练在独立 std::jthread 中执行，原子变量 + 互斥锁保证线程安全
+// 20260320 ZJH 全部 UI 文本汉化为简体中文，启动时显示闪屏动画
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -175,7 +176,7 @@ static void trainingThreadFunc(AppState& state) {
     ts.bRunning.store(true);
     ts.bCompleted.store(false);
     ts.appendLog("========================================");
-    ts.appendLog("  DeepForge Training Started");
+    ts.appendLog("  DeepForge 训练开始");
     ts.appendLog("========================================");
 
     // 20260319 ZJH 读取 UI 超参数
@@ -192,13 +193,13 @@ static void trainingThreadFunc(AppState& state) {
 
     // 20260319 ZJH 配置信息写入日志
     if (bUseResNet) {
-        ts.appendLog("  Model: ResNet-18 (CNN)");
+        ts.appendLog("  模型: ResNet-18 卷积神经网络");
     } else {
-        ts.appendLog("  Model: MLP (784->128->10)");
+        ts.appendLog("  模型: MLP 全连接网络 (784→128→10)");
     }
     {
         char arrBuf[256];
-        std::snprintf(arrBuf, sizeof(arrBuf), "  Epochs: %d, Batch: %d, LR: %.4f, Optimizer: %s",
+        std::snprintf(arrBuf, sizeof(arrBuf), "  训练轮数: %d, 批次大小: %d, 学习率: %.4f, 优化器: %s",
                       nEpochs, nBatchSize, static_cast<double>(fLearningRate),
                       bUseAdam ? "Adam" : "SGD");
         ts.appendLog(arrBuf);
@@ -216,19 +217,19 @@ static void trainingThreadFunc(AppState& state) {
     df::MnistDataset testData;   // 20260319 ZJH 测试集
 
     try {
-        ts.appendLog("Loading MNIST training data...");
+        ts.appendLog("正在加载 MNIST 训练数据...");
         trainData = df::loadMnist(strTrainImagesPath, strTrainLabelsPath);
-        ts.appendLog("Loading MNIST test data...");
+        ts.appendLog("正在加载 MNIST 测试数据...");
         testData = df::loadMnist(strTestImagesPath, strTestLabelsPath);
         {
             char arrBuf[128];
-            std::snprintf(arrBuf, sizeof(arrBuf), "Loaded: train=%d, test=%d samples",
+            std::snprintf(arrBuf, sizeof(arrBuf), "已加载: 训练=%d, 测试=%d 样本",
                           trainData.m_nSamples, testData.m_nSamples);
             ts.appendLog(arrBuf);
         }
     } catch (const std::runtime_error&) {
         // 20260319 ZJH 数据文件缺失时切换到合成数据模式
-        ts.appendLog("[WARNING] MNIST data not found. Using SYNTHETIC DATA.");
+        ts.appendLog("[警告] MNIST 数据不可用，使用合成数据");
         int nTrainSynth = 1000;   // 20260319 ZJH 合成训练样本数
         int nTestSynth = 200;     // 20260319 ZJH 合成测试样本数
 
@@ -262,7 +263,7 @@ static void trainingThreadFunc(AppState& state) {
         testData = generateSynthetic(nTestSynth);
         {
             char arrBuf[128];
-            std::snprintf(arrBuf, sizeof(arrBuf), "Synthetic: train=%d, test=%d samples",
+            std::snprintf(arrBuf, sizeof(arrBuf), "合成数据: 训练=%d, 测试=%d 样本",
                           trainData.m_nSamples, testData.m_nSamples);
             ts.appendLog(arrBuf);
         }
@@ -271,7 +272,7 @@ static void trainingThreadFunc(AppState& state) {
 
     // 20260319 ZJH 检查是否请求停止
     if (ts.bStopRequested.load()) {
-        ts.appendLog("Training stopped by user.");
+        ts.appendLog("训练已被用户停止。");
         ts.bRunning.store(false);
         return;
     }
@@ -283,11 +284,11 @@ static void trainingThreadFunc(AppState& state) {
     std::shared_ptr<df::Sequential> pMLP;
 
     if (bUseResNet) {
-        ts.appendLog("Building ResNet-18 model...");
+        ts.appendLog("正在构建 ResNet-18 模型...");
         pResNet = std::make_shared<df::ResNet18>(nOutputDim);
         pModel = pResNet;
     } else {
-        ts.appendLog("Building MLP model...");
+        ts.appendLog("正在构建 MLP 模型...");
         pMLP = std::make_shared<df::Sequential>();
         pMLP->add(std::make_shared<df::Linear>(nInputDim, nHiddenDim));
         pMLP->add(std::make_shared<df::ReLU>());
@@ -303,7 +304,7 @@ static void trainingThreadFunc(AppState& state) {
     }
     {
         char arrBuf[128];
-        std::snprintf(arrBuf, sizeof(arrBuf), "Model: %d tensors, %d parameters",
+        std::snprintf(arrBuf, sizeof(arrBuf), "模型: %d 个张量, %d 个参数",
                       static_cast<int>(vecParams.size()), nTotalParams);
         ts.appendLog(arrBuf);
     }
@@ -315,14 +316,14 @@ static void trainingThreadFunc(AppState& state) {
 
     if (bUseAdam) {
         pAdamOpt = std::make_unique<df::Adam>(vecParams, fLearningRate);
-        ts.appendLog("Optimizer: Adam");
+        ts.appendLog("优化器: Adam");
     } else {
         pSgdOpt = std::make_unique<df::SGD>(vecParams, fLearningRate);
-        ts.appendLog("Optimizer: SGD");
+        ts.appendLog("优化器: SGD");
     }
 
     df::CrossEntropyLoss criterion;  // 20260319 ZJH 交叉熵损失函数
-    ts.appendLog("Loss: CrossEntropyLoss");
+    ts.appendLog("损失函数: CrossEntropyLoss");
     ts.appendLog("");
 
     // ===== 第四步：训练循环 =====
@@ -332,7 +333,7 @@ static void trainingThreadFunc(AppState& state) {
     for (int nEpoch = 0; nEpoch < nEpochs; ++nEpoch) {
         // 20260319 ZJH 检查停止请求
         if (ts.bStopRequested.load()) {
-            ts.appendLog("Training stopped by user.");
+            ts.appendLog("训练已被用户停止。");
             break;
         }
 
@@ -341,7 +342,7 @@ static void trainingThreadFunc(AppState& state) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         if (ts.bStopRequested.load()) {
-            ts.appendLog("Training stopped by user.");
+            ts.appendLog("训练已被用户停止。");
             break;
         }
 
@@ -456,7 +457,7 @@ static void trainingThreadFunc(AppState& state) {
         {
             char arrBuf[256];
             std::snprintf(arrBuf, sizeof(arrBuf),
-                          "Epoch %d/%d | Loss: %.4f | Train: %.2f%% | Test: %.2f%% | %lldms",
+                          "轮次 %d/%d | 损失: %.4f | 训练: %.2f%% | 测试: %.2f%% | %lldms",
                           nEpoch + 1, nEpochs,
                           static_cast<double>(fAvgLoss),
                           static_cast<double>(fTrainAcc),
@@ -483,18 +484,18 @@ static void trainingThreadFunc(AppState& state) {
 
             df::ModelSerializer::save(*pModel, strSavePath);
             ts.appendLog("");
-            ts.appendLog("Model saved: " + strSavePath);
+            ts.appendLog("模型已保存：" + strSavePath);
             {
                 std::lock_guard<std::mutex> lock(ts.mutex);
                 ts.strSavedModelPath = strSavePath;
             }
         } catch (const std::exception& e) {
-            ts.appendLog(std::string("Error saving model: ") + e.what());
+            ts.appendLog(std::string("模型保存错误：") + e.what());
         }
     }
 
     ts.appendLog("");
-    ts.appendLog("Training complete!");
+    ts.appendLog("训练完成！");
     ts.bRunning.store(false);
     ts.bCompleted.store(true);
 }
@@ -660,31 +661,33 @@ static void drawTrainingWorkbench(AppState& state) {
     // 20260319 ZJH 左侧：控制面板
     ImGui::BeginChild("TrainControls", ImVec2(320, 0), ImGuiChildFlags_Borders);
     {
-        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Training Configuration");
+        // 20260320 ZJH 训练配置标题
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "训练配置");
         ImGui::Separator();
         ImGui::Spacing();
 
-        // 20260319 ZJH 模型选择下拉框
-        const char* arrModels[] = {"MLP (784->128->10)", "ResNet-18 (CNN)"};
+        // 20260320 ZJH 模型选择下拉框
+        const char* arrModels[] = {"MLP 全连接网络 (784→128→10)", "ResNet-18 卷积神经网络"};
         bool bDisabled = ts.bRunning.load();  // 20260319 ZJH 训练中禁用配置修改
         if (bDisabled) ImGui::BeginDisabled();
-        ImGui::Combo("Model", &state.nSelectedModel, arrModels, 2);
+        ImGui::Combo("模型", &state.nSelectedModel, arrModels, 2);
 
-        // 20260319 ZJH 优化器选择
+        // 20260320 ZJH 优化器选择
         const char* arrOptimizers[] = {"SGD", "Adam"};
-        ImGui::Combo("Optimizer", &state.nSelectedOptimizer, arrOptimizers, 2);
+        ImGui::Combo("优化器", &state.nSelectedOptimizer, arrOptimizers, 2);
 
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Hyperparameters");
+        // 20260320 ZJH 超参数标题
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "超参数");
         ImGui::Separator();
         ImGui::Spacing();
 
-        // 20260319 ZJH 训练轮数滑块
-        ImGui::SliderInt("Epochs", &state.nEpochs, 1, 100);
-        // 20260319 ZJH 批次大小滑块
-        ImGui::SliderInt("Batch Size", &state.nBatchSize, 8, 256);
-        // 20260319 ZJH 学习率输入
-        ImGui::InputFloat("Learning Rate", &state.fLearningRate, 0.001f, 0.01f, "%.4f");
+        // 20260320 ZJH 训练轮数滑块
+        ImGui::SliderInt("训练轮数", &state.nEpochs, 1, 100);
+        // 20260320 ZJH 批次大小滑块
+        ImGui::SliderInt("批次大小", &state.nBatchSize, 8, 256);
+        // 20260320 ZJH 学习率输入
+        ImGui::InputFloat("学习率", &state.fLearningRate, 0.001f, 0.01f, "%.4f");
         // 20260319 ZJH 限制学习率范围
         if (state.fLearningRate < 0.0001f) state.fLearningRate = 0.0001f;
         if (state.fLearningRate > 1.0f) state.fLearningRate = 1.0f;
@@ -699,28 +702,28 @@ static void drawTrainingWorkbench(AppState& state) {
         float fButtonWidth = 90.0f;
 
         if (!ts.bRunning.load()) {
-            // 20260319 ZJH 训练未运行时显示 Start 按钮
+            // 20260320 ZJH 训练未运行时显示 开始训练 按钮
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.55f, 0.15f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.65f, 0.20f, 1.0f));
-            if (ImGui::Button("Start", ImVec2(fButtonWidth, 30))) {
+            if (ImGui::Button("开始训练", ImVec2(fButtonWidth, 30))) {
                 startTraining(state);
             }
             ImGui::PopStyleColor(2);
         } else {
-            // 20260319 ZJH 训练运行中显示 Pause/Resume 和 Stop 按钮
+            // 20260320 ZJH 训练运行中显示 暂停/恢复 和 停止 按钮
             if (ts.bPaused.load()) {
-                // 20260319 ZJH 暂停中，显示 Resume
+                // 20260320 ZJH 暂停中，显示 恢复
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.45f, 0.10f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.65f, 0.55f, 0.15f, 1.0f));
-                if (ImGui::Button("Resume", ImVec2(fButtonWidth, 30))) {
+                if (ImGui::Button("恢复", ImVec2(fButtonWidth, 30))) {
                     ts.bPaused.store(false);
                 }
                 ImGui::PopStyleColor(2);
             } else {
-                // 20260319 ZJH 运行中，显示 Pause
+                // 20260320 ZJH 运行中，显示 暂停
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.45f, 0.10f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.65f, 0.55f, 0.15f, 1.0f));
-                if (ImGui::Button("Pause", ImVec2(fButtonWidth, 30))) {
+                if (ImGui::Button("暂停", ImVec2(fButtonWidth, 30))) {
                     ts.bPaused.store(true);
                 }
                 ImGui::PopStyleColor(2);
@@ -728,10 +731,10 @@ static void drawTrainingWorkbench(AppState& state) {
 
             ImGui::SameLine();
 
-            // 20260319 ZJH Stop 按钮
+            // 20260320 ZJH 停止 按钮
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.15f, 0.15f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.80f, 0.20f, 0.20f, 1.0f));
-            if (ImGui::Button("Stop", ImVec2(fButtonWidth, 30))) {
+            if (ImGui::Button("停止", ImVec2(fButtonWidth, 30))) {
                 ts.bStopRequested.store(true);
                 ts.bPaused.store(false);  // 20260319 ZJH 取消暂停以让线程响应停止
             }
@@ -742,17 +745,17 @@ static void drawTrainingWorkbench(AppState& state) {
         ImGui::Separator();
         ImGui::Spacing();
 
-        // 20260319 ZJH 训练进度信息
-        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Training Progress");
+        // 20260320 ZJH 训练进度信息
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "训练进度");
         ImGui::Separator();
         ImGui::Spacing();
 
-        // 20260319 ZJH 当前轮次进度
+        // 20260320 ZJH 当前轮次进度
         int nCurEpoch = ts.nCurrentEpoch.load();
         int nTotalEpochs = ts.nTotalEpochs.load();
         {
             char arrBuf[64];
-            std::snprintf(arrBuf, sizeof(arrBuf), "Epoch: %d / %d", nCurEpoch, nTotalEpochs);
+            std::snprintf(arrBuf, sizeof(arrBuf), "轮次: %d / %d", nCurEpoch, nTotalEpochs);
             ImGui::Text("%s", arrBuf);
         }
 
@@ -764,7 +767,7 @@ static void drawTrainingWorkbench(AppState& state) {
         // 20260319 ZJH 批次进度
         {
             char arrBuf[64];
-            std::snprintf(arrBuf, sizeof(arrBuf), "Batch: %d / %d",
+            std::snprintf(arrBuf, sizeof(arrBuf), "批次: %d / %d",
                           ts.nCurrentBatch.load(), ts.nTotalBatches.load());
             ImGui::Text("%s", arrBuf);
         }
@@ -773,17 +776,17 @@ static void drawTrainingWorkbench(AppState& state) {
         // 20260319 ZJH 当前指标
         {
             char arrBuf[64];
-            std::snprintf(arrBuf, sizeof(arrBuf), "Loss: %.4f", static_cast<double>(ts.fCurrentLoss.load()));
+            std::snprintf(arrBuf, sizeof(arrBuf), "损失: %.4f", static_cast<double>(ts.fCurrentLoss.load()));
             ImGui::Text("%s", arrBuf);
         }
         {
             char arrBuf[64];
-            std::snprintf(arrBuf, sizeof(arrBuf), "Train Acc: %.2f%%", static_cast<double>(ts.fTrainAcc.load()));
+            std::snprintf(arrBuf, sizeof(arrBuf), "训练准确率: %.2f%%", static_cast<double>(ts.fTrainAcc.load()));
             ImGui::Text("%s", arrBuf);
         }
         {
             char arrBuf[64];
-            std::snprintf(arrBuf, sizeof(arrBuf), "Test Acc: %.2f%%", static_cast<double>(ts.fTestAcc.load()));
+            std::snprintf(arrBuf, sizeof(arrBuf), "测试准确率: %.2f%%", static_cast<double>(ts.fTestAcc.load()));
             ImGui::Text("%s", arrBuf);
         }
 
@@ -791,14 +794,14 @@ static void drawTrainingWorkbench(AppState& state) {
         ImGui::Spacing();
         if (ts.bRunning.load()) {
             if (ts.bPaused.load()) {
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Status: PAUSED");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "状态: 已暂停");
             } else {
-                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "Status: TRAINING...");
+                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "状态: 训练中...");
             }
         } else if (ts.bCompleted.load()) {
-            ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Status: COMPLETED");
+            ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "状态: 已完成");
         } else {
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Status: IDLE");
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "状态: 空闲");
         }
     }
     ImGui::EndChild();
@@ -819,11 +822,12 @@ static void drawTrainingWorkbench(AppState& state) {
             ImGui::BeginChild("LossChart", ImVec2(fHalfWidth, 0));
             {
                 std::lock_guard<std::mutex> lock(ts.mutex);
-                if (ImPlot::BeginPlot("Loss Curve", ImVec2(-1, -1))) {
-                    ImPlot::SetupAxes("Epoch", "Loss");
+                // 20260320 ZJH 损失曲线图
+                if (ImPlot::BeginPlot("损失曲线", ImVec2(-1, -1))) {
+                    ImPlot::SetupAxes("轮次", "损失");
                     if (!ts.vecLossHistory.empty()) {
-                        // 20260319 ZJH 绘制损失折线
-                        ImPlot::PlotLine("Train Loss",
+                        // 20260320 ZJH 绘制损失折线
+                        ImPlot::PlotLine("训练损失",
                                          ts.vecLossHistory.data(),
                                          static_cast<int>(ts.vecLossHistory.size()));
                     }
@@ -838,18 +842,19 @@ static void drawTrainingWorkbench(AppState& state) {
             ImGui::BeginChild("AccChart", ImVec2(0, 0));
             {
                 std::lock_guard<std::mutex> lock(ts.mutex);
-                if (ImPlot::BeginPlot("Accuracy Curve", ImVec2(-1, -1))) {
-                    ImPlot::SetupAxes("Epoch", "Accuracy (%)");
+                // 20260320 ZJH 准确率曲线图
+                if (ImPlot::BeginPlot("准确率曲线", ImVec2(-1, -1))) {
+                    ImPlot::SetupAxes("轮次", "准确率 (%)");
                     ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 105, ImPlotCond_Always);
                     if (!ts.vecTrainAccHistory.empty()) {
-                        // 20260319 ZJH 绘制训练准确率
-                        ImPlot::PlotLine("Train Acc",
+                        // 20260320 ZJH 绘制训练准确率
+                        ImPlot::PlotLine("训练准确率",
                                          ts.vecTrainAccHistory.data(),
                                          static_cast<int>(ts.vecTrainAccHistory.size()));
                     }
                     if (!ts.vecTestAccHistory.empty()) {
-                        // 20260319 ZJH 绘制测试准确率
-                        ImPlot::PlotLine("Test Acc",
+                        // 20260320 ZJH 绘制测试准确率
+                        ImPlot::PlotLine("测试准确率",
                                          ts.vecTestAccHistory.data(),
                                          static_cast<int>(ts.vecTestAccHistory.size()));
                     }
@@ -860,8 +865,8 @@ static void drawTrainingWorkbench(AppState& state) {
         }
         ImGui::EndChild();
 
-        // 20260319 ZJH 下半部分：训练日志
-        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Training Log");
+        // 20260320 ZJH 下半部分：训练日志
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "训练日志");
         ImGui::Separator();
         ImGui::BeginChild("TrainLog", ImVec2(0, 0), ImGuiChildFlags_Borders);
         {
@@ -887,21 +892,22 @@ static void drawInferenceWorkbench(AppState& state, SDL_Renderer* pRenderer) {
     // 20260319 ZJH 左侧：控制面板
     ImGui::BeginChild("InferControls", ImVec2(320, 0), ImGuiChildFlags_Borders);
     {
-        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Model");
+        // 20260320 ZJH 模型加载区域
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "模型加载");
         ImGui::Separator();
         ImGui::Spacing();
 
-        // 20260319 ZJH 模型路径输入
+        // 20260320 ZJH 模型路径输入
         static char arrModelPath[512] = "";
-        ImGui::InputText("Model Path", arrModelPath, sizeof(arrModelPath));
+        ImGui::InputText("模型路径", arrModelPath, sizeof(arrModelPath));
 
-        // 20260319 ZJH 模型类型选择（加载时需要匹配模型结构）
+        // 20260320 ZJH 模型类型选择（加载时需要匹配模型结构）
         static int nInferModelType = 0;
         const char* arrModelTypes[] = {"MLP", "ResNet-18"};
-        ImGui::Combo("Model Type", &nInferModelType, arrModelTypes, 2);
+        ImGui::Combo("模型类型", &nInferModelType, arrModelTypes, 2);
 
-        // 20260319 ZJH 加载模型按钮
-        if (ImGui::Button("Load Model", ImVec2(-1, 30))) {
+        // 20260320 ZJH 加载模型按钮
+        if (ImGui::Button("加载模型", ImVec2(-1, 30))) {
             std::string strPath(arrModelPath);
             if (!strPath.empty() && std::filesystem::exists(strPath)) {
                 try {
@@ -924,37 +930,38 @@ static void drawInferenceWorkbench(AppState& state, SDL_Renderer* pRenderer) {
                     }
                     is.bModelLoaded = true;
                     is.strModelPath = strPath;
-                    is.strResultLog = "Model loaded: " + strPath;
+                    is.strResultLog = "模型已加载: " + strPath;
                 } catch (const std::exception& e) {
                     is.bModelLoaded = false;
-                    is.strResultLog = std::string("Load error: ") + e.what();
+                    is.strResultLog = std::string("加载错误: ") + e.what();
                 }
             } else {
-                is.strResultLog = "Invalid path or file not found.";
+                is.strResultLog = "路径无效或文件不存在。";
             }
         }
 
-        // 20260319 ZJH 显示模型加载状态
+        // 20260320 ZJH 显示模型加载状态
         if (is.bModelLoaded) {
-            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "Model: Loaded (%s)", is.strModelType.c_str());
+            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "模型: 已加载 (%s)", is.strModelType.c_str());
         } else {
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Model: Not Loaded");
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "未加载模型");
         }
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Image Input");
+        // 20260320 ZJH 图像输入区域
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "图像输入");
         ImGui::Separator();
         ImGui::Spacing();
 
-        // 20260319 ZJH 图像路径输入
+        // 20260320 ZJH 图像路径输入
         static char arrImagePath[512] = "";
-        ImGui::InputText("Image Path", arrImagePath, sizeof(arrImagePath));
+        ImGui::InputText("图像路径", arrImagePath, sizeof(arrImagePath));
 
-        // 20260319 ZJH 加载图像按钮
-        if (ImGui::Button("Load Image", ImVec2(-1, 30))) {
+        // 20260320 ZJH 加载图像按钮
+        if (ImGui::Button("加载图像", ImVec2(-1, 30))) {
             std::string strImgPath(arrImagePath);
             if (!strImgPath.empty() && std::filesystem::exists(strImgPath)) {
                 // 20260319 ZJH 使用 stb_image 加载图像
@@ -976,14 +983,14 @@ static void drawInferenceWorkbench(AppState& state, SDL_Renderer* pRenderer) {
                         is.nImageWidth = nWidth;
                         is.nImageHeight = nHeight;
                         is.strImagePath = strImgPath;
-                        is.strResultLog = "Image loaded: " + std::to_string(nWidth) + "x" + std::to_string(nHeight);
+                        is.strResultLog = "图像已加载: " + std::to_string(nWidth) + "x" + std::to_string(nHeight);
                     }
                     stbi_image_free(pPixels);
                 } else {
-                    is.strResultLog = "Failed to load image.";
+                    is.strResultLog = "图像加载失败。";
                 }
             } else {
-                is.strResultLog = "Invalid image path.";
+                is.strResultLog = "图像路径无效。";
             }
         }
 
@@ -997,7 +1004,7 @@ static void drawInferenceWorkbench(AppState& state, SDL_Renderer* pRenderer) {
 
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.55f, 0.15f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.65f, 0.20f, 1.0f));
-        if (ImGui::Button("Run Inference", ImVec2(-1, 35))) {
+        if (ImGui::Button("开始推理", ImVec2(-1, 35))) {
             // 20260319 ZJH 执行推理
             try {
                 // 20260319 ZJH 如果有图像，转为 28x28 灰度后推理
@@ -1061,13 +1068,13 @@ static void drawInferenceWorkbench(AppState& state, SDL_Renderer* pRenderer) {
                 is.bHasResult = true;
                 {
                     char arrBuf[128];
-                    std::snprintf(arrBuf, sizeof(arrBuf), "Predicted: %d (%.2f%% confidence)",
+                    std::snprintf(arrBuf, sizeof(arrBuf), "预测类别: %d (%.2f%% 置信度)",
                                   is.nPredictedClass,
                                   static_cast<double>(is.arrConfidence[is.nPredictedClass] * 100.0f));
                     is.strResultLog = arrBuf;
                 }
             } catch (const std::exception& e) {
-                is.strResultLog = std::string("Inference error: ") + e.what();
+                is.strResultLog = std::string("推理错误: ") + e.what();
                 is.bHasResult = false;
             }
         }
@@ -1090,7 +1097,8 @@ static void drawInferenceWorkbench(AppState& state, SDL_Renderer* pRenderer) {
     ImGui::BeginChild("InferResults", ImVec2(0, 0));
     {
         // 20260319 ZJH 图像预览区域
-        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Image Preview");
+        // 20260320 ZJH 图像预览区域
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "图像预览");
         ImGui::Separator();
 
         float fPreviewHeight = ImGui::GetContentRegionAvail().y * 0.5f;
@@ -1116,27 +1124,29 @@ static void drawInferenceWorkbench(AppState& state, SDL_Renderer* pRenderer) {
                 // 20260319 ZJH 无图像时显示占位文本
                 float fAvailH = ImGui::GetContentRegionAvail().y;
                 ImGui::SetCursorPosY(ImGui::GetCursorPosY() + fAvailH * 0.4f);
-                ImGui::TextDisabled("    No image loaded. Enter a file path above.");
+                ImGui::TextDisabled("    未加载图像。请在上方输入文件路径。");
             }
         }
         ImGui::EndChild();
 
         // 20260319 ZJH 推理结果
-        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Inference Results");
+        // 20260320 ZJH 推理结果区域
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "推理结果");
         ImGui::Separator();
 
         ImGui::BeginChild("InferResultPanel", ImVec2(0, 0), ImGuiChildFlags_Borders);
         {
             if (is.bHasResult) {
                 // 20260319 ZJH 显示预测类别
-                ImGui::Text("Predicted Class: %d", is.nPredictedClass);
-                ImGui::Text("Confidence: %.2f%%",
+                ImGui::Text("预测类别: %d", is.nPredictedClass);
+                ImGui::Text("置信度: %.2f%%",
                             static_cast<double>(is.arrConfidence[is.nPredictedClass] * 100.0f));
                 ImGui::Spacing();
 
                 // 20260319 ZJH 置信度条形图
-                if (ImPlot::BeginPlot("Confidence Scores", ImVec2(-1, -1))) {
-                    ImPlot::SetupAxes("Class", "Confidence");
+                // 20260320 ZJH 置信度分布条形图
+                if (ImPlot::BeginPlot("置信度分布", ImVec2(-1, -1))) {
+                    ImPlot::SetupAxes("类别", "置信度");
                     ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 1.05, ImPlotCond_Always);
 
                     // 20260319 ZJH 绘制条形图
@@ -1145,13 +1155,13 @@ static void drawInferenceWorkbench(AppState& state, SDL_Renderer* pRenderer) {
                     for (int i = 0; i < 10; ++i) {
                         arrValues[i] = static_cast<double>(is.arrConfidence[i]);
                     }
-                    ImPlot::PlotBars("Confidence", arrPositions, arrValues, 10, 0.6);
+                    ImPlot::PlotBars("置信度", arrPositions, arrValues, 10, 0.6);
                     ImPlot::EndPlot();
                 }
             } else {
                 float fAvailH = ImGui::GetContentRegionAvail().y;
                 ImGui::SetCursorPosY(ImGui::GetCursorPosY() + fAvailH * 0.4f);
-                ImGui::TextDisabled("    Run inference to see results.");
+                ImGui::TextDisabled("    执行推理后查看结果。");
             }
         }
         ImGui::EndChild();
@@ -1170,12 +1180,13 @@ static void drawDataManager(AppState& state) {
 
     ImGui::BeginChild("DataLeft", ImVec2(350, 0), ImGuiChildFlags_Borders);
     {
-        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Available Datasets");
+        // 20260320 ZJH 可用数据集标题
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "可用数据集");
         ImGui::Separator();
         ImGui::Spacing();
 
-        // 20260319 ZJH 刷新按钮
-        if (ImGui::Button("Refresh", ImVec2(-1, 25))) {
+        // 20260320 ZJH 刷新按钮
+        if (ImGui::Button("刷新", ImVec2(-1, 25))) {
             checkDatasets(state);
         }
 
@@ -1183,16 +1194,17 @@ static void drawDataManager(AppState& state) {
 
         // 20260319 ZJH MNIST 数据集信息
         ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.20f, 0.28f, 0.44f, 1.0f));
-        if (ImGui::CollapsingHeader("MNIST", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // 20260320 ZJH MNIST 数据集信息
+        if (ImGui::CollapsingHeader("MNIST 数据集", ImGuiTreeNodeFlags_DefaultOpen)) {
             if (state.bMnistAvailable) {
-                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "  Status: Available");
-                ImGui::Text("  Train Samples: %d", state.nMnistTrainSamples);
-                ImGui::Text("  Test Samples: %d", state.nMnistTestSamples);
-                ImGui::Text("  Classes: 10 (digits 0-9)");
-                ImGui::Text("  Image Size: 28x28 grayscale");
+                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "  状态: 已就绪");
+                ImGui::Text("  训练样本: %d", state.nMnistTrainSamples);
+                ImGui::Text("  测试样本: %d", state.nMnistTestSamples);
+                ImGui::Text("  类别: 10 (数字 0-9)");
+                ImGui::Text("  图像尺寸: 28x28 灰度");
             } else {
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "  Status: Not Found");
-                ImGui::TextWrapped("  Place MNIST IDX files in data/mnist/:");
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "  状态: 未找到");
+                ImGui::TextWrapped("  请将 MNIST IDX 文件放入 data/mnist/ 目录:");
                 ImGui::TextDisabled("    train-images-idx3-ubyte");
                 ImGui::TextDisabled("    train-labels-idx1-ubyte");
                 ImGui::TextDisabled("    t10k-images-idx3-ubyte");
@@ -1205,12 +1217,13 @@ static void drawDataManager(AppState& state) {
 
         // 20260319 ZJH 合成数据集（总是可用）
         ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.20f, 0.28f, 0.44f, 1.0f));
-        if (ImGui::CollapsingHeader("Synthetic Data", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "  Status: Always Available");
-            ImGui::Text("  Train Samples: 1000");
-            ImGui::Text("  Test Samples: 200");
-            ImGui::Text("  Classes: 10");
-            ImGui::TextWrapped("  Auto-generated when MNIST is not found.");
+        // 20260320 ZJH 合成数据集
+        if (ImGui::CollapsingHeader("合成数据", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "  状态: 始终可用");
+            ImGui::Text("  训练样本: 1000");
+            ImGui::Text("  测试样本: 200");
+            ImGui::Text("  类别: 10");
+            ImGui::TextWrapped("  当 MNIST 数据不可用时自动生成。");
         }
         ImGui::PopStyleColor();
 
@@ -1219,10 +1232,11 @@ static void drawDataManager(AppState& state) {
         ImGui::Spacing();
 
         // 20260319 ZJH 导入数据集按钮（占位功能）
-        if (ImGui::Button("Import Dataset...", ImVec2(-1, 30))) {
-            // 20260319 ZJH 未来实现自定义数据集导入
+        // 20260320 ZJH 导入数据集按钮（占位功能）
+        if (ImGui::Button("导入数据集...", ImVec2(-1, 30))) {
+            // 20260320 ZJH 未来实现自定义数据集导入
         }
-        ImGui::TextDisabled("Custom dataset import coming soon.");
+        ImGui::TextDisabled("自定义数据集导入功能即将推出。");
     }
     ImGui::EndChild();
 
@@ -1231,13 +1245,14 @@ static void drawDataManager(AppState& state) {
     // 20260319 ZJH 右侧：数据集统计和预览
     ImGui::BeginChild("DataRight", ImVec2(0, 0));
     {
-        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Dataset Statistics");
+        // 20260320 ZJH 数据集统计标题
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "数据集统计");
         ImGui::Separator();
         ImGui::Spacing();
 
-        // 20260319 ZJH 数据集分布图表
-        if (ImPlot::BeginPlot("Class Distribution (MNIST)", ImVec2(-1, 250))) {
-            ImPlot::SetupAxes("Class", "Count");
+        // 20260320 ZJH 类别分布图表
+        if (ImPlot::BeginPlot("类别分布 (MNIST)", ImVec2(-1, 250))) {
+            ImPlot::SetupAxes("类别", "数量");
 
             if (state.bMnistAvailable) {
                 // 20260319 ZJH MNIST 各类别约 6000 个训练样本（均匀分布）
@@ -1247,12 +1262,12 @@ static void drawDataManager(AppState& state) {
                 for (int i = 0; i < 10; ++i) {
                     arrCounts[i] = fAvgPerClass;  // 20260319 ZJH 近似均匀分布
                 }
-                ImPlot::PlotBars("Train Samples", arrClasses, arrCounts, 10, 0.6);
+                ImPlot::PlotBars("训练样本", arrClasses, arrCounts, 10, 0.6);
             } else {
                 // 20260319 ZJH 合成数据：每类 100 个
                 double arrClasses[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
                 double arrCounts[10] = {100, 100, 100, 100, 100, 100, 100, 100, 100, 100};
-                ImPlot::PlotBars("Synthetic Samples", arrClasses, arrCounts, 10, 0.6);
+                ImPlot::PlotBars("合成样本", arrClasses, arrCounts, 10, 0.6);
             }
             ImPlot::EndPlot();
         }
@@ -1260,65 +1275,66 @@ static void drawDataManager(AppState& state) {
         ImGui::Spacing();
 
         // 20260319 ZJH 数据集详细信息表格
-        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Dataset Summary");
+        // 20260320 ZJH 数据集信息汇总表格
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "数据集信息");
         ImGui::Separator();
 
         if (ImGui::BeginTable("DatasetTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-            ImGui::TableSetupColumn("Dataset");
-            ImGui::TableSetupColumn("Samples");
-            ImGui::TableSetupColumn("Classes");
-            ImGui::TableSetupColumn("Status");
+            ImGui::TableSetupColumn("数据集");
+            ImGui::TableSetupColumn("样本数");
+            ImGui::TableSetupColumn("类别数");
+            ImGui::TableSetupColumn("状态");
             ImGui::TableHeadersRow();
 
             // 20260319 ZJH MNIST 行
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::Text("MNIST (Train)");
+            ImGui::Text("MNIST (训练)");
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("%d", state.bMnistAvailable ? state.nMnistTrainSamples : 0);
             ImGui::TableSetColumnIndex(2);
             ImGui::Text("10");
             ImGui::TableSetColumnIndex(3);
             if (state.bMnistAvailable) {
-                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "OK");
+                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "已就绪");
             } else {
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Missing");
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "未找到");
             }
 
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::Text("MNIST (Test)");
+            ImGui::Text("MNIST (测试)");
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("%d", state.bMnistAvailable ? state.nMnistTestSamples : 0);
             ImGui::TableSetColumnIndex(2);
             ImGui::Text("10");
             ImGui::TableSetColumnIndex(3);
             if (state.bMnistAvailable) {
-                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "OK");
+                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "已就绪");
             } else {
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Missing");
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "未找到");
             }
 
-            // 20260319 ZJH 合成数据行
+            // 20260320 ZJH 合成数据行
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::Text("Synthetic (Train)");
+            ImGui::Text("合成数据 (训练)");
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("1000");
             ImGui::TableSetColumnIndex(2);
             ImGui::Text("10");
             ImGui::TableSetColumnIndex(3);
-            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "OK");
+            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "已就绪");
 
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::Text("Synthetic (Test)");
+            ImGui::Text("合成数据 (测试)");
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("200");
             ImGui::TableSetColumnIndex(2);
             ImGui::Text("10");
             ImGui::TableSetColumnIndex(3);
-            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "OK");
+            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "已就绪");
 
             ImGui::EndTable();
         }
@@ -1336,12 +1352,13 @@ static void drawModelRepository(AppState& state) {
     }
 
     // 20260319 ZJH 刷新按钮
-    if (ImGui::Button("Refresh Models")) {
+    // 20260320 ZJH 刷新模型列表按钮
+    if (ImGui::Button("刷新")) {
         scanModels(state);
     }
 
     ImGui::SameLine();
-    ImGui::Text("Models in data/models/: %d", static_cast<int>(state.vecModels.size()));
+    ImGui::Text("data/models/ 目录中的模型: %d", static_cast<int>(state.vecModels.size()));
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -1352,11 +1369,11 @@ static void drawModelRepository(AppState& state) {
                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                           ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY,
                           ImVec2(0, ImGui::GetContentRegionAvail().y - 40))) {
-        ImGui::TableSetupColumn("File Name", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 100);
-        ImGui::TableSetupColumn("Last Modified", ImGuiTableColumnFlags_WidthFixed, 180);
-        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 160);
-        ImGui::TableSetupColumn("Info", ImGuiTableColumnFlags_WidthFixed, 100);
+        ImGui::TableSetupColumn("文件名", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("大小", ImGuiTableColumnFlags_WidthFixed, 100);
+        ImGui::TableSetupColumn("修改时间", ImGuiTableColumnFlags_WidthFixed, 180);
+        ImGui::TableSetupColumn("操作", ImGuiTableColumnFlags_WidthFixed, 160);
+        ImGui::TableSetupColumn("类型", ImGuiTableColumnFlags_WidthFixed, 100);
         ImGui::TableHeadersRow();
 
         // 20260319 ZJH 用于标记待删除的模型索引
@@ -1390,7 +1407,7 @@ static void drawModelRepository(AppState& state) {
             ImGui::PushID(i);  // 20260319 ZJH 为每行按钮设置唯一 ID
 
             // 20260319 ZJH 使用模型路径加载到推理工作台
-            if (ImGui::SmallButton("Load")) {
+            if (ImGui::SmallButton("加载")) {
                 // 20260319 ZJH 切换到推理标签并设置路径
                 state.nActiveTab = 1;
             }
@@ -1398,7 +1415,7 @@ static void drawModelRepository(AppState& state) {
 
             // 20260319 ZJH 删除按钮
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.15f, 0.15f, 1.0f));
-            if (ImGui::SmallButton("Delete")) {
+            if (ImGui::SmallButton("删除")) {
                 nDeleteIndex = i;
             }
             ImGui::PopStyleColor();
@@ -1411,7 +1428,7 @@ static void drawModelRepository(AppState& state) {
             } else if (model.strFileName.find("resnet") != std::string::npos) {
                 ImGui::Text("ResNet-18");
             } else {
-                ImGui::Text("Unknown");
+                ImGui::Text("未知");
             }
         }
 
@@ -1430,7 +1447,7 @@ static void drawModelRepository(AppState& state) {
     // 20260319 ZJH 空列表提示
     if (state.vecModels.empty()) {
         ImGui::Spacing();
-        ImGui::TextDisabled("No models found. Train a model to populate this list.");
+        ImGui::TextDisabled("暂无模型。请先训练模型。");
     }
 }
 
@@ -1456,22 +1473,23 @@ static void drawStatusBar(AppState& state) {
                  ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoNav);
 
     // 20260319 ZJH 状态文本
+    // 20260320 ZJH 状态栏中文文本
     if (ts.bRunning.load()) {
         if (ts.bPaused.load()) {
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Status: Training Paused");
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "状态: 训练已暂停");
         } else {
-            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "Status: Training...");
+            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "状态: 训练中...");
         }
     } else {
-        ImGui::Text("Status: Ready");
+        ImGui::Text("状态: 就绪");
     }
 
     ImGui::SameLine(200);
-    ImGui::Text("Device: CPU");
+    ImGui::Text("设备: CPU");
 
-    // 20260319 ZJH 估算内存使用
+    // 20260320 ZJH 版本信息
     ImGui::SameLine(350);
-    ImGui::Text("DeepForge v0.1.0");
+    ImGui::Text("DeepForge 深度学习平台 v0.1.0");
 
     ImGui::End();
     ImGui::PopStyleColor();
@@ -1490,7 +1508,8 @@ int main(int, char**) {
     }
 
     // 20260319 ZJH 创建主窗口（1280x720，可调整大小）
-    SDL_Window* pWindow = SDL_CreateWindow("DeepForge v0.1.0 — Deep Learning Vision Platform",
+    // 20260320 ZJH 创建主窗口，标题为中文
+    SDL_Window* pWindow = SDL_CreateWindow("DeepForge 深度学习平台 v0.1.0",
                                             1280, 720,
                                             SDL_WINDOW_RESIZABLE | SDL_WINDOW_MAXIMIZED);
     if (!pWindow) {
@@ -1552,10 +1571,174 @@ int main(int, char**) {
     ImGui_ImplSDL3_InitForSDLRenderer(pWindow, pRenderer);
     ImGui_ImplSDLRenderer3_Init(pRenderer);
 
-    // ===== 第三步：应用状态初始化 =====
+    // ===== 第三步：闪屏动画 =====
+    // 20260320 ZJH 启动闪屏，显示 2.5 秒后进入主界面
+    {
+        auto splashStart = std::chrono::steady_clock::now();  // 20260320 ZJH 闪屏开始时间
+        const float fSplashDuration = 2.5f;  // 20260320 ZJH 闪屏持续时间（秒）
+        bool bSplashRunning = true;  // 20260320 ZJH 闪屏循环标志
+
+        while (bSplashRunning) {
+            // 20260320 ZJH 处理 SDL 事件（允许关闭窗口）
+            SDL_Event event;
+            while (SDL_PollEvent(&event)) {
+                ImGui_ImplSDL3_ProcessEvent(&event);
+                if (event.type == SDL_EVENT_QUIT) {
+                    bSplashRunning = false;  // 20260320 ZJH 用户关闭窗口时退出闪屏
+                    break;
+                }
+                if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
+                    event.window.windowID == SDL_GetWindowID(pWindow)) {
+                    bSplashRunning = false;
+                    break;
+                }
+            }
+            if (!bSplashRunning) break;
+
+            // 20260320 ZJH 计算已过时间和淡入透明度
+            auto now = std::chrono::steady_clock::now();
+            float fElapsed = std::chrono::duration<float>(now - splashStart).count();
+            if (fElapsed > fSplashDuration) break;  // 20260320 ZJH 闪屏时间到，进入主界面
+
+            float fAlpha = std::min(fElapsed / 0.8f, 1.0f);  // 20260320 ZJH 0.8 秒淡入效果
+
+            // 20260320 ZJH 开始 ImGui 新帧
+            ImGui_ImplSDLRenderer3_NewFrame();
+            ImGui_ImplSDL3_NewFrame();
+            ImGui::NewFrame();
+
+            // 20260320 ZJH 全屏无边框窗口作为闪屏背景
+            ImGui::SetNextWindowPos(ImVec2(0, 0));
+            ImGui::SetNextWindowSize(io.DisplaySize);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.06f, 0.08f, 1.0f));
+            ImGui::Begin("##Splash", nullptr,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                         ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoDocking |
+                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoCollapse);
+
+            auto* pDrawList = ImGui::GetWindowDrawList();  // 20260320 ZJH 获取绘制列表
+            float fCenterX = io.DisplaySize.x * 0.5f;  // 20260320 ZJH 屏幕中心 X
+            float fCenterY = io.DisplaySize.y * 0.5f;  // 20260320 ZJH 屏幕中心 Y
+
+            // 20260320 ZJH 绘制背景渐变（从深色到稍浅的深色）
+            ImU32 nTopColor = IM_COL32(15, 15, 20, static_cast<int>(255 * fAlpha));
+            ImU32 nBotColor = IM_COL32(30, 30, 45, static_cast<int>(255 * fAlpha));
+            pDrawList->AddRectFilledMultiColor(
+                ImVec2(0, 0), io.DisplaySize,
+                nTopColor, nTopColor, nBotColor, nBotColor);
+
+            // 20260320 ZJH 绘制 "DF" Logo 方块（蓝色圆角矩形 + 白色文字）
+            float fLogoSize = 80.0f;  // 20260320 ZJH Logo 方块尺寸
+            float fLogoX = fCenterX - fLogoSize * 0.5f;  // 20260320 ZJH Logo 左上角 X
+            float fLogoY = fCenterY - 120.0f;  // 20260320 ZJH Logo 左上角 Y
+            pDrawList->AddRectFilled(
+                ImVec2(fLogoX, fLogoY),
+                ImVec2(fLogoX + fLogoSize, fLogoY + fLogoSize),
+                IM_COL32(50, 120, 220, static_cast<int>(240 * fAlpha)),
+                12.0f);  // 20260320 ZJH 12px 圆角
+            // 20260320 ZJH 在 Logo 方块中绘制 "DF" 文字
+            ImFont* pFont = ImGui::GetFont();
+            float fDfFontSize = 42.0f;
+            const char* strDf = "DF";
+            ImVec2 dfTextSize = pFont->CalcTextSizeA(fDfFontSize, FLT_MAX, 0.0f, strDf);
+            pDrawList->AddText(pFont, fDfFontSize,
+                ImVec2(fLogoX + (fLogoSize - dfTextSize.x) * 0.5f,
+                       fLogoY + (fLogoSize - dfTextSize.y) * 0.5f),
+                IM_COL32(255, 255, 255, static_cast<int>(255 * fAlpha)),
+                strDf);
+
+            // 20260320 ZJH 绘制标题 "DeepForge"
+            float fTitleFontSize = 36.0f;
+            const char* strTitle = "DeepForge";
+            ImVec2 titleSize = pFont->CalcTextSizeA(fTitleFontSize, FLT_MAX, 0.0f, strTitle);
+            pDrawList->AddText(pFont, fTitleFontSize,
+                ImVec2(fCenterX - titleSize.x * 0.5f, fLogoY + fLogoSize + 20.0f),
+                IM_COL32(230, 230, 240, static_cast<int>(255 * fAlpha)),
+                strTitle);
+
+            // 20260320 ZJH 绘制副标题（中文）
+            float fSubFontSize = 18.0f;
+            const char* strSubtitle = "纯 C++ 全流程深度学习视觉平台";
+            ImVec2 subSize = pFont->CalcTextSizeA(fSubFontSize, FLT_MAX, 0.0f, strSubtitle);
+            pDrawList->AddText(pFont, fSubFontSize,
+                ImVec2(fCenterX - subSize.x * 0.5f, fLogoY + fLogoSize + 64.0f),
+                IM_COL32(160, 180, 220, static_cast<int>(220 * fAlpha)),
+                strSubtitle);
+
+            // 20260320 ZJH 绘制版本号
+            float fVerFontSize = 14.0f;
+            const char* strVersion = "v0.1.0";
+            ImVec2 verSize = pFont->CalcTextSizeA(fVerFontSize, FLT_MAX, 0.0f, strVersion);
+            pDrawList->AddText(pFont, fVerFontSize,
+                ImVec2(fCenterX - verSize.x * 0.5f, fLogoY + fLogoSize + 90.0f),
+                IM_COL32(120, 140, 170, static_cast<int>(200 * fAlpha)),
+                strVersion);
+
+            // 20260320 ZJH 绘制旋转加载点动画
+            int nDotCount = 8;  // 20260320 ZJH 点的数量
+            float fDotPhase = fElapsed * 3.0f;  // 20260320 ZJH 旋转速度
+            float fDotRadius = 20.0f;  // 20260320 ZJH 旋转半径
+            float fDotCenterY = fLogoY + fLogoSize + 130.0f;  // 20260320 ZJH 点阵中心 Y
+            for (int i = 0; i < nDotCount; ++i) {
+                float fAngle = fDotPhase + static_cast<float>(i) * (2.0f * 3.14159265f / static_cast<float>(nDotCount));
+                float fDotX = fCenterX + std::cos(fAngle) * fDotRadius;
+                float fDotY = fDotCenterY + std::sin(fAngle) * fDotRadius;
+                // 20260320 ZJH 每个点的透明度随相位变化，产生追逐效果
+                float fDotAlpha = (std::sin(fAngle - fDotPhase) + 1.0f) * 0.5f;
+                float fDotSize = 3.0f + fDotAlpha * 2.0f;  // 20260320 ZJH 点大小随透明度变化
+                pDrawList->AddCircleFilled(ImVec2(fDotX, fDotY), fDotSize,
+                    IM_COL32(100, 160, 255, static_cast<int>(fDotAlpha * 255.0f * fAlpha)));
+            }
+
+            // 20260320 ZJH 绘制 "正在初始化..." 提示文字
+            float fInitFontSize = 14.0f;
+            const char* strInit = "正在初始化...";
+            ImVec2 initSize = pFont->CalcTextSizeA(fInitFontSize, FLT_MAX, 0.0f, strInit);
+            pDrawList->AddText(pFont, fInitFontSize,
+                ImVec2(fCenterX - initSize.x * 0.5f, fDotCenterY + fDotRadius + 20.0f),
+                IM_COL32(140, 150, 180, static_cast<int>(180 * fAlpha)),
+                strInit);
+
+            // 20260320 ZJH 绘制版权信息
+            float fCopyFontSize = 12.0f;
+            const char* strCopy = "© 2026 ZJH";
+            ImVec2 copySize = pFont->CalcTextSizeA(fCopyFontSize, FLT_MAX, 0.0f, strCopy);
+            pDrawList->AddText(pFont, fCopyFontSize,
+                ImVec2(fCenterX - copySize.x * 0.5f, io.DisplaySize.y - 40.0f),
+                IM_COL32(100, 100, 120, static_cast<int>(150 * fAlpha)),
+                strCopy);
+
+            ImGui::End();
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar();
+
+            // 20260320 ZJH 渲染闪屏帧
+            ImGui::Render();
+            SDL_SetRenderDrawColor(pRenderer, 15, 15, 20, 255);
+            SDL_RenderClear(pRenderer);
+            ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), pRenderer);
+            SDL_RenderPresent(pRenderer);
+        }
+
+        // 20260320 ZJH 如果用户在闪屏阶段关闭了窗口，直接退出
+        if (!bSplashRunning) {
+            ImGui_ImplSDLRenderer3_Shutdown();
+            ImGui_ImplSDL3_Shutdown();
+            ImPlot::DestroyContext();
+            ImGui::DestroyContext();
+            SDL_DestroyRenderer(pRenderer);
+            SDL_DestroyWindow(pWindow);
+            SDL_Quit();
+            return 0;
+        }
+    }
+
+    // ===== 第四步：应用状态初始化 =====
     AppState appState;
 
-    // ===== 第四步：主循环 =====
+    // ===== 第五步：主循环 =====
     bool bRunning = true;
     while (bRunning) {
         // 20260319 ZJH 处理 SDL 事件
@@ -1591,8 +1774,8 @@ int main(int, char**) {
         // 20260319 ZJH 顶部工具栏（标签页切换 + GPU 信息）
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 8));
         {
-            // 20260319 ZJH 工作台标签页按钮
-            const char* arrTabs[] = {"Training", "Inference", "Data", "Model Repository"};
+            // 20260320 ZJH 工作台标签页按钮（中文）
+            const char* arrTabs[] = {"训练", "推理", "数据管理", "模型仓库"};
             for (int i = 0; i < 4; ++i) {
                 if (i > 0) ImGui::SameLine();
                 bool bSelected = (appState.nActiveTab == i);
@@ -1609,7 +1792,7 @@ int main(int, char**) {
 
             // 20260319 ZJH 右侧显示设备信息
             ImGui::SameLine(ImGui::GetContentRegionAvail().x - 80);
-            ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "GPU: CPU");
+            ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "设备: CPU");
         }
         ImGui::PopStyleVar();
 
@@ -1648,7 +1831,7 @@ int main(int, char**) {
         SDL_RenderPresent(pRenderer);
     }
 
-    // ===== 第五步：清理 =====
+    // ===== 第六步：清理 =====
     // 20260319 ZJH 停止训练线程
     if (appState.pTrainThread) {
         appState.trainState.bStopRequested.store(true);
