@@ -188,7 +188,68 @@ TEST(ModelsTest, DiceLossForward) {
     EXPECT_GT(loss2.item(), 0.9f);
 }
 
-// ===== 10. ConcatChannels =====
+// ===== 10. YOLOv8NanoForward =====
+// 20260320 ZJH 测试 YOLOv8Nano(20) 在 [1,3,128,128] 上前向传播
+// YOLOv8 使用解耦头（anchor-free），输出维度为 [N, H*W, 4+nClasses]
+TEST(ModelsTest, YOLOv8NanoForward) {
+    // 20260320 ZJH 创建 YOLOv8Nano，20 个类别
+    df::YOLOv8Nano model(20, 3);
+    // 20260320 ZJH 创建 [1, 3, 128, 128] 随机输入
+    auto input = df::Tensor::randn({1, 3, 128, 128});
+    auto output = model.forward(input);
+    // 20260320 ZJH 验证输出形状: [1, (128/16)*(128/16), 4+20] = [1, 64, 24]
+    ASSERT_EQ(output.ndim(), 3);
+    EXPECT_EQ(output.shape(0), 1);    // 20260320 ZJH 批次大小
+    EXPECT_EQ(output.shape(1), 64);   // 20260320 ZJH 8*8 = 64 个空间位置（anchor-free）
+    EXPECT_EQ(output.shape(2), 24);   // 20260320 ZJH 4 + 20 = 24（无 conf 通道）
+    // 20260320 ZJH 验证输出不包含 NaN
+    for (int i = 0; i < std::min(output.numel(), 20); ++i) {
+        EXPECT_FALSE(std::isnan(output.floatDataPtr()[i]));
+    }
+}
+
+// ===== 11. YOLOv7TinyForward =====
+// 20260320 ZJH 测试 YOLOv7Tiny(20) 在 [1,3,128,128] 上前向传播
+// YOLOv7-Tiny 使用 ELAN 块 + anchor-based 检测头，3 级下采样（总 /8）
+TEST(ModelsTest, YOLOv7TinyForward) {
+    // 20260320 ZJH 创建 YOLOv7Tiny，20 个类别
+    df::YOLOv7Tiny model(20, 3);
+    // 20260320 ZJH 创建 [1, 3, 128, 128] 随机输入
+    auto input = df::Tensor::randn({1, 3, 128, 128});
+    auto output = model.forward(input);
+    // 20260320 ZJH 验证输出形状: [1, (128/8)*(128/8)*3, 5+20] = [1, 768, 25]
+    ASSERT_EQ(output.ndim(), 3);
+    EXPECT_EQ(output.shape(0), 1);     // 20260320 ZJH 批次大小
+    EXPECT_EQ(output.shape(1), 768);   // 20260320 ZJH 16*16*3 = 768 个预测
+    EXPECT_EQ(output.shape(2), 25);    // 20260320 ZJH 5 + 20 = 25
+    // 20260320 ZJH 验证输出不包含 NaN
+    for (int i = 0; i < std::min(output.numel(), 20); ++i) {
+        EXPECT_FALSE(std::isnan(output.floatDataPtr()[i]));
+    }
+}
+
+// ===== 12. YOLOv10NanoForward =====
+// 20260320 ZJH 测试 YOLOv10Nano(20) 在 [1,3,128,128] 上前向传播
+// YOLOv10 使用 SCDown 解耦下采样 + C2f 块 + 解耦头，3 级下采样（总 /8）
+TEST(ModelsTest, YOLOv10NanoForward) {
+    // 20260320 ZJH 创建 YOLOv10Nano，20 个类别
+    df::YOLOv10Nano model(20, 3);
+    // 20260320 ZJH 创建 [1, 3, 128, 128] 随机输入
+    auto input = df::Tensor::randn({1, 3, 128, 128});
+    auto output = model.forward(input);
+    // 20260320 ZJH 验证输出形状: [1, (128/8)*(128/8), 4+20] = [1, 256, 24]
+    // SCDown 下采样 3 次: 128 -> 64 -> 32 -> 16, 所以 16*16 = 256
+    ASSERT_EQ(output.ndim(), 3);
+    EXPECT_EQ(output.shape(0), 1);     // 20260320 ZJH 批次大小
+    EXPECT_EQ(output.shape(1), 256);   // 20260320 ZJH 16*16 = 256 个空间位置
+    EXPECT_EQ(output.shape(2), 24);    // 20260320 ZJH 4 + 20 = 24
+    // 20260320 ZJH 验证输出不包含 NaN
+    for (int i = 0; i < std::min(output.numel(), 20); ++i) {
+        EXPECT_FALSE(std::isnan(output.floatDataPtr()[i]));
+    }
+}
+
+// ===== 13. ConcatChannels =====
 // 20260320 ZJH 测试沿通道维度拼接
 TEST(ModelsTest, ConcatChannels) {
     // 20260320 ZJH [1, 3, 4, 4] + [1, 5, 4, 4] -> [1, 8, 4, 4]

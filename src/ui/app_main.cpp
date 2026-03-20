@@ -59,6 +59,7 @@ import df.engine.optimizer;
 import df.engine.loss;
 import df.engine.mnist;
 import df.engine.serializer;
+import df.engine.annotation;
 import df.hal.cpu_backend;
 
 // ============================================================================
@@ -366,6 +367,7 @@ struct AppState {
     int nClsWarmup = 5;                       // 20260320 ZJH 预热轮数
 
     // ---- 检测参数 ----
+    int nDetModel = 2;                        // 20260320 ZJH 检测模型选择: 0=YOLOv5-Nano, 1=YOLOv7-Tiny, 2=YOLOv8-Nano, 3=YOLOv10-Nano
     int nDetEpochs = 20;                      // 20260320 ZJH 训练轮数
     int nDetBatchSize = 8;                    // 20260320 ZJH 批次大小
     float fDetLR = 0.001f;                    // 20260320 ZJH 学习率
@@ -373,6 +375,21 @@ struct AppState {
     float fDetIouThresh = 0.5f;               // 20260320 ZJH IOU 阈值
     float fDetConfThresh = 0.25f;             // 20260320 ZJH 置信度阈值
     int nDetImgSize = 128;                    // 20260320 ZJH 输入图像尺寸
+
+    // ---- 标注模式参数 ----
+    bool bAnnotationMode = false;             // 20260320 ZJH 是否处于标注模式
+    int nAnnotTool = 0;                       // 20260320 ZJH 当前标注工具: 0=矩形框, 1=多边形, 2=画笔, 3=点, 4=选择
+    bool bAnnotDrawing = false;               // 20260320 ZJH 是否正在绘制标注
+    float fAnnotStartX = 0.0f;                // 20260320 ZJH 绘制起点 X（屏幕坐标）
+    float fAnnotStartY = 0.0f;                // 20260320 ZJH 绘制起点 Y（屏幕坐标）
+    float fAnnotZoom = 1.0f;                  // 20260320 ZJH 标注视图缩放倍率
+    float fAnnotPanX = 0.0f;                  // 20260320 ZJH 标注视图平移 X
+    float fAnnotPanY = 0.0f;                  // 20260320 ZJH 标注视图平移 Y
+    int nAnnotCurrentClass = 0;               // 20260320 ZJH 当前选中的类别索引
+    int nAnnotSelectedBBox = -1;              // 20260320 ZJH 当前选中的矩形框索引（-1=无选中）
+    int nAnnotCurrentImage = 0;               // 20260320 ZJH 当前标注的图像索引
+    float fAnnotBrushSize = 10.0f;            // 20260320 ZJH 画笔大小
+    df::AnnotationProject annotProject;       // 20260320 ZJH 标注项目数据
 
     // ---- 分割参数 ----
     int nSegEpochs = 20;                      // 20260320 ZJH 训练轮数
@@ -826,7 +843,7 @@ static void classificationTrainFunc(AppState& state) {
 }
 
 // ============================================================================
-// 20260320 ZJH 检测训练线程函数（YOLOv5Nano + 合成数据）
+// 20260320 ZJH 检测训练线程函数（YOLOv5/v7/v8/v10 + 合成数据）
 // ============================================================================
 static void detectionTrainFunc(AppState& state) {
     auto& ts = state.trainState;
@@ -845,9 +862,40 @@ static void detectionTrainFunc(AppState& state) {
     ts.nTotalEpochs.store(nEpochs);
     ts.fCurrentLR.store(fLR);
 
-    // 20260320 ZJH 构建 YOLOv5Nano 模型
-    ts.appendLog("\xe6\x9e\x84\xe5\xbb\xba YOLOv5-Nano...");
-    auto pModel = std::make_shared<df::YOLOv5Nano>(nClasses, 3);
+    // 20260320 ZJH 根据用户选择构建对应的 YOLO 模型
+    int nDetModelSel = state.nDetModel;  // 20260320 ZJH 读取模型选择
+    const char* arrModelNames[] = {"YOLOv5-Nano", "YOLOv7-Tiny", "YOLOv8-Nano", "YOLOv10-Nano"};
+    { char b[128]; std::snprintf(b, sizeof(b), "\xe6\x9e\x84\xe5\xbb\xba %s...", arrModelNames[nDetModelSel]); ts.appendLog(b); }
+
+    // 20260320 ZJH 使用基类指针持有模型，支持多态
+    std::shared_ptr<df::Module> pModel;
+    int nDownFactor = 16;    // 20260320 ZJH 默认总下采样倍数
+    int nAnchors = 3;        // 20260320 ZJH 默认 anchor 数
+    bool bAnchorFree = false; // 20260320 ZJH 是否为 anchor-free 模型
+
+    switch (nDetModelSel) {
+    case 0:  // 20260320 ZJH YOLOv5-Nano: CSP + anchor-based, /16
+        pModel = std::make_shared<df::YOLOv5Nano>(nClasses, 3);
+        nDownFactor = 16; nAnchors = 3; bAnchorFree = false;
+        break;
+    case 1:  // 20260320 ZJH YOLOv7-Tiny: ELAN + anchor-based, /8
+        pModel = std::make_shared<df::YOLOv7Tiny>(nClasses, 3);
+        nDownFactor = 8; nAnchors = 3; bAnchorFree = false;
+        break;
+    case 2:  // 20260320 ZJH YOLOv8-Nano: C2f + 解耦头, /16, anchor-free
+        pModel = std::make_shared<df::YOLOv8Nano>(nClasses, 3);
+        nDownFactor = 16; nAnchors = 1; bAnchorFree = true;
+        break;
+    case 3:  // 20260320 ZJH YOLOv10-Nano: SCDown + C2f + 解耦头, /8, anchor-free
+        pModel = std::make_shared<df::YOLOv10Nano>(nClasses, 3);
+        nDownFactor = 8; nAnchors = 1; bAnchorFree = true;
+        break;
+    default:  // 20260320 ZJH 默认 YOLOv8-Nano
+        pModel = std::make_shared<df::YOLOv8Nano>(nClasses, 3);
+        nDownFactor = 16; nAnchors = 1; bAnchorFree = true;
+        break;
+    }
+
     auto vecParams = pModel->parameters();
     int nP = 0; for (auto* p : vecParams) nP += p->numel();
     { char b[128]; std::snprintf(b, sizeof(b), "\xe5\x8f\x82\xe6\x95\xb0\xe9\x87\x8f: %d", nP); ts.appendLog(b); }
@@ -857,10 +905,9 @@ static void detectionTrainFunc(AppState& state) {
 
     // 20260320 ZJH 生成合成检测数据
     int nSamples = 64;
-    int nAnchors = 3;
-    int nGrid = (nImgSize / 16);  // 20260320 ZJH YOLOv5Nano 总下采样 16 倍
-    int nPreds = nGrid * nGrid * nAnchors;
-    int nPredDim = 5 + nClasses;
+    int nGrid = (nImgSize / nDownFactor);  // 20260320 ZJH 根据下采样倍数计算网格大小
+    int nPreds = nGrid * nGrid * nAnchors; // 20260320 ZJH 总预测数
+    int nPredDim = bAnchorFree ? (4 + nClasses) : (5 + nClasses);  // 20260320 ZJH anchor-free 无 conf
 
     ts.appendLog("\xe7\x94\x9f\xe6\x88\x90\xe5\x90\x88\xe6\x88\x90\xe6\xa3\x80\xe6\xb5\x8b\xe6\x95\xb0\xe6\x8d\xae...");
     auto images = df::Tensor::zeros({nSamples, 3, nImgSize, nImgSize});
@@ -2239,7 +2286,7 @@ static void drawProjectNav(AppState& state) {
     };
     TaskEntry arrTasks[] = {
         {"\xe5\x9b\xbe\xe5\x83\x8f\xe5\x88\x86\xe7\xb1\xbb", "MLP / ResNet", "MNIST", TaskType::Classification},
-        {"\xe7\x9b\xae\xe6\xa0\x87\xe6\xa3\x80\xe6\xb5\x8b", "YOLOv5-Nano", "\xe5\x90\x88\xe6\x88\x90\xe6\x95\xb0\xe6\x8d\xae", TaskType::Detection},
+        {"\xe7\x9b\xae\xe6\xa0\x87\xe6\xa3\x80\xe6\xb5\x8b", "YOLO (v5/v7/v8/v10)", "\xe5\x90\x88\xe6\x88\x90\xe6\x95\xb0\xe6\x8d\xae", TaskType::Detection},
         {"\xe8\xaf\xad\xe4\xb9\x89\xe5\x88\x86\xe5\x89\xb2", "U-Net", "\xe5\x90\x88\xe6\x88\x90\xe6\x95\xb0\xe6\x8d\xae", TaskType::Segmentation},
         {"\xe5\xbc\x82\xe5\xb8\xb8\xe6\xa3\x80\xe6\xb5\x8b", "AutoEncoder", "\xe5\x90\x88\xe6\x88\x90\xe6\x95\xb0\xe6\x8d\xae", TaskType::AnomalyDetection},
     };
@@ -2312,6 +2359,494 @@ static void drawProjectNav(AppState& state) {
 // ============================================================================
 // 20260320 ZJH 绘制步骤 1：数据（适配所有任务类型）
 // ============================================================================
+// ============================================================================
+// 20260320 ZJH 绘制标注工作台 — 图像标注模式 UI
+// 包含：工具栏 + 图像查看器 + 类别管理 + 图像导航 + BBox 绘制
+// ============================================================================
+static void drawAnnotationWorkbench(AppState& state) {
+    auto& proj = state.annotProject;  // 20260320 ZJH 引用标注项目
+
+    // 20260320 ZJH 标注工作台顶部工具栏
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 4));
+    {
+        // 20260320 ZJH 返回按钮：退出标注模式
+        if (ImGui::Button("\xe2\x86\x90 \xe8\xbf\x94\xe5\x9b\x9e")) {  // "← 返回"
+            state.bAnnotationMode = false;
+        }
+        ImGui::SameLine();
+        ImGui::Text("|");
+        ImGui::SameLine();
+
+        // 20260320 ZJH 标注工具选择按钮
+        const char* arrToolNames[] = {
+            "\xe7\x9f\xa9\xe5\xbd\xa2\xe6\xa1\x86 (B)",   // "矩形框 (B)"
+            "\xe5\xa4\x9a\xe8\xbe\xb9\xe5\xbd\xa2 (P)",   // "多边形 (P)"
+            "\xe7\x94\xbb\xe7\xac\x94 (D)",               // "画笔 (D)"
+            "\xe7\x82\xb9\xe6\xa0\x87\xe6\xb3\xa8 (T)",   // "点标注 (T)"
+            "\xe9\x80\x89\xe6\x8b\xa9 (V)"                 // "选择 (V)"
+        };
+        for (int i = 0; i < 5; ++i) {
+            if (i > 0) ImGui::SameLine();
+            bool bSel = (state.nAnnotTool == i);
+            if (bSel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.231f, 0.510f, 0.965f, 0.80f));
+            if (ImGui::Button(arrToolNames[i])) state.nAnnotTool = i;
+            if (bSel) ImGui::PopStyleColor();
+        }
+        ImGui::SameLine();
+        ImGui::Text("|");
+        ImGui::SameLine();
+
+        // 20260320 ZJH 删除选中标注按钮
+        if (ImGui::Button("\xe5\x88\xa0\xe9\x99\xa4 (Del)")) {  // "删除 (Del)"
+            if (state.nAnnotSelectedBBox >= 0 && state.nAnnotCurrentImage >= 0
+                && state.nAnnotCurrentImage < static_cast<int>(proj.vecAnnotations.size())) {
+                auto& ann = proj.vecAnnotations[state.nAnnotCurrentImage];
+                if (state.nAnnotSelectedBBox < static_cast<int>(ann.vecBBoxes.size())) {
+                    ann.vecBBoxes.erase(ann.vecBBoxes.begin() + state.nAnnotSelectedBBox);
+                    state.nAnnotSelectedBBox = -1;
+                }
+            }
+        }
+
+        // 20260320 ZJH 快捷键处理
+        if (ImGui::IsKeyPressed(ImGuiKey_B)) state.nAnnotTool = 0;      // 20260320 ZJH B -> 矩形框
+        if (ImGui::IsKeyPressed(ImGuiKey_P)) state.nAnnotTool = 1;      // 20260320 ZJH P -> 多边形
+        if (ImGui::IsKeyPressed(ImGuiKey_D)) state.nAnnotTool = 2;      // 20260320 ZJH D -> 画笔
+        if (ImGui::IsKeyPressed(ImGuiKey_T)) state.nAnnotTool = 3;      // 20260320 ZJH T -> 点标注
+        if (ImGui::IsKeyPressed(ImGuiKey_V)) state.nAnnotTool = 4;      // 20260320 ZJH V -> 选择
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete) && state.nAnnotSelectedBBox >= 0) {
+            // 20260320 ZJH Del 键删除选中标注
+            if (state.nAnnotCurrentImage >= 0
+                && state.nAnnotCurrentImage < static_cast<int>(proj.vecAnnotations.size())) {
+                auto& ann = proj.vecAnnotations[state.nAnnotCurrentImage];
+                if (state.nAnnotSelectedBBox < static_cast<int>(ann.vecBBoxes.size())) {
+                    ann.vecBBoxes.erase(ann.vecBBoxes.begin() + state.nAnnotSelectedBBox);
+                    state.nAnnotSelectedBBox = -1;
+                }
+            }
+        }
+    }
+    ImGui::PopStyleVar();
+    ImGui::Separator();
+
+    // 20260320 ZJH 三栏布局：左侧工具面板 + 中间图像 + 右侧类别管理
+    float fAvailW = ImGui::GetContentRegionAvail().x;
+    float fAvailH = ImGui::GetContentRegionAvail().y;
+    float fLeftW = 160.0f;   // 20260320 ZJH 左侧面板宽度
+    float fRightW = 200.0f;  // 20260320 ZJH 右侧面板宽度
+    float fCenterW = fAvailW - fLeftW - fRightW - 12.0f;  // 20260320 ZJH 中间区域宽度
+    float fBottomH = 60.0f;  // 20260320 ZJH 底部导航条高度
+    float fMainH = fAvailH - fBottomH - 4.0f;  // 20260320 ZJH 主区域高度
+
+    // ---- 左侧标注工具面板 ----
+    ImGui::BeginChild("##AnnotTools", ImVec2(fLeftW, fMainH), ImGuiChildFlags_Borders);
+    {
+        ImGui::TextColored(ImVec4(0.58f, 0.75f, 1.0f, 1.0f), "\xe6\xa0\x87\xe6\xb3\xa8\xe5\xb7\xa5\xe5\x85\xb7");  // "标注工具"
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // 20260320 ZJH 画笔大小（仅画笔工具时显示）
+        if (state.nAnnotTool == 2) {
+            ImGui::Text("\xe7\xac\x94\xe5\x88\xb7\xe5\xa4\xa7\xe5\xb0\x8f:");  // "笔刷大小:"
+            ImGui::SliderFloat("##brush", &state.fAnnotBrushSize, 1.0f, 50.0f, "%.0f");
+        }
+
+        // 20260320 ZJH 当前类别选择
+        ImGui::Spacing();
+        ImGui::Text("\xe5\xbd\x93\xe5\x89\x8d\xe7\xb1\xbb\xe5\x88\xab:");  // "当前类别:"
+        if (!proj.vecClassNames.empty()) {
+            if (ImGui::BeginCombo("##cls", proj.vecClassNames[state.nAnnotCurrentClass].c_str())) {
+                for (int i = 0; i < static_cast<int>(proj.vecClassNames.size()); ++i) {
+                    bool bSel = (state.nAnnotCurrentClass == i);
+                    if (ImGui::Selectable(proj.vecClassNames[i].c_str(), bSel)) {
+                        state.nAnnotCurrentClass = i;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        } else {
+            ImGui::TextDisabled("(\xe6\x97\xa0\xe7\xb1\xbb\xe5\x88\xab)");  // "(无类别)"
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // 20260320 ZJH 缩放控制
+        ImGui::Text("\xe7\xbc\xa9\xe6\x94\xbe: %.0f%%", state.fAnnotZoom * 100.0f);  // "缩放:"
+        if (ImGui::Button("\xe9\x80\x82\xe5\x90\x88\xe7\xaa\x97\xe5\x8f\xa3")) {  // "适合窗口"
+            state.fAnnotZoom = 1.0f;
+            state.fAnnotPanX = 0.0f;
+            state.fAnnotPanY = 0.0f;
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // 20260320 ZJH 导出按钮
+        ImGui::Text("\xe5\xaf\xbc\xe5\x87\xba\xe6\xa0\x87\xe6\xb3\xa8:");  // "导出标注:"
+        if (ImGui::Button("YOLO \xe6\xa0\xbc\xe5\xbc\x8f", ImVec2(-1, 0))) {  // "YOLO 格式"
+            df::saveAnnotationsYOLO(proj, "data/labels_yolo");
+        }
+        if (ImGui::Button("VOC XML", ImVec2(-1, 0))) {
+            df::saveAnnotationsVOC(proj, "data/labels_voc");
+        }
+        if (ImGui::Button("COCO JSON", ImVec2(-1, 0))) {
+            df::saveAnnotationsCOCO(proj, "data/annotations.json");
+        }
+        if (ImGui::Button("DeepForge", ImVec2(-1, 0))) {
+            df::saveAnnotationsDF(proj, "data/project.dfann");
+        }
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+
+    // ---- 中间图像查看器 + 标注叠加 ----
+    ImGui::BeginChild("##AnnotImage", ImVec2(fCenterW, fMainH), ImGuiChildFlags_Borders);
+    {
+        // 20260320 ZJH 获取绘制列表和窗口区域
+        auto* pDrawList = ImGui::GetWindowDrawList();
+        ImVec2 canvasPos = ImGui::GetCursorScreenPos();   // 20260320 ZJH 画布左上角
+        ImVec2 canvasSize = ImGui::GetContentRegionAvail();  // 20260320 ZJH 画布大小
+
+        // 20260320 ZJH 绘制背景网格（表示图像区域）
+        pDrawList->AddRectFilled(canvasPos,
+            ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y),
+            IM_COL32(30, 30, 40, 255));
+
+        // 20260320 ZJH 计算图像显示区域（模拟图像位置）
+        float fImgDisplayW = canvasSize.x * 0.8f * state.fAnnotZoom;   // 20260320 ZJH 显示宽度
+        float fImgDisplayH = canvasSize.y * 0.8f * state.fAnnotZoom;   // 20260320 ZJH 显示高度
+        float fImgPosX = canvasPos.x + (canvasSize.x - fImgDisplayW) * 0.5f + state.fAnnotPanX;
+        float fImgPosY = canvasPos.y + (canvasSize.y - fImgDisplayH) * 0.5f + state.fAnnotPanY;
+
+        // 20260320 ZJH 绘制图像边框（占位，实际图像需加载纹理）
+        pDrawList->AddRect(ImVec2(fImgPosX, fImgPosY),
+            ImVec2(fImgPosX + fImgDisplayW, fImgPosY + fImgDisplayH),
+            IM_COL32(100, 100, 120, 255), 0, 0, 1.0f);
+
+        // 20260320 ZJH 图像区域内显示提示文字
+        if (proj.vecAnnotations.empty()) {
+            const char* strHint = "\xe8\xaf\xb7\xe5\x85\x88\xe5\xaf\xbc\xe5\x85\xa5\xe5\x9b\xbe\xe7\x89\x87";  // "请先导入图片"
+            ImVec2 hintSize = ImGui::CalcTextSize(strHint);
+            pDrawList->AddText(
+                ImVec2(fImgPosX + (fImgDisplayW - hintSize.x) * 0.5f,
+                       fImgPosY + (fImgDisplayH - hintSize.y) * 0.5f),
+                IM_COL32(150, 150, 170, 255), strHint);
+        } else {
+            // 20260320 ZJH 显示当前图像路径
+            int nCur = state.nAnnotCurrentImage;
+            if (nCur >= 0 && nCur < static_cast<int>(proj.vecAnnotations.size())) {
+                std::filesystem::path imgP(proj.vecAnnotations[nCur].strImagePath);
+                std::string strName = imgP.filename().string();
+                pDrawList->AddText(ImVec2(fImgPosX + 4, fImgPosY + 4),
+                    IM_COL32(200, 200, 220, 255), strName.c_str());
+            }
+        }
+
+        // 20260320 ZJH 绘制现有标注（矩形框）
+        if (state.nAnnotCurrentImage >= 0
+            && state.nAnnotCurrentImage < static_cast<int>(proj.vecAnnotations.size())) {
+            auto& curAnn = proj.vecAnnotations[state.nAnnotCurrentImage];
+            // 20260320 ZJH 预定义类别颜色
+            ImU32 arrColors[] = {
+                IM_COL32(59, 130, 246, 255),    // 20260320 ZJH 蓝色
+                IM_COL32(220, 50, 50, 255),     // 20260320 ZJH 红色
+                IM_COL32(50, 200, 80, 255),     // 20260320 ZJH 绿色
+                IM_COL32(240, 180, 30, 255),    // 20260320 ZJH 黄色
+                IM_COL32(180, 60, 220, 255),    // 20260320 ZJH 紫色
+                IM_COL32(30, 200, 200, 255),    // 20260320 ZJH 青色
+                IM_COL32(255, 120, 60, 255),    // 20260320 ZJH 橙色
+                IM_COL32(200, 200, 200, 255)    // 20260320 ZJH 灰色
+            };
+            int nNumColors = 8;
+
+            for (int b = 0; b < static_cast<int>(curAnn.vecBBoxes.size()); ++b) {
+                auto& bbox = curAnn.vecBBoxes[b];
+                // 20260320 ZJH 将归一化坐标转换为屏幕坐标
+                float fX1 = fImgPosX + bbox.fX * fImgDisplayW;
+                float fY1 = fImgPosY + bbox.fY * fImgDisplayH;
+                float fX2 = fX1 + bbox.fWidth * fImgDisplayW;
+                float fY2 = fY1 + bbox.fHeight * fImgDisplayH;
+
+                ImU32 nColor = arrColors[bbox.nClassId % nNumColors];
+                bool bSelected = (b == state.nAnnotSelectedBBox);
+
+                // 20260320 ZJH 半透明填充
+                pDrawList->AddRectFilled(ImVec2(fX1, fY1), ImVec2(fX2, fY2),
+                    (nColor & 0x00FFFFFF) | 0x30000000);
+                // 20260320 ZJH 边框（选中时加粗）
+                pDrawList->AddRect(ImVec2(fX1, fY1), ImVec2(fX2, fY2),
+                    nColor, 0, 0, bSelected ? 3.0f : 2.0f);
+                // 20260320 ZJH 类别标签
+                pDrawList->AddText(ImVec2(fX1 + 2, fY1 + 2), IM_COL32(255, 255, 255, 255),
+                    bbox.strClassName.c_str());
+
+                // 20260320 ZJH 选中状态显示调整手柄
+                if (bSelected) {
+                    float fHS = 4.0f;  // 20260320 ZJH 手柄大小
+                    pDrawList->AddRectFilled(ImVec2(fX1-fHS, fY1-fHS), ImVec2(fX1+fHS, fY1+fHS), nColor);
+                    pDrawList->AddRectFilled(ImVec2(fX2-fHS, fY1-fHS), ImVec2(fX2+fHS, fY1+fHS), nColor);
+                    pDrawList->AddRectFilled(ImVec2(fX1-fHS, fY2-fHS), ImVec2(fX1+fHS, fY2+fHS), nColor);
+                    pDrawList->AddRectFilled(ImVec2(fX2-fHS, fY2-fHS), ImVec2(fX2+fHS, fY2+fHS), nColor);
+                }
+            }
+        }
+
+        // 20260320 ZJH 鼠标交互：绘制新矩形框 / 选择 / 缩放 / 平移
+        ImGui::SetCursorScreenPos(canvasPos);
+        ImGui::InvisibleButton("##annotCanvas", canvasSize,
+            ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
+        bool bHovered = ImGui::IsItemHovered();
+
+        if (bHovered) {
+            ImVec2 mousePos = ImGui::GetMousePos();
+
+            // 20260320 ZJH 鼠标滚轮缩放
+            float fWheel = ImGui::GetIO().MouseWheel;
+            if (std::abs(fWheel) > 0.01f) {
+                state.fAnnotZoom *= (fWheel > 0) ? 1.1f : 0.9f;
+                if (state.fAnnotZoom < 0.1f) state.fAnnotZoom = 0.1f;
+                if (state.fAnnotZoom > 10.0f) state.fAnnotZoom = 10.0f;
+            }
+
+            // 20260320 ZJH 中键拖拽平移
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Middle);
+                state.fAnnotPanX += delta.x;
+                state.fAnnotPanY += delta.y;
+                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Middle);
+            }
+
+            // 20260320 ZJH 左键交互
+            if (state.nAnnotTool == 0) {  // 20260320 ZJH 矩形框工具
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    // 20260320 ZJH 开始绘制矩形框
+                    state.bAnnotDrawing = true;
+                    state.fAnnotStartX = mousePos.x;
+                    state.fAnnotStartY = mousePos.y;
+                }
+                if (state.bAnnotDrawing && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                    // 20260320 ZJH 绘制预览矩形
+                    pDrawList->AddRect(
+                        ImVec2(state.fAnnotStartX, state.fAnnotStartY),
+                        mousePos,
+                        IM_COL32(0, 150, 255, 255), 0, 0, 1.5f);
+                    // 20260320 ZJH 显示尺寸信息
+                    float fW = std::abs(mousePos.x - state.fAnnotStartX);
+                    float fH = std::abs(mousePos.y - state.fAnnotStartY);
+                    char arrSizeBuf[64];
+                    std::snprintf(arrSizeBuf, sizeof(arrSizeBuf), "%.0fx%.0f", fW, fH);
+                    pDrawList->AddText(ImVec2(mousePos.x + 5, mousePos.y + 5),
+                        IM_COL32(255, 255, 255, 200), arrSizeBuf);
+                }
+                if (state.bAnnotDrawing && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                    // 20260320 ZJH 完成矩形框绘制，转换为归一化坐标并添加
+                    state.bAnnotDrawing = false;
+                    float fMinX = std::min(state.fAnnotStartX, mousePos.x);
+                    float fMinY = std::min(state.fAnnotStartY, mousePos.y);
+                    float fMaxX = std::max(state.fAnnotStartX, mousePos.x);
+                    float fMaxY = std::max(state.fAnnotStartY, mousePos.y);
+
+                    // 20260320 ZJH 只在拖拽距离大于 5 像素时创建标注
+                    if ((fMaxX - fMinX) > 5.0f && (fMaxY - fMinY) > 5.0f && fImgDisplayW > 1.0f) {
+                        df::BBoxAnnotation newBBox;
+                        newBBox.fX = (fMinX - fImgPosX) / fImgDisplayW;       // 20260320 ZJH 归一化 X
+                        newBBox.fY = (fMinY - fImgPosY) / fImgDisplayH;       // 20260320 ZJH 归一化 Y
+                        newBBox.fWidth = (fMaxX - fMinX) / fImgDisplayW;      // 20260320 ZJH 归一化宽度
+                        newBBox.fHeight = (fMaxY - fMinY) / fImgDisplayH;     // 20260320 ZJH 归一化高度
+                        // 20260320 ZJH 裁剪到 [0, 1] 范围
+                        newBBox.fX = std::max(0.0f, std::min(1.0f, newBBox.fX));
+                        newBBox.fY = std::max(0.0f, std::min(1.0f, newBBox.fY));
+                        newBBox.fWidth = std::min(newBBox.fWidth, 1.0f - newBBox.fX);
+                        newBBox.fHeight = std::min(newBBox.fHeight, 1.0f - newBBox.fY);
+                        newBBox.nClassId = state.nAnnotCurrentClass;
+                        if (state.nAnnotCurrentClass < static_cast<int>(proj.vecClassNames.size())) {
+                            newBBox.strClassName = proj.vecClassNames[state.nAnnotCurrentClass];
+                        }
+
+                        // 20260320 ZJH 确保当前图像有标注结构
+                        if (state.nAnnotCurrentImage >= 0
+                            && state.nAnnotCurrentImage < static_cast<int>(proj.vecAnnotations.size())) {
+                            proj.vecAnnotations[state.nAnnotCurrentImage].vecBBoxes.push_back(newBBox);
+                        }
+                    }
+                }
+            } else if (state.nAnnotTool == 4) {  // 20260320 ZJH 选择工具
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    state.nAnnotSelectedBBox = -1;
+                    // 20260320 ZJH 检查点击是否在某个 bbox 内
+                    if (state.nAnnotCurrentImage >= 0
+                        && state.nAnnotCurrentImage < static_cast<int>(proj.vecAnnotations.size())) {
+                        auto& curAnn = proj.vecAnnotations[state.nAnnotCurrentImage];
+                        for (int b = static_cast<int>(curAnn.vecBBoxes.size()) - 1; b >= 0; --b) {
+                            auto& bbox = curAnn.vecBBoxes[b];
+                            float fX1 = fImgPosX + bbox.fX * fImgDisplayW;
+                            float fY1 = fImgPosY + bbox.fY * fImgDisplayH;
+                            float fX2 = fX1 + bbox.fWidth * fImgDisplayW;
+                            float fY2 = fY1 + bbox.fHeight * fImgDisplayH;
+                            if (mousePos.x >= fX1 && mousePos.x <= fX2
+                                && mousePos.y >= fY1 && mousePos.y <= fY2) {
+                                state.nAnnotSelectedBBox = b;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 20260320 ZJH 显示鼠标坐标（归一化）
+            float fNormX = (mousePos.x - fImgPosX) / fImgDisplayW;
+            float fNormY = (mousePos.y - fImgPosY) / fImgDisplayH;
+            if (fNormX >= 0.0f && fNormX <= 1.0f && fNormY >= 0.0f && fNormY <= 1.0f) {
+                char arrCoordBuf[64];
+                std::snprintf(arrCoordBuf, sizeof(arrCoordBuf), "(%.3f, %.3f)", fNormX, fNormY);
+                pDrawList->AddText(
+                    ImVec2(canvasPos.x + canvasSize.x - 100, canvasPos.y + canvasSize.y - 20),
+                    IM_COL32(180, 180, 200, 255), arrCoordBuf);
+            }
+        }
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+
+    // ---- 右侧类别管理面板 ----
+    ImGui::BeginChild("##AnnotClasses", ImVec2(0, fMainH), ImGuiChildFlags_Borders);
+    {
+        ImGui::TextColored(ImVec4(0.58f, 0.75f, 1.0f, 1.0f), "\xe7\xb1\xbb\xe5\x88\xab\xe7\xae\xa1\xe7\x90\x86");  // "类别管理"
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // 20260320 ZJH 显示类别列表
+        for (int i = 0; i < static_cast<int>(proj.vecClassNames.size()); ++i) {
+            ImU32 arrColors[] = {
+                IM_COL32(59, 130, 246, 255), IM_COL32(220, 50, 50, 255),
+                IM_COL32(50, 200, 80, 255), IM_COL32(240, 180, 30, 255),
+                IM_COL32(180, 60, 220, 255), IM_COL32(30, 200, 200, 255),
+                IM_COL32(255, 120, 60, 255), IM_COL32(200, 200, 200, 255)
+            };
+            ImU32 nCol = arrColors[i % 8];
+            // 20260320 ZJH 绘制类别颜色方块
+            auto* pDL = ImGui::GetWindowDrawList();
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            pDL->AddRectFilled(ImVec2(p.x, p.y + 2), ImVec2(p.x + 12, p.y + 14), nCol);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 18);
+
+            // 20260320 ZJH 统计该类别的标注数量
+            int nCount = 0;
+            for (const auto& ann : proj.vecAnnotations) {
+                for (const auto& b : ann.vecBBoxes) {
+                    if (b.nClassId == i) ++nCount;
+                }
+            }
+
+            bool bSel = (state.nAnnotCurrentClass == i);
+            char arrLabel[128];
+            std::snprintf(arrLabel, sizeof(arrLabel), "%s (%d)", proj.vecClassNames[i].c_str(), nCount);
+            if (ImGui::Selectable(arrLabel, bSel)) {
+                state.nAnnotCurrentClass = i;
+            }
+        }
+
+        ImGui::Spacing();
+        // 20260320 ZJH 添加类别按钮
+        static char s_arrNewClassName[64] = "";
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputText("##newcls", s_arrNewClassName, sizeof(s_arrNewClassName));
+        if (ImGui::Button("+ \xe6\xb7\xbb\xe5\x8a\xa0\xe7\xb1\xbb\xe5\x88\xab", ImVec2(-1, 0))) {  // "+ 添加类别"
+            if (std::strlen(s_arrNewClassName) > 0) {
+                proj.vecClassNames.push_back(std::string(s_arrNewClassName));
+                s_arrNewClassName[0] = '\0';
+            }
+        }
+        // 20260320 ZJH 删除最后一个类别
+        if (!proj.vecClassNames.empty()) {
+            if (ImGui::Button("- \xe5\x88\xa0\xe9\x99\xa4\xe7\xb1\xbb\xe5\x88\xab", ImVec2(-1, 0))) {  // "- 删除类别"
+                proj.vecClassNames.pop_back();
+                if (state.nAnnotCurrentClass >= static_cast<int>(proj.vecClassNames.size())) {
+                    state.nAnnotCurrentClass = std::max(0, static_cast<int>(proj.vecClassNames.size()) - 1);
+                }
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // 20260320 ZJH 当前图像标注列表
+        ImGui::TextColored(ImVec4(0.58f, 0.75f, 1.0f, 1.0f), "\xe5\xbd\x93\xe5\x89\x8d\xe5\x9b\xbe\xe5\x83\x8f\xe6\xa0\x87\xe6\xb3\xa8");  // "当前图像标注"
+        ImGui::Separator();
+        if (state.nAnnotCurrentImage >= 0
+            && state.nAnnotCurrentImage < static_cast<int>(proj.vecAnnotations.size())) {
+            auto& curAnn = proj.vecAnnotations[state.nAnnotCurrentImage];
+            for (int b = 0; b < static_cast<int>(curAnn.vecBBoxes.size()); ++b) {
+                auto& bbox = curAnn.vecBBoxes[b];
+                char arrBuf[128];
+                std::snprintf(arrBuf, sizeof(arrBuf), "BBox: %s [%.2f,%.2f]",
+                    bbox.strClassName.c_str(), bbox.fX, bbox.fY);
+                bool bSel = (b == state.nAnnotSelectedBBox);
+                if (ImGui::Selectable(arrBuf, bSel)) {
+                    state.nAnnotSelectedBBox = b;
+                }
+            }
+            if (curAnn.vecBBoxes.empty()) {
+                ImGui::TextDisabled("(\xe6\x97\xa0\xe6\xa0\x87\xe6\xb3\xa8)");  // "(无标注)"
+            }
+        }
+    }
+    ImGui::EndChild();
+
+    // ---- 底部图像导航条 ----
+    ImGui::BeginChild("##AnnotNav", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    {
+        ImGui::TextColored(ImVec4(0.58f, 0.75f, 1.0f, 1.0f), "\xe5\x9b\xbe\xe5\x83\x8f\xe5\x88\x97\xe8\xa1\xa8");  // "图像列表"
+        ImGui::SameLine();
+
+        // 20260320 ZJH 显示标注进度
+        int nAnnotated = 0;
+        int nTotal = static_cast<int>(proj.vecAnnotations.size());
+        for (const auto& ann : proj.vecAnnotations) {
+            if (!ann.vecBBoxes.empty() || !ann.vecPolygons.empty()) ++nAnnotated;
+        }
+        char arrProgressBuf[128];
+        std::snprintf(arrProgressBuf, sizeof(arrProgressBuf),
+            "\xe8\xbf\x9b\xe5\xba\xa6: %d/%d \xe5\xbc\xa0\xe5\xb7\xb2\xe6\xa0\x87\xe6\xb3\xa8 (%d%%)",
+            nAnnotated, nTotal, nTotal > 0 ? (nAnnotated * 100 / nTotal) : 0);
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 200);
+        ImGui::TextDisabled("%s", arrProgressBuf);
+
+        // 20260320 ZJH 前一张/后一张按钮
+        if (ImGui::Button("\xe2\x97\x80")) {  // "◀"
+            if (state.nAnnotCurrentImage > 0) state.nAnnotCurrentImage--;
+        }
+        ImGui::SameLine();
+
+        // 20260320 ZJH 图像缩略图列表（简化为按钮）
+        int nMaxShow = std::min(nTotal, 10);
+        for (int i = 0; i < nMaxShow; ++i) {
+            bool bCurrent = (i == state.nAnnotCurrentImage);
+            bool bHasAnnot = !proj.vecAnnotations[i].vecBBoxes.empty();
+            char arrImgLabel[32];
+            std::snprintf(arrImgLabel, sizeof(arrImgLabel), "%s%d", bHasAnnot ? "*" : "", i + 1);
+            if (bCurrent) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.231f, 0.510f, 0.965f, 0.80f));
+            if (ImGui::Button(arrImgLabel)) state.nAnnotCurrentImage = i;
+            if (bCurrent) ImGui::PopStyleColor();
+            ImGui::SameLine();
+        }
+        if (nTotal > nMaxShow) ImGui::Text("...");
+
+        ImGui::SameLine();
+        if (ImGui::Button("\xe2\x96\xb6")) {  // "▶"
+            if (state.nAnnotCurrentImage < nTotal - 1) state.nAnnotCurrentImage++;
+        }
+    }
+    ImGui::EndChild();
+}
+
+// ============================================================================
+// 20260320 ZJH 绘制步骤 1：数据（适配所有任务类型）
+// ============================================================================
 static void drawStepData(AppState& state) {
     if (!state.bDataChecked) checkDatasets(state);
 
@@ -2361,8 +2896,43 @@ static void drawStepData(AppState& state) {
         } endCard();
 
         if (beginCard("\xe6\xa0\x87\xe6\xb3\xa8\xe7\xbb\x9f\xe8\xae\xa1")) {  // "标注统计"
-            ImGui::Text("\xe6\xaf\x8f\xe4\xb8\xaa\xe6\xa0\xb7\xe6\x9c\xac 1 \xe4\xb8\xaa\xe7\x9b\xae\xe6\xa0\x87");
-            ImGui::Text("\xe6\x80\xbb\xe6\xa0\x87\xe6\xb3\xa8\xe6\x95\xb0: 64");
+            // 20260320 ZJH 从标注项目读取统计数据
+            int nTotalBBoxes = 0;
+            for (const auto& ann : state.annotProject.vecAnnotations) {
+                nTotalBBoxes += static_cast<int>(ann.vecBBoxes.size());
+            }
+            int nAnnotImages = static_cast<int>(state.annotProject.vecAnnotations.size());
+            ImGui::Text("\xe5\x9b\xbe\xe7\x89\x87\xe6\x95\xb0: %d", nAnnotImages);
+            ImGui::Text("\xe6\x80\xbb\xe6\xa0\x87\xe6\xb3\xa8\xe6\x95\xb0: %d", nTotalBBoxes);
+            ImGui::Text("\xe7\xb1\xbb\xe5\x88\xab\xe6\x95\xb0: %d", static_cast<int>(state.annotProject.vecClassNames.size()));
+        } endCard();
+
+        // 20260320 ZJH 标注工作台入口按钮
+        if (beginCard("\xe6\x95\xb0\xe6\x8d\xae\xe6\xa0\x87\xe6\xb3\xa8")) {  // "数据标注"
+            ImGui::Text("\xe4\xbd\xbf\xe7\x94\xa8\xe5\x86\x85\xe7\xbd\xae\xe6\xa0\x87\xe6\xb3\xa8\xe5\xb7\xa5\xe5\x85\xb7\xe4\xb8\xba\xe5\x9b\xbe\xe5\x83\x8f\xe6\xb7\xbb\xe5\x8a\xa0\xe7\x9f\xa9\xe5\xbd\xa2\xe6\xa1\x86/\xe5\xa4\x9a\xe8\xbe\xb9\xe5\xbd\xa2\xe6\xa0\x87\xe6\xb3\xa8");
+            ImGui::Spacing();
+            if (ImGui::Button("\xe6\x89\x93\xe5\xbc\x80\xe6\xa0\x87\xe6\xb3\xa8\xe5\xb7\xa5\xe4\xbd\x9c\xe5\x8f\xb0", ImVec2(-1, 32))) {  // "打开标注工作台"
+                state.bAnnotationMode = true;
+                // 20260320 ZJH 初始化标注项目（如果为空）
+                if (state.annotProject.vecClassNames.empty()) {
+                    state.annotProject.strName = "Detection Project";
+                    state.annotProject.annotType = df::AnnotationType::BBox;
+                    // 20260320 ZJH 添加默认类别
+                    for (int c = 0; c < state.nDetClasses; ++c) {
+                        state.annotProject.vecClassNames.push_back(
+                            "\xe7\xb1\xbb\xe5\x88\xab_" + std::to_string(c));  // "类别_N"
+                    }
+                }
+                // 20260320 ZJH 确保至少有一张图像的标注结构
+                if (state.annotProject.vecAnnotations.empty()) {
+                    df::ImageAnnotation ann;
+                    ann.strImagePath = "sample_image.png";
+                    ann.nImageWidth = state.nDetImgSize;
+                    ann.nImageHeight = state.nDetImgSize;
+                    state.annotProject.vecAnnotations.push_back(ann);
+                }
+            }
+            ImGui::TextDisabled("\xe6\x94\xaf\xe6\x8c\x81\xe5\xaf\xbc\xe5\x87\xba: YOLO / VOC / COCO / DeepForge");  // "支持导出: YOLO / VOC / COCO / DeepForge"
         } endCard();
         break;
     }
@@ -2467,8 +3037,17 @@ static void drawStepConfig(AppState& state) {
     }
     case TaskType::Detection: {
         if (beginCard("\xe6\xa3\x80\xe6\xb5\x8b\xe6\xa8\xa1\xe5\x9e\x8b")) {  // "检测模型"
-            ImGui::Text("\xe6\xa8\xa1\xe5\x9e\x8b: YOLOv5-Nano");
-            ImGui::Text("Anchor \xe6\x95\xb0: 3");
+            // 20260320 ZJH 模型选择：4 种 YOLO 变体
+            const char* arrDetModels[] = {
+                "YOLOv5-Nano (\xe8\xbd\xbb\xe9\x87\x8f, \xe9\x80\x82\xe5\x90\x88\xe8\xbe\xb9\xe7\xbc\x98\xe9\x83\xa8\xe7\xbd\xb2)",
+                "YOLOv7-Tiny (\xe9\xab\x98\xe6\x95\x88\xe5\xb1\x82\xe8\x81\x9a\xe5\x90\x88, \xe5\xb9\xb3\xe8\xa1\xa1\xe7\xb2\xbe\xe5\xba\xa6\xe5\x92\x8c\xe9\x80\x9f\xe5\xba\xa6)",
+                "YOLOv8-Nano (\xe6\x9c\x80\xe6\x96\xb0\xe6\x9e\xb6\xe6\x9e\x84, \xe6\x97\xa0\xe9\x94\x9a\xe7\x82\xb9, \xe8\xa7\xa3\xe8\x80\xa6\xe5\xa4\xb4) [\xe6\x8e\xa8\xe8\x8d\x90]",
+                "YOLOv10-Nano (\xe5\x85\x8dNMS, \xe5\xae\x9e\xe6\x97\xb6\xe6\xa3\x80\xe6\xb5\x8b)"
+            };
+            ImGui::Combo("\xe6\xa8\xa1\xe5\x9e\x8b\xe9\x80\x89\xe6\x8b\xa9", &state.nDetModel, arrDetModels, 4);
+            // 20260320 ZJH 显示模型特性
+            const char* arrDetInfo[] = {"CSP + Anchor-based, /16", "ELAN + Anchor-based, /8", "C2f + Anchor-free, /16", "SCDown + C2f + NMS-free, /8"};
+            ImGui::TextDisabled("%s", arrDetInfo[state.nDetModel]);
             ImGui::Text("\xe7\xb1\xbb\xe5\x88\xab\xe6\x95\xb0: %d", state.nDetClasses);
         } endCard();
 
@@ -2563,13 +3142,26 @@ static void drawStepConfig(AppState& state) {
                 ImGui::Text("\xe6\x80\xbb\xe5\x8f\x82\xe6\x95\xb0: ~11.2M");
             }
             break;
-        case TaskType::Detection:
+        case TaskType::Detection: {
+            const char* arrNames[] = {"YOLOv5-Nano", "YOLOv7-Tiny", "YOLOv8-Nano", "YOLOv10-Nano"};
             ImGui::Text("Input:  3x%dx%d", state.nDetImgSize, state.nDetImgSize);
-            ImGui::Text("  -> Backbone (CSPDarknet-Nano)");
-            ImGui::Text("  -> Neck (PANet)");
-            ImGui::Text("  -> Head (3 scales)");
+            ImGui::Text("\xe6\xa8\xa1\xe5\x9e\x8b: %s", arrNames[state.nDetModel]);
+            if (state.nDetModel == 0) {
+                ImGui::Text("  -> Backbone (CSPDarknet-Nano, /16)");
+                ImGui::Text("  -> Head (3 anchors, anchor-based)");
+            } else if (state.nDetModel == 1) {
+                ImGui::Text("  -> Backbone (ELAN-Tiny, /8)");
+                ImGui::Text("  -> Head (3 anchors, anchor-based)");
+            } else if (state.nDetModel == 2) {
+                ImGui::Text("  -> Backbone (C2f-Nano, /16)");
+                ImGui::Text("  -> Head (anchor-free, decoupled)");
+            } else {
+                ImGui::Text("  -> Backbone (SCDown+C2f, /8)");
+                ImGui::Text("  -> Head (NMS-free, decoupled)");
+            }
             ImGui::Text("Output: %d \xe7\xb1\xbb + bbox", state.nDetClasses);
             break;
+        }
         case TaskType::Segmentation:
             ImGui::Text("Input:  1x%dx%d", state.nSegImgSize, state.nSegImgSize);
             ImGui::Text("  -> Encoder (4x Down)");
@@ -3013,10 +3605,12 @@ static void drawPropertiesPanel(AppState& state) {
             ImGui::Text("%s", state.nClsModel==0?"MLP":"ResNet-18");
             ImGui::Text("\xe5\x8f\x82\xe6\x95\xb0: %s", state.nClsModel==0?"~101K":"~11.2M");
             break;
-        case TaskType::Detection:
-            ImGui::Text("YOLOv5-Nano");
+        case TaskType::Detection: {
+            const char* arrDetNames[] = {"YOLOv5-Nano", "YOLOv7-Tiny", "YOLOv8-Nano", "YOLOv10-Nano"};
+            ImGui::Text("%s", arrDetNames[state.nDetModel]);
             ImGui::Text("\xe7\xb1\xbb\xe5\x88\xab: %d", state.nDetClasses);
             break;
+        }
         case TaskType::Segmentation:
             ImGui::Text("U-Net");
             ImGui::Text("\xe8\xbe\x93\xe5\x87\xba: %d \xe7\xb1\xbb", state.nSegClasses);
@@ -3472,7 +4066,7 @@ int main(int, char**) {
             ImGui::Spacing();
             ImGui::TextColored(s_colAccent, "\xe6\x94\xaf\xe6\x8c\x81\xe7\x9a\x84\xe4\xbb\xbb\xe5\x8a\xa1\xe7\xb1\xbb\xe5\x9e\x8b:");  // 支持的任务类型:
             ImGui::BulletText("\xe5\x9b\xbe\xe5\x83\x8f\xe5\x88\x86\xe7\xb1\xbb - MLP / ResNet-18 (MNIST)");
-            ImGui::BulletText("\xe7\x9b\xae\xe6\xa0\x87\xe6\xa3\x80\xe6\xb5\x8b - YOLOv5-Nano");
+            ImGui::BulletText("\xe7\x9b\xae\xe6\xa0\x87\xe6\xa3\x80\xe6\xb5\x8b - YOLO (v5/v7/v8/v10)");
             ImGui::BulletText("\xe8\xaf\xad\xe4\xb9\x89\xe5\x88\x86\xe5\x89\xb2 - U-Net");
             ImGui::BulletText("\xe5\xbc\x82\xe5\xb8\xb8\xe6\xa3\x80\xe6\xb5\x8b - ConvAutoEncoder");
             ImGui::Spacing();
@@ -3634,8 +4228,8 @@ int main(int, char**) {
                         appState.nActiveStep = 0;
                     }
                     // 20260320 ZJH 从训练历史中移除该任务类型的记录
-                    const char* arrModelNames[] = {"MLP/ResNet", "YOLOv5", "U-Net", "AutoEncoder"};
-                    std::string strTargetModel = arrModelNames[nTarget];
+                    const char* arrModelNames2[] = {"MLP/ResNet", "YOLO", "U-Net", "AutoEncoder"};
+                    std::string strTargetModel = arrModelNames2[nTarget];
                     appState.vecTrainHistory.erase(
                         std::remove_if(appState.vecTrainHistory.begin(), appState.vecTrainHistory.end(),
                             [&](const TrainingHistoryEntry& e) { return e.strModel == strTargetModel; }),
@@ -3695,7 +4289,14 @@ int main(int, char**) {
             // 20260320 ZJH 步骤内容
             ImGui::BeginChild("##StepContent", ImVec2(0, 0));
             switch (appState.nActiveStep) {
-                case 0: drawStepData(appState); break;
+                case 0:
+                    // 20260320 ZJH 如果处于标注模式，显示标注工作台；否则显示数据步骤
+                    if (appState.bAnnotationMode) {
+                        drawAnnotationWorkbench(appState);
+                    } else {
+                        drawStepData(appState);
+                    }
+                    break;
                 case 1: drawStepConfig(appState); break;
                 case 2: drawStepTrain(appState); break;
                 case 3: drawStepEvaluate(appState); break;
@@ -3722,8 +4323,14 @@ int main(int, char**) {
         if (bNowCompleted && !bPrevCompleted) {
             // 20260320 ZJH 训练刚完成，添加历史记录
             TrainingHistoryEntry entry;
-            const char* arrTaskModels[] = {"MLP/ResNet", "YOLOv5", "U-Net", "AutoEncoder"};
-            entry.strModel = arrTaskModels[(int)appState.activeTask];
+            const char* arrDetModelNames[] = {"YOLOv5", "YOLOv7", "YOLOv8", "YOLOv10"};
+            const char* arrTaskModels[] = {"MLP/ResNet", "YOLO", "U-Net", "AutoEncoder"};
+            // 20260320 ZJH 检测任务使用具体的模型名称
+            if (appState.activeTask == TaskType::Detection) {
+                entry.strModel = arrDetModelNames[appState.nDetModel];
+            } else {
+                entry.strModel = arrTaskModels[(int)appState.activeTask];
+            }
             entry.fAccuracy = appState.trainState.fTestAcc.load();
             entry.fLoss = appState.trainState.fBestValLoss;
             // 20260320 ZJH 获取当前日期作为记录日期

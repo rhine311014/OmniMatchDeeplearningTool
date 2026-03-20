@@ -96,6 +96,7 @@ target_sources(df_engine
             src/engine/df.engine.unet.ixx
             src/engine/df.engine.yolo.ixx
             src/engine/df.engine.autoencoder.ixx
+            src/engine/df.engine.annotation.ixx
             src/engine/df.engine.serializer.ixx
             src/engine/df.engine.mnist.ixx
 )
