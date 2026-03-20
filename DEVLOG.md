@@ -2,6 +2,12 @@
 
 ## [2026-03-20]
 
+### 08:24 - Phase 3 U-Net/YOLO/AutoEncoder 三大模型完成，98 个测试通过
+- **修改文件**: `src/hal/df.hal.cpu_backend.ixx`, `src/engine/df.engine.autograd.ixx`, `src/engine/df.engine.tensor_ops.ixx`, `src/engine/df.engine.activations.ixx`, `src/engine/df.engine.conv.ixx`, `src/engine/df.engine.loss.ixx`, `src/engine/df.engine.unet.ixx`, `src/engine/df.engine.yolo.ixx`, `src/engine/df.engine.autoencoder.ixx`, `tests/test_models.cpp`, `CMakeLists.txt`
+- **修改类型**: 新增/修改
+- **修改内容**: CPUBackend 新增 12 个内核（convTranspose2d/upsampleBilinear/upsampleBilinearBackward/sigmoid/sigmoidBackward/leakyRelu/leakyReluBackward/concatChannels/concatChannelsBackward/diceLoss/bceWithLogits/bceWithLogitsBackward）；autograd 新增 7 个 Backward 子类（SigmoidBackwardFn/LeakyReLUBackwardFn/UpsampleBilinearBackwardFn/ConcatChannelsBackwardFn/ConvTranspose2dBackwardFn/BCEWithLogitsBackwardFn）；tensor_ops 新增 7 个运算函数（tensorSigmoid/tensorLeakyReLU/tensorUpsampleBilinear/tensorConcatChannels/tensorConvTranspose2d/tensorBCEWithLogitsLoss）；activations 新增 Sigmoid/LeakyReLU 模块；conv 新增 ConvTranspose2d/Upsample 模块；loss 新增 DiceLoss/BCEWithLogitsLoss/YOLOLoss；新建 df.engine.unet 模块含 UNetEncoderBlock/UNetDecoderBlock/UNet（31M 参数，74 个张量，编码器-瓶颈-解码器+跳跃连接，[1,1,64,64]->[1,2,64,64]）；新建 df.engine.yolo 模块含 CSPBlock/YOLOHead/YOLOv5Nano（单尺度检测，stem+4 阶段骨干+检测头，[1,3,128,128]->[1,192,25]）；新建 df.engine.autoencoder 模块含 ConvAutoEncoder（编码器 Conv+Pool 压缩到 [N,64,7,7]，解码器 ConvTranspose2d 重建到 [N,1,28,28]，输出 Sigmoid [0,1]）；编写 10 个 test_models 测试用例（UNetForward/UNetParameters/YOLOForward/AutoEncoderForward/AutoEncoderEncodeDecode/ConvTranspose2dForward/SigmoidForward/LeakyReLUForward/DiceLossForward/ConcatChannels），连同原有 88 个测试共 98 个全部通过（13 个测试套件 100%，30.24s）
+- **关联功能**: Phase 3 / U-Net 语义分割 / YOLOv5-nano 目标检测 / ConvAutoEncoder 异常检测
+
 ### 08:15 - GPU 检测 + MVTec 风格 UI 重构
 - **修改文件**: `src/ui/app_main.cpp`
 - **修改类型**: 重构

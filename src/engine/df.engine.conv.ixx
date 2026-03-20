@@ -213,4 +213,73 @@ public:
     }
 };
 
+// 20260320 ZJH ConvTranspose2d — 2D 转置卷积层（反卷积）
+// 权重形状: [Cin, Cout, KH, KW]（注意与 Conv2d 相反），偏置形状: [Cout]
+// 前向: output = convTranspose2d(input, weight, bias, stride, padding)
+class ConvTranspose2d : public Module {
+public:
+    // 20260320 ZJH 构造函数
+    // nInChannels: 输入通道数
+    // nOutChannels: 输出通道数
+    // nKernelSize: 卷积核大小（正方形）
+    // nStride: 步幅，默认 1
+    // nPadding: 填充，默认 0
+    // bBias: 是否使用偏置，默认 true
+    ConvTranspose2d(int nInChannels, int nOutChannels, int nKernelSize,
+                    int nStride = 1, int nPadding = 0, bool bBias = true)
+        : m_nInChannels(nInChannels), m_nOutChannels(nOutChannels),
+          m_nKernelSize(nKernelSize), m_nStride(nStride), m_nPadding(nPadding),
+          m_bUseBias(bBias)
+    {
+        // 20260320 ZJH Kaiming 初始化：权重形状 [Cin, Cout, KH, KW]
+        m_weight = Tensor::randn({nInChannels, nOutChannels, nKernelSize, nKernelSize});
+        float fFanIn = static_cast<float>(nInChannels * nKernelSize * nKernelSize);
+        float fScale = std::sqrt(2.0f / fFanIn);  // 20260320 ZJH Kaiming 缩放因子
+        float* pW = m_weight.mutableFloatDataPtr();
+        for (int i = 0; i < m_weight.numel(); ++i) {
+            pW[i] *= fScale;
+        }
+        registerParameter("weight", m_weight);
+
+        if (bBias) {
+            m_bias = Tensor::zeros({nOutChannels});
+            registerParameter("bias", m_bias);
+        }
+    }
+
+    // 20260320 ZJH forward — 转置卷积前向传播
+    // input: [N, Cin, Hin, Win]
+    // 返回: [N, Cout, Hout, Wout]，Hout = (Hin-1)*stride - 2*pad + KH
+    Tensor forward(const Tensor& input) override {
+        return tensorConvTranspose2d(input, m_weight, m_bias, m_nStride, m_nPadding);
+    }
+
+private:
+    int m_nInChannels;   // 20260320 ZJH 输入通道数
+    int m_nOutChannels;  // 20260320 ZJH 输出通道数
+    int m_nKernelSize;   // 20260320 ZJH 卷积核大小
+    int m_nStride;       // 20260320 ZJH 步幅
+    int m_nPadding;      // 20260320 ZJH 填充
+    bool m_bUseBias;     // 20260320 ZJH 是否使用偏置
+    Tensor m_weight;     // 20260320 ZJH 权重 [Cin, Cout, KH, KW]
+    Tensor m_bias;       // 20260320 ZJH 偏置 [Cout]
+};
+
+// 20260320 ZJH Upsample — 双线性上采样层
+// 将 [N, C, H, W] 上采样为 [N, C, H*scale, W*scale]
+class Upsample : public Module {
+public:
+    // 20260320 ZJH 构造函数
+    // nScale: 上采样倍率，默认 2
+    Upsample(int nScale = 2) : m_nScale(nScale) {}
+
+    // 20260320 ZJH forward — 双线性上采样前向传播
+    Tensor forward(const Tensor& input) override {
+        return tensorUpsampleBilinear(input, m_nScale);
+    }
+
+private:
+    int m_nScale;  // 20260320 ZJH 上采样倍率
+};
+
 }  // namespace df

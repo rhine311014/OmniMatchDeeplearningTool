@@ -23,4 +23,31 @@ public:
     }
 };
 
+// 20260320 ZJH Sigmoid — S 型激活模块
+// 前向: out = 1 / (1 + exp(-input))，输出范围 [0, 1]，无可训练参数
+class Sigmoid : public Module {
+public:
+    // 20260320 ZJH forward — 对输入逐元素执行 Sigmoid 激活
+    Tensor forward(const Tensor& input) override {
+        return tensorSigmoid(input);  // 20260320 ZJH 调用 tensor_ops 的 Sigmoid 运算
+    }
+};
+
+// 20260320 ZJH LeakyReLU — 带泄漏的修正线性单元激活模块
+// 前向: out = x > 0 ? x : slope * x，负区域保留小梯度
+class LeakyReLU : public Module {
+public:
+    // 20260320 ZJH 构造函数
+    // fSlope: 负区域斜率，默认 0.01
+    LeakyReLU(float fSlope = 0.01f) : m_fSlope(fSlope) {}
+
+    // 20260320 ZJH forward — 对输入逐元素执行 LeakyReLU 激活
+    Tensor forward(const Tensor& input) override {
+        return tensorLeakyReLU(input, m_fSlope);  // 20260320 ZJH 调用 tensor_ops 的 LeakyReLU 运算
+    }
+
+private:
+    float m_fSlope;  // 20260320 ZJH 负区域斜率
+};
+
 }  // namespace df

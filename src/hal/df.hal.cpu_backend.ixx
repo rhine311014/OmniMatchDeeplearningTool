@@ -596,6 +596,245 @@ public:
         }
     }
 
+    // ===== ConvTranspose2d =====
+
+    // 20260320 ZJH ConvTranspose2d 前向：转置卷积（反卷积），用于上采样
+    // pInput: [N, Cin, Hin, Win]  pWeight: [Cin, Cout, KH, KW]  pBias: [Cout] 或 nullptr
+    // pOutput: [N, Cout, Hout, Wout]，其中 Hout = (Hin-1)*stride - 2*pad + KH
+    static void convTranspose2d(const float* pInput, const float* pWeight, const float* pBias,
+                                 float* pOutput,
+                                 int nBatch, int nCin, int nHin, int nWin,
+                                 int nCout, int nKH, int nKW,
+                                 int nStride, int nPad) {
+        int nHout = (nHin - 1) * nStride - 2 * nPad + nKH;  // 20260320 ZJH 输出高度
+        int nWout = (nWin - 1) * nStride - 2 * nPad + nKW;  // 20260320 ZJH 输出宽度
+        int nOutSize = nBatch * nCout * nHout * nWout;  // 20260320 ZJH 输出总元素数
+        // 20260320 ZJH 初始化输出为零
+        for (int i = 0; i < nOutSize; ++i) pOutput[i] = 0.0f;
+
+        // 20260320 ZJH 遍历输入每个位置，将其值散布到输出对应位置（转置卷积核心逻辑）
+        for (int n = 0; n < nBatch; ++n)       // 20260320 ZJH 遍历批次
+        for (int ci = 0; ci < nCin; ++ci)      // 20260320 ZJH 遍历输入通道
+        for (int ih = 0; ih < nHin; ++ih)      // 20260320 ZJH 遍历输入行
+        for (int iw = 0; iw < nWin; ++iw) {   // 20260320 ZJH 遍历输入列
+            float fVal = pInput[((n * nCin + ci) * nHin + ih) * nWin + iw];  // 20260320 ZJH 输入值
+            for (int co = 0; co < nCout; ++co)      // 20260320 ZJH 遍历输出通道
+            for (int kh = 0; kh < nKH; ++kh)        // 20260320 ZJH 遍历核高度
+            for (int kw = 0; kw < nKW; ++kw) {      // 20260320 ZJH 遍历核宽度
+                int oh = ih * nStride - nPad + kh;   // 20260320 ZJH 输出行坐标
+                int ow = iw * nStride - nPad + kw;   // 20260320 ZJH 输出列坐标
+                // 20260320 ZJH 边界检查
+                if (oh >= 0 && oh < nHout && ow >= 0 && ow < nWout) {
+                    // 20260320 ZJH 累加输入值 * 权重到输出位置
+                    pOutput[((n * nCout + co) * nHout + oh) * nWout + ow] +=
+                        fVal * pWeight[((ci * nCout + co) * nKH + kh) * nKW + kw];
+                }
+            }
+        }
+        // 20260320 ZJH 加偏置
+        if (pBias) {
+            for (int n = 0; n < nBatch; ++n)
+            for (int co = 0; co < nCout; ++co)
+            for (int oh = 0; oh < nHout; ++oh)
+            for (int ow = 0; ow < nWout; ++ow)
+                pOutput[((n * nCout + co) * nHout + oh) * nWout + ow] += pBias[co];
+        }
+    }
+
+    // ===== Upsample (bilinear) =====
+
+    // 20260320 ZJH 双线性上采样：[N,C,H,W] -> [N,C,H*scale,W*scale]
+    // 使用半像素中心对齐（align_corners=false 风格）
+    static void upsampleBilinear(const float* pInput, float* pOutput,
+                                  int nBatch, int nChannels, int nH, int nW, int nScale) {
+        int nHout = nH * nScale;  // 20260320 ZJH 输出高度
+        int nWout = nW * nScale;  // 20260320 ZJH 输出宽度
+        for (int n = 0; n < nBatch; ++n)
+        for (int c = 0; c < nChannels; ++c)
+        for (int oh = 0; oh < nHout; ++oh)
+        for (int ow = 0; ow < nWout; ++ow) {
+            // 20260320 ZJH 计算源坐标（半像素中心对齐）
+            float fSrcH = (oh + 0.5f) / nScale - 0.5f;
+            float fSrcW = (ow + 0.5f) / nScale - 0.5f;
+            int h0 = static_cast<int>(std::floor(fSrcH));  // 20260320 ZJH 左上角行
+            int w0 = static_cast<int>(std::floor(fSrcW));  // 20260320 ZJH 左上角列
+            int h1 = h0 + 1;  // 20260320 ZJH 右下角行
+            int w1 = w0 + 1;  // 20260320 ZJH 右下角列
+            float fH = fSrcH - h0;  // 20260320 ZJH 行方向插值系数
+            float fW = fSrcW - w0;  // 20260320 ZJH 列方向插值系数
+
+            // 20260320 ZJH 取像素值的 lambda，边界时做 clamp
+            auto getPixel = [&](int h, int w) -> float {
+                h = std::max(0, std::min(h, nH - 1));  // 20260320 ZJH 行 clamp
+                w = std::max(0, std::min(w, nW - 1));  // 20260320 ZJH 列 clamp
+                return pInput[((n * nChannels + c) * nH + h) * nW + w];
+            };
+
+            // 20260320 ZJH 双线性插值公式
+            pOutput[((n * nChannels + c) * nHout + oh) * nWout + ow] =
+                (1 - fH) * (1 - fW) * getPixel(h0, w0) + (1 - fH) * fW * getPixel(h0, w1) +
+                fH * (1 - fW) * getPixel(h1, w0) + fH * fW * getPixel(h1, w1);
+        }
+    }
+
+    // 20260320 ZJH 双线性上采样反向：将 gradOutput [N,C,Hout,Wout] 的梯度散布回 gradInput [N,C,H,W]
+    static void upsampleBilinearBackward(const float* pGradOutput, float* pGradInput,
+                                          int nBatch, int nChannels, int nH, int nW, int nScale) {
+        int nHout = nH * nScale;  // 20260320 ZJH 输出高度
+        int nWout = nW * nScale;  // 20260320 ZJH 输出宽度
+        // 20260320 ZJH 初始化 gradInput 为零
+        int nInputSize = nBatch * nChannels * nH * nW;
+        for (int i = 0; i < nInputSize; ++i) pGradInput[i] = 0.0f;
+
+        for (int n = 0; n < nBatch; ++n)
+        for (int c = 0; c < nChannels; ++c)
+        for (int oh = 0; oh < nHout; ++oh)
+        for (int ow = 0; ow < nWout; ++ow) {
+            float fGrad = pGradOutput[((n * nChannels + c) * nHout + oh) * nWout + ow];
+            float fSrcH = (oh + 0.5f) / nScale - 0.5f;
+            float fSrcW = (ow + 0.5f) / nScale - 0.5f;
+            int h0 = static_cast<int>(std::floor(fSrcH));
+            int w0 = static_cast<int>(std::floor(fSrcW));
+            int h1 = h0 + 1;
+            int w1 = w0 + 1;
+            float fH = fSrcH - h0;
+            float fW = fSrcW - w0;
+
+            // 20260320 ZJH 辅助 lambda：安全累加梯度到输入位置
+            auto addGrad = [&](int h, int w, float fWeight) {
+                h = std::max(0, std::min(h, nH - 1));
+                w = std::max(0, std::min(w, nW - 1));
+                pGradInput[((n * nChannels + c) * nH + h) * nW + w] += fGrad * fWeight;
+            };
+
+            // 20260320 ZJH 按双线性插值权重分配梯度
+            addGrad(h0, w0, (1 - fH) * (1 - fW));
+            addGrad(h0, w1, (1 - fH) * fW);
+            addGrad(h1, w0, fH * (1 - fW));
+            addGrad(h1, w1, fH * fW);
+        }
+    }
+
+    // ===== Sigmoid =====
+
+    // 20260320 ZJH Sigmoid 前向：out[i] = 1 / (1 + exp(-in[i]))
+    static void sigmoid(const float* pIn, float* pOut, size_t nCount) {
+        for (size_t i = 0; i < nCount; ++i)
+            pOut[i] = 1.0f / (1.0f + std::exp(-pIn[i]));  // 20260320 ZJH S 型激活函数
+    }
+
+    // 20260320 ZJH Sigmoid 反向：grad_in[i] = grad_out[i] * out[i] * (1 - out[i])
+    // pOutput 是前向的输出值（非输入值）
+    static void sigmoidBackward(const float* pOutput, const float* pGradOut, float* pGradIn, size_t nCount) {
+        for (size_t i = 0; i < nCount; ++i)
+            pGradIn[i] = pGradOut[i] * pOutput[i] * (1.0f - pOutput[i]);  // 20260320 ZJH sigmoid 导数
+    }
+
+    // ===== LeakyReLU =====
+
+    // 20260320 ZJH LeakyReLU 前向：正值直通，负值乘以斜率 fSlope
+    static void leakyRelu(const float* pIn, float* pOut, size_t nCount, float fSlope = 0.01f) {
+        for (size_t i = 0; i < nCount; ++i)
+            pOut[i] = pIn[i] > 0 ? pIn[i] : fSlope * pIn[i];  // 20260320 ZJH 负值保留小梯度
+    }
+
+    // 20260320 ZJH LeakyReLU 反向：正值梯度直通，负值梯度乘以斜率
+    static void leakyReluBackward(const float* pIn, const float* pGradOut, float* pGradIn,
+                                   size_t nCount, float fSlope = 0.01f) {
+        for (size_t i = 0; i < nCount; ++i)
+            pGradIn[i] = pIn[i] > 0 ? pGradOut[i] : fSlope * pGradOut[i];  // 20260320 ZJH 负值区域斜率为 fSlope
+    }
+
+    // ===== Concat along channel dim =====
+
+    // 20260320 ZJH 沿通道维度拼接两个张量：[N,C1,H,W] + [N,C2,H,W] -> [N,C1+C2,H,W]
+    static void concatChannels(const float* pA, const float* pB, float* pOut,
+                                int nBatch, int nC1, int nC2, int nH, int nW) {
+        int nSpatial = nH * nW;  // 20260320 ZJH 空间维度大小
+        for (int n = 0; n < nBatch; ++n) {
+            // 20260320 ZJH 拷贝张量 A 的通道数据
+            for (int c = 0; c < nC1; ++c) {
+                int nSrcIdx = (n * nC1 + c) * nSpatial;  // 20260320 ZJH A 的源索引
+                int nDstIdx = (n * (nC1 + nC2) + c) * nSpatial;  // 20260320 ZJH 输出的目标索引
+                for (int s = 0; s < nSpatial; ++s)
+                    pOut[nDstIdx + s] = pA[nSrcIdx + s];
+            }
+            // 20260320 ZJH 拷贝张量 B 的通道数据
+            for (int c = 0; c < nC2; ++c) {
+                int nSrcIdx = (n * nC2 + c) * nSpatial;  // 20260320 ZJH B 的源索引
+                int nDstIdx = (n * (nC1 + nC2) + nC1 + c) * nSpatial;  // 20260320 ZJH 输出的目标索引
+                for (int s = 0; s < nSpatial; ++s)
+                    pOut[nDstIdx + s] = pB[nSrcIdx + s];
+            }
+        }
+    }
+
+    // 20260320 ZJH 沿通道维度拼接反向：将 gradOutput [N,C1+C2,H,W] 拆分为 gradA [N,C1,H,W] 和 gradB [N,C2,H,W]
+    static void concatChannelsBackward(const float* pGradOut, float* pGradA, float* pGradB,
+                                        int nBatch, int nC1, int nC2, int nH, int nW) {
+        int nSpatial = nH * nW;  // 20260320 ZJH 空间维度大小
+        for (int n = 0; n < nBatch; ++n) {
+            // 20260320 ZJH 拆分前 C1 个通道的梯度给 A
+            for (int c = 0; c < nC1; ++c) {
+                int nSrcIdx = (n * (nC1 + nC2) + c) * nSpatial;
+                int nDstIdx = (n * nC1 + c) * nSpatial;
+                for (int s = 0; s < nSpatial; ++s)
+                    pGradA[nDstIdx + s] = pGradOut[nSrcIdx + s];
+            }
+            // 20260320 ZJH 拆分后 C2 个通道的梯度给 B
+            for (int c = 0; c < nC2; ++c) {
+                int nSrcIdx = (n * (nC1 + nC2) + nC1 + c) * nSpatial;
+                int nDstIdx = (n * nC2 + c) * nSpatial;
+                for (int s = 0; s < nSpatial; ++s)
+                    pGradB[nDstIdx + s] = pGradOut[nSrcIdx + s];
+            }
+        }
+    }
+
+    // ===== DiceLoss =====
+
+    // 20260320 ZJH Dice 损失：1 - 2*sum(p*t) / (sum(p) + sum(t) + eps)
+    // 用于语义分割任务，p 为预测概率，t 为目标标签
+    static float diceLoss(const float* pPred, const float* pTarget, int nCount) {
+        float fIntersection = 0.0f;  // 20260320 ZJH 交集：sum(p*t)
+        float fPredSum = 0.0f;       // 20260320 ZJH 预测总和：sum(p)
+        float fTargetSum = 0.0f;     // 20260320 ZJH 目标总和：sum(t)
+        for (int i = 0; i < nCount; ++i) {
+            fIntersection += pPred[i] * pTarget[i];  // 20260320 ZJH 累加交集
+            fPredSum += pPred[i];                     // 20260320 ZJH 累加预测
+            fTargetSum += pTarget[i];                 // 20260320 ZJH 累加目标
+        }
+        float fEps = 1e-6f;  // 20260320 ZJH 数值稳定性常数
+        // 20260320 ZJH Dice 系数 = 2 * intersection / (pred + target)，损失 = 1 - dice
+        return 1.0f - 2.0f * fIntersection / (fPredSum + fTargetSum + fEps);
+    }
+
+    // 20260320 ZJH BCEWithLogits 前向：二元交叉熵 + sigmoid（数值稳定版本）
+    // loss = mean( max(x,0) - x*t + log(1 + exp(-|x|)) )
+    static float bceWithLogits(const float* pLogits, const float* pTarget, int nCount) {
+        float fLoss = 0.0f;  // 20260320 ZJH 累积损失
+        for (int i = 0; i < nCount; ++i) {
+            float x = pLogits[i];   // 20260320 ZJH 当前 logit
+            float t = pTarget[i];   // 20260320 ZJH 当前目标
+            // 20260320 ZJH 数值稳定公式：max(x,0) - x*t + log(1+exp(-|x|))
+            float fMaxX = x > 0 ? x : 0;
+            fLoss += fMaxX - x * t + std::log(1.0f + std::exp(-std::abs(x)));
+        }
+        return fLoss / static_cast<float>(nCount);  // 20260320 ZJH 返回均值损失
+    }
+
+    // 20260320 ZJH BCEWithLogits 反向：grad = (sigmoid(x) - t) / count
+    static void bceWithLogitsBackward(const float* pLogits, const float* pTarget,
+                                       float* pGradInput, int nCount) {
+        float fScale = 1.0f / static_cast<float>(nCount);  // 20260320 ZJH 均值缩放因子
+        for (int i = 0; i < nCount; ++i) {
+            float fSigmoid = 1.0f / (1.0f + std::exp(-pLogits[i]));  // 20260320 ZJH sigmoid(x)
+            pGradInput[i] = (fSigmoid - pTarget[i]) * fScale;  // 20260320 ZJH 梯度公式
+        }
+    }
+
+    // ===== 基于 strides 的非连续数据提取 =====
+
     // 20260319 ZJH 基于 strides 的非连续数据提取到连续缓冲区
     // 用于 slice/transpose 等产生非连续视图后的数据收集
     static void stridedCopy(const float* pSrc, float* pDst,
