@@ -4,7 +4,7 @@
 #include <cmath>
 #include <vector>
 
-import df.engine.tensor;
+import om.engine.tensor;
 
 // ============================================================
 // Test 1 — zeros
@@ -12,7 +12,7 @@ import df.engine.tensor;
 // ============================================================
 TEST(TensorTest, Zeros) {
     // 20260319 ZJH 创建 2×3 的全零张量
-    df::Tensor t = df::Tensor::zeros({2, 3});
+    om::Tensor t = om::Tensor::zeros({2, 3});
 
     // 20260319 ZJH 验证维度数
     EXPECT_EQ(t.ndim(), 2);
@@ -25,10 +25,10 @@ TEST(TensorTest, Zeros) {
     EXPECT_EQ(t.numel(), 6);
 
     // 20260319 ZJH 验证数据类型为 Float32
-    EXPECT_EQ(t.dtype(), df::DataType::Float32);
+    EXPECT_EQ(t.dtype(), om::DataType::Float32);
 
     // 20260319 ZJH 验证设备类型为 CPU
-    EXPECT_EQ(t.device(), df::DeviceType::CPU);
+    EXPECT_EQ(t.device(), om::DeviceType::CPU);
 
     // 20260319 ZJH 遍历所有元素，验证均为 0.0f
     const float* pData = t.floatDataPtr();
@@ -43,7 +43,7 @@ TEST(TensorTest, Zeros) {
 // ============================================================
 TEST(TensorTest, Ones) {
     // 20260319 ZJH 创建 3×4 的全 1 张量
-    df::Tensor t = df::Tensor::ones({3, 4});
+    om::Tensor t = om::Tensor::ones({3, 4});
 
     // 20260319 ZJH 验证元素总数
     EXPECT_EQ(t.numel(), 12);
@@ -61,7 +61,7 @@ TEST(TensorTest, Ones) {
 // ============================================================
 TEST(TensorTest, Full) {
     // 20260319 ZJH 创建 2×2 的张量，填充值为 3.14
-    df::Tensor t = df::Tensor::full({2, 2}, 3.14f);
+    om::Tensor t = om::Tensor::full({2, 2}, 3.14f);
 
     // 20260319 ZJH 验证所有元素均为 3.14f
     const float* pData = t.floatDataPtr();
@@ -76,7 +76,7 @@ TEST(TensorTest, Full) {
 // ============================================================
 TEST(TensorTest, Randn) {
     // 20260319 ZJH 创建长度为 100 的随机张量
-    df::Tensor t = df::Tensor::randn({100});
+    om::Tensor t = om::Tensor::randn({100});
 
     // 20260319 ZJH 验证元素总数
     EXPECT_EQ(t.numel(), 100);
@@ -97,7 +97,7 @@ TEST(TensorTest, Randn) {
 TEST(TensorTest, FromData) {
     // 20260319 ZJH 源数据：{1,2,3,4,5,6}，目标形状 {2,3}
     float arrSrc[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-    df::Tensor t = df::Tensor::fromData(arrSrc, {2, 3});
+    om::Tensor t = om::Tensor::fromData(arrSrc, {2, 3});
 
     // 20260319 ZJH 验证形状
     EXPECT_EQ(t.shape(0), 2);
@@ -116,7 +116,7 @@ TEST(TensorTest, FromData) {
 // ============================================================
 TEST(TensorTest, OneDimensional) {
     // 20260319 ZJH 创建长度为 5 的一维全零张量
-    df::Tensor t = df::Tensor::zeros({5});
+    om::Tensor t = om::Tensor::zeros({5});
 
     // 20260319 ZJH 验证维度数为 1
     EXPECT_EQ(t.ndim(), 1);
@@ -131,7 +131,7 @@ TEST(TensorTest, OneDimensional) {
 // ============================================================
 TEST(TensorTest, ThreeDimensional) {
     // 20260319 ZJH 创建 2×3×4 的三维全零张量
-    df::Tensor t = df::Tensor::zeros({2, 3, 4});
+    om::Tensor t = om::Tensor::zeros({2, 3, 4});
 
     // 20260319 ZJH 验证维度数为 3
     EXPECT_EQ(t.ndim(), 3);
@@ -146,7 +146,7 @@ TEST(TensorTest, ThreeDimensional) {
 // ============================================================
 TEST(TensorTest, Strides) {
     // 20260319 ZJH 创建 2×3×4 的三维张量
-    df::Tensor t = df::Tensor::zeros({2, 3, 4});
+    om::Tensor t = om::Tensor::zeros({2, 3, 4});
 
     // 20260319 ZJH 行主序步长：stride[2]=1, stride[1]=4, stride[0]=12
     EXPECT_EQ(t.stride(0), 12);  // 20260319 ZJH 第 0 维步长 = 3*4
@@ -160,7 +160,7 @@ TEST(TensorTest, Strides) {
 // ============================================================
 TEST(TensorTest, IsContiguous) {
     // 20260319 ZJH 工厂方法创建的张量应始终是连续的
-    df::Tensor t = df::Tensor::zeros({2, 3, 4});
+    om::Tensor t = om::Tensor::zeros({2, 3, 4});
     EXPECT_TRUE(t.isContiguous());
 }
 
@@ -171,7 +171,7 @@ TEST(TensorTest, IsContiguous) {
 TEST(TensorTest, AtAccess) {
     // 20260319 ZJH 从 {1,2,3,4,5,6} 构建 2×3 张量
     float arrSrc[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-    df::Tensor t = df::Tensor::fromData(arrSrc, {2, 3});
+    om::Tensor t = om::Tensor::fromData(arrSrc, {2, 3});
 
     // 20260319 ZJH 验证 at({0,0}) == 1.0f（第一行第一列）
     EXPECT_FLOAT_EQ(t.at({0, 0}), 1.0f);
@@ -192,7 +192,7 @@ TEST(TensorTest, AtAccess) {
 // ============================================================
 TEST(TensorTest, ShapeVec) {
     // 20260319 ZJH 创建 2×3×4 的张量
-    df::Tensor t = df::Tensor::zeros({2, 3, 4});
+    om::Tensor t = om::Tensor::zeros({2, 3, 4});
 
     // 20260319 ZJH 获取形状向量
     const std::vector<int>& vecShape = t.shapeVec();

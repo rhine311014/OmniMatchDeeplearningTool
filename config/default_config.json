@@ -1,6 +1,6 @@
 {
   "app": {
-    "name": "DeepForge",
+    "name": "OmniMatch",
     "version": "0.1.0"
   },
   "training": {
@@ -17,7 +17,7 @@
   "data": {
     "dataset_dir": "data/datasets",
     "model_dir": "data/models",
-    "database_path": "data/deepforge.db"
+    "database_path": "data/omnimatch.db"
   },
   "ui": {
     "theme": "dark",

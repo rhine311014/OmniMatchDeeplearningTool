@@ -5,28 +5,28 @@
 #include <vector>
 
 // 20260319 ZJH 导入张量类和运算模块（含自动微分）
-import df.engine.tensor;
-import df.engine.tensor_ops;
+import om.engine.tensor;
+import om.engine.tensor_ops;
 
 // ===== 1. AddGradient =====
 // 20260319 ZJH 测试加法梯度：loss = sum(a + b)，期望 grad(a) = 1, grad(b) = 1
 TEST(AutoGradTest, AddGradient) {
     // 20260319 ZJH 创建 2x2 全 1 张量 a 和 b，设置需要梯度
-    auto a = df::Tensor::ones({2, 2});
-    df::tensorSetRequiresGrad(a, true);  // 20260319 ZJH 标记 a 为叶节点
-    auto b = df::Tensor::ones({2, 2});
-    df::tensorSetRequiresGrad(b, true);  // 20260319 ZJH 标记 b 为叶节点
+    auto a = om::Tensor::ones({2, 2});
+    om::tensorSetRequiresGrad(a, true);  // 20260319 ZJH 标记 a 为叶节点
+    auto b = om::Tensor::ones({2, 2});
+    om::tensorSetRequiresGrad(b, true);  // 20260319 ZJH 标记 b 为叶节点
 
     // 20260319 ZJH 前向计算：c = a + b, loss = sum(c)
-    auto c = df::tensorAdd(a, b);
-    auto loss = df::tensorSum(c);
+    auto c = om::tensorAdd(a, b);
+    auto loss = om::tensorSum(c);
 
     // 20260319 ZJH 反向传播
-    df::tensorBackward(loss);
+    om::tensorBackward(loss);
 
     // 20260319 ZJH 验证梯度：d(sum(a+b))/da = 1, d(sum(a+b))/db = 1
-    auto gradA = df::tensorGetGrad(a);
-    auto gradB = df::tensorGetGrad(b);
+    auto gradA = om::tensorGetGrad(a);
+    auto gradB = om::tensorGetGrad(b);
     ASSERT_EQ(gradA.numel(), 4);  // 20260319 ZJH 梯度形状应与 a 相同
     ASSERT_EQ(gradB.numel(), 4);  // 20260319 ZJH 梯度形状应与 b 相同
     for (int i = 0; i < 2; ++i) {
@@ -40,17 +40,17 @@ TEST(AutoGradTest, AddGradient) {
 // ===== 2. SubGradient =====
 // 20260319 ZJH 测试减法梯度：loss = sum(a - b)，期望 grad(a) = 1, grad(b) = -1
 TEST(AutoGradTest, SubGradient) {
-    auto a = df::Tensor::ones({2, 2});
-    df::tensorSetRequiresGrad(a, true);
-    auto b = df::Tensor::ones({2, 2});
-    df::tensorSetRequiresGrad(b, true);
+    auto a = om::Tensor::ones({2, 2});
+    om::tensorSetRequiresGrad(a, true);
+    auto b = om::Tensor::ones({2, 2});
+    om::tensorSetRequiresGrad(b, true);
 
-    auto c = df::tensorSub(a, b);
-    auto loss = df::tensorSum(c);
-    df::tensorBackward(loss);
+    auto c = om::tensorSub(a, b);
+    auto loss = om::tensorSum(c);
+    om::tensorBackward(loss);
 
-    auto gradA = df::tensorGetGrad(a);
-    auto gradB = df::tensorGetGrad(b);
+    auto gradA = om::tensorGetGrad(a);
+    auto gradB = om::tensorGetGrad(b);
     ASSERT_EQ(gradA.numel(), 4);
     ASSERT_EQ(gradB.numel(), 4);
     for (int i = 0; i < 2; ++i) {
@@ -65,17 +65,17 @@ TEST(AutoGradTest, SubGradient) {
 // 20260319 ZJH 测试乘法梯度：loss = sum(a * b)，期望 grad(a) = b, grad(b) = a
 TEST(AutoGradTest, MulGradient) {
     // 20260319 ZJH 使用不同值以验证交叉梯度
-    auto a = df::Tensor::fromData(std::vector<float>{1, 2, 3, 4}.data(), {2, 2});
-    df::tensorSetRequiresGrad(a, true);
-    auto b = df::Tensor::fromData(std::vector<float>{5, 6, 7, 8}.data(), {2, 2});
-    df::tensorSetRequiresGrad(b, true);
+    auto a = om::Tensor::fromData(std::vector<float>{1, 2, 3, 4}.data(), {2, 2});
+    om::tensorSetRequiresGrad(a, true);
+    auto b = om::Tensor::fromData(std::vector<float>{5, 6, 7, 8}.data(), {2, 2});
+    om::tensorSetRequiresGrad(b, true);
 
-    auto c = df::tensorMul(a, b);
-    auto loss = df::tensorSum(c);
-    df::tensorBackward(loss);
+    auto c = om::tensorMul(a, b);
+    auto loss = om::tensorSum(c);
+    om::tensorBackward(loss);
 
-    auto gradA = df::tensorGetGrad(a);
-    auto gradB = df::tensorGetGrad(b);
+    auto gradA = om::tensorGetGrad(a);
+    auto gradB = om::tensorGetGrad(b);
     // 20260319 ZJH grad(a) 应该等于 b 的值
     EXPECT_FLOAT_EQ(gradA.at({0, 0}), 5.0f);  // 20260319 ZJH grad_a[0,0] = b[0,0] = 5
     EXPECT_FLOAT_EQ(gradA.at({0, 1}), 6.0f);  // 20260319 ZJH grad_a[0,1] = b[0,1] = 6
@@ -92,18 +92,18 @@ TEST(AutoGradTest, MulGradient) {
 // 20260319 ZJH 测试矩阵乘法梯度，使用数值梯度检查验证
 TEST(AutoGradTest, MatMulGradient) {
     // 20260319 ZJH 创建 2x3 和 3x2 矩阵
-    auto a = df::Tensor::fromData(std::vector<float>{1, 2, 3, 4, 5, 6}.data(), {2, 3});
-    df::tensorSetRequiresGrad(a, true);
-    auto b = df::Tensor::fromData(std::vector<float>{7, 8, 9, 10, 11, 12}.data(), {3, 2});
-    df::tensorSetRequiresGrad(b, true);
+    auto a = om::Tensor::fromData(std::vector<float>{1, 2, 3, 4, 5, 6}.data(), {2, 3});
+    om::tensorSetRequiresGrad(a, true);
+    auto b = om::Tensor::fromData(std::vector<float>{7, 8, 9, 10, 11, 12}.data(), {3, 2});
+    om::tensorSetRequiresGrad(b, true);
 
     // 20260319 ZJH 前向 + 反向
-    auto c = df::tensorMatmul(a, b);
-    auto loss = df::tensorSum(c);
-    df::tensorBackward(loss);
+    auto c = om::tensorMatmul(a, b);
+    auto loss = om::tensorSum(c);
+    om::tensorBackward(loss);
 
-    auto gradA = df::tensorGetGrad(a);
-    auto gradB = df::tensorGetGrad(b);
+    auto gradA = om::tensorGetGrad(a);
+    auto gradB = om::tensorGetGrad(b);
 
     // 20260319 ZJH 数值梯度检查 — 对 A 的每个元素扰动 ±eps
     float fEps = 1e-2f;  // 20260319 ZJH 有限差分步长（float32 精度下不宜过小）
@@ -115,16 +115,16 @@ TEST(AutoGradTest, MatMulGradient) {
         // 20260319 ZJH 正向扰动
         std::vector<float> vecAPlus = vecAData;
         vecAPlus[idx] += fEps;
-        auto aPlus = df::Tensor::fromData(vecAPlus.data(), {2, 3});
-        auto bCopy = df::Tensor::fromData(vecBData.data(), {3, 2});
-        float fLossPlus = df::tensorSum(df::tensorMatmul(aPlus, bCopy)).item();
+        auto aPlus = om::Tensor::fromData(vecAPlus.data(), {2, 3});
+        auto bCopy = om::Tensor::fromData(vecBData.data(), {3, 2});
+        float fLossPlus = om::tensorSum(om::tensorMatmul(aPlus, bCopy)).item();
 
         // 20260319 ZJH 反向扰动
         std::vector<float> vecAMinus = vecAData;
         vecAMinus[idx] -= fEps;
-        auto aMinus = df::Tensor::fromData(vecAMinus.data(), {2, 3});
-        auto bCopy2 = df::Tensor::fromData(vecBData.data(), {3, 2});
-        float fLossMinus = df::tensorSum(df::tensorMatmul(aMinus, bCopy2)).item();
+        auto aMinus = om::Tensor::fromData(vecAMinus.data(), {2, 3});
+        auto bCopy2 = om::Tensor::fromData(vecBData.data(), {3, 2});
+        float fLossMinus = om::tensorSum(om::tensorMatmul(aMinus, bCopy2)).item();
 
         // 20260319 ZJH 数值梯度 = (f(x+eps) - f(x-eps)) / (2*eps)
         float fNumericalGrad = (fLossPlus - fLossMinus) / (2.0f * fEps);
@@ -141,15 +141,15 @@ TEST(AutoGradTest, MatMulGradient) {
     for (int idx = 0; idx < 6; ++idx) {
         std::vector<float> vecBPlus = vecBData;
         vecBPlus[idx] += fEps;
-        auto aCopy = df::Tensor::fromData(vecAData.data(), {2, 3});
-        auto bPlus = df::Tensor::fromData(vecBPlus.data(), {3, 2});
-        float fLossPlus = df::tensorSum(df::tensorMatmul(aCopy, bPlus)).item();
+        auto aCopy = om::Tensor::fromData(vecAData.data(), {2, 3});
+        auto bPlus = om::Tensor::fromData(vecBPlus.data(), {3, 2});
+        float fLossPlus = om::tensorSum(om::tensorMatmul(aCopy, bPlus)).item();
 
         std::vector<float> vecBMinus = vecBData;
         vecBMinus[idx] -= fEps;
-        auto aCopy2 = df::Tensor::fromData(vecAData.data(), {2, 3});
-        auto bMinus = df::Tensor::fromData(vecBMinus.data(), {3, 2});
-        float fLossMinus = df::tensorSum(df::tensorMatmul(aCopy2, bMinus)).item();
+        auto aCopy2 = om::Tensor::fromData(vecAData.data(), {2, 3});
+        auto bMinus = om::Tensor::fromData(vecBMinus.data(), {3, 2});
+        float fLossMinus = om::tensorSum(om::tensorMatmul(aCopy2, bMinus)).item();
 
         float fNumericalGrad = (fLossPlus - fLossMinus) / (2.0f * fEps);
         int nRow = idx / 2;
@@ -163,14 +163,14 @@ TEST(AutoGradTest, MatMulGradient) {
 // ===== 5. MulScalarGradient =====
 // 20260319 ZJH 测试乘标量梯度：loss = sum(a * 3)，期望 grad(a) = 3
 TEST(AutoGradTest, MulScalarGradient) {
-    auto a = df::Tensor::fromData(std::vector<float>{1, 2, 3, 4}.data(), {2, 2});
-    df::tensorSetRequiresGrad(a, true);
+    auto a = om::Tensor::fromData(std::vector<float>{1, 2, 3, 4}.data(), {2, 2});
+    om::tensorSetRequiresGrad(a, true);
 
-    auto c = df::tensorMulScalar(a, 3.0f);
-    auto loss = df::tensorSum(c);
-    df::tensorBackward(loss);
+    auto c = om::tensorMulScalar(a, 3.0f);
+    auto loss = om::tensorSum(c);
+    om::tensorBackward(loss);
 
-    auto gradA = df::tensorGetGrad(a);
+    auto gradA = om::tensorGetGrad(a);
     ASSERT_EQ(gradA.numel(), 4);
     for (int i = 0; i < 2; ++i) {
         for (int j = 0; j < 2; ++j) {
@@ -184,19 +184,19 @@ TEST(AutoGradTest, MulScalarGradient) {
 // d/da = d(sum((a+b)*a))/da = 2a + b（通过乘法法则和加法法则链式推导）
 // d/db = d(sum((a+b)*a))/db = a
 TEST(AutoGradTest, ChainRule) {
-    auto a = df::Tensor::fromData(std::vector<float>{1, 2, 3, 4}.data(), {2, 2});
-    df::tensorSetRequiresGrad(a, true);
-    auto b = df::Tensor::fromData(std::vector<float>{5, 6, 7, 8}.data(), {2, 2});
-    df::tensorSetRequiresGrad(b, true);
+    auto a = om::Tensor::fromData(std::vector<float>{1, 2, 3, 4}.data(), {2, 2});
+    om::tensorSetRequiresGrad(a, true);
+    auto b = om::Tensor::fromData(std::vector<float>{5, 6, 7, 8}.data(), {2, 2});
+    om::tensorSetRequiresGrad(b, true);
 
     // 20260319 ZJH 前向：c = a + b, d = c * a, loss = sum(d)
-    auto c = df::tensorAdd(a, b);
-    auto d = df::tensorMul(c, a);
-    auto loss = df::tensorSum(d);
-    df::tensorBackward(loss);
+    auto c = om::tensorAdd(a, b);
+    auto d = om::tensorMul(c, a);
+    auto loss = om::tensorSum(d);
+    om::tensorBackward(loss);
 
-    auto gradA = df::tensorGetGrad(a);
-    auto gradB = df::tensorGetGrad(b);
+    auto gradA = om::tensorGetGrad(a);
+    auto gradB = om::tensorGetGrad(b);
 
     // 20260319 ZJH 验证 d/da = 2a + b
     // a = [1,2,3,4], b = [5,6,7,8]
@@ -216,40 +216,40 @@ TEST(AutoGradTest, ChainRule) {
 // ===== 7. ZeroGrad =====
 // 20260319 ZJH 测试梯度清零：backward 后验证梯度，清零后验证为空
 TEST(AutoGradTest, ZeroGrad) {
-    auto a = df::Tensor::ones({3});
-    df::tensorSetRequiresGrad(a, true);
-    auto b = df::Tensor::ones({3});
-    df::tensorSetRequiresGrad(b, true);
+    auto a = om::Tensor::ones({3});
+    om::tensorSetRequiresGrad(a, true);
+    auto b = om::Tensor::ones({3});
+    om::tensorSetRequiresGrad(b, true);
 
     // 20260319 ZJH 第一次反向传播
-    auto loss = df::tensorSum(df::tensorAdd(a, b));
-    df::tensorBackward(loss);
+    auto loss = om::tensorSum(om::tensorAdd(a, b));
+    om::tensorBackward(loss);
 
     // 20260319 ZJH 验证梯度存在且为 1
-    auto gradA = df::tensorGetGrad(a);
+    auto gradA = om::tensorGetGrad(a);
     ASSERT_EQ(gradA.numel(), 3);
     for (int i = 0; i < 3; ++i) {
         EXPECT_FLOAT_EQ(gradA.at({i}), 1.0f);
     }
 
     // 20260319 ZJH 清零梯度
-    df::tensorZeroGrad(a);
+    om::tensorZeroGrad(a);
 
     // 20260319 ZJH 验证梯度已被清零（返回空张量）
-    auto gradAZeroed = df::tensorGetGrad(a);
+    auto gradAZeroed = om::tensorGetGrad(a);
     EXPECT_EQ(gradAZeroed.numel(), 0);  // 20260319 ZJH 清零后无梯度
 }
 
 // ===== 8. OnlyLeafHasGrad =====
 // 20260319 ZJH 测试中间张量无梯度累加器
 TEST(AutoGradTest, OnlyLeafHasGrad) {
-    auto a = df::Tensor::ones({2, 2});
-    df::tensorSetRequiresGrad(a, true);
-    auto b = df::Tensor::ones({2, 2});
-    df::tensorSetRequiresGrad(b, true);
+    auto a = om::Tensor::ones({2, 2});
+    om::tensorSetRequiresGrad(a, true);
+    auto b = om::Tensor::ones({2, 2});
+    om::tensorSetRequiresGrad(b, true);
 
     // 20260319 ZJH c 是中间张量（运算结果），不是叶节点
-    auto c = df::tensorAdd(a, b);
+    auto c = om::tensorAdd(a, b);
 
     // 20260319 ZJH 中间张量 c 没有 GradAccumulator（gradAccumRaw 为空）
     EXPECT_EQ(c.gradAccumRaw(), nullptr);  // 20260319 ZJH 中间节点无梯度累加器

@@ -4,8 +4,8 @@
 #include <gtest/gtest.h>
 #include <filesystem>   // 20260319 ZJH 用于测试结束后清理临时数据库文件
 
-// 20260319 ZJH 导入 df.platform.database 模块，获取 df::Database 和 df::Row 定义
-import df.platform.database;
+// 20260319 ZJH 导入 om.platform.database 模块，获取 om::Database 和 om::Row 定义
+import om.platform.database;
 
 // =========================================================================
 // 20260319 ZJH 测试 1 — 打开内存数据库
@@ -13,7 +13,7 @@ import df.platform.database;
 // =========================================================================
 TEST(DatabaseTest, OpenInMemory) {
     // 20260319 ZJH 以内存模式打开 SQLite 数据库，不产生磁盘文件
-    auto result = df::Database::open(":memory:");
+    auto result = om::Database::open(":memory:");
 
     // 20260319 ZJH has_value() 为 true 表示打开成功，无错误
     EXPECT_TRUE(result.has_value())
@@ -27,7 +27,7 @@ TEST(DatabaseTest, OpenInMemory) {
 // =========================================================================
 TEST(DatabaseTest, CreateTableAndInsert) {
     // 20260319 ZJH 打开内存数据库，ASSERT 失败则终止本用例（避免后续对空对象操作）
-    auto dbResult = df::Database::open(":memory:");
+    auto dbResult = om::Database::open(":memory:");
     ASSERT_TRUE(dbResult.has_value()) << dbResult.error().strMessage;
 
     auto& db = dbResult.value();  // 取出 Database 对象的引用，避免额外拷贝（已禁拷贝，只能引用）
@@ -51,7 +51,7 @@ TEST(DatabaseTest, CreateTableAndInsert) {
 // =========================================================================
 TEST(DatabaseTest, Query) {
     // 20260319 ZJH 打开内存数据库
-    auto dbResult = df::Database::open(":memory:");
+    auto dbResult = om::Database::open(":memory:");
     ASSERT_TRUE(dbResult.has_value()) << dbResult.error().strMessage;
 
     auto& db = dbResult.value();  // 取 Database 引用
@@ -94,7 +94,7 @@ TEST(DatabaseTest, Query) {
 TEST(DatabaseTest, FileDatabase) {
     // 20260319 ZJH 使用临时目录下的测试数据库文件，避免污染工作目录
     std::string strDbPath = (std::filesystem::temp_directory_path()
-        / "df_test_persistence.db").string();
+        / "om_test_persistence.db").string();
 
     // 20260319 ZJH 若上次测试异常退出遗留文件，先删除确保干净起点
     std::filesystem::remove(strDbPath);
@@ -102,7 +102,7 @@ TEST(DatabaseTest, FileDatabase) {
     // 20260319 ZJH 第一阶段：打开文件数据库、建表、插入数据
     {
         // 20260319 ZJH 在作用域内创建 Database 对象，作用域结束时自动析构（RAII）
-        auto dbResult = df::Database::open(strDbPath);
+        auto dbResult = om::Database::open(strDbPath);
         ASSERT_TRUE(dbResult.has_value()) << dbResult.error().strMessage;
 
         auto& db = dbResult.value();  // 取引用
@@ -117,7 +117,7 @@ TEST(DatabaseTest, FileDatabase) {
 
     // 20260319 ZJH 第二阶段：重新打开同一文件，验证数据仍然存在（持久化有效）
     {
-        auto dbResult2 = df::Database::open(strDbPath);
+        auto dbResult2 = om::Database::open(strDbPath);
         ASSERT_TRUE(dbResult2.has_value()) << dbResult2.error().strMessage;
 
         auto& db2 = dbResult2.value();  // 取引用
@@ -147,7 +147,7 @@ TEST(DatabaseTest, FileDatabase) {
 // =========================================================================
 TEST(DatabaseTest, InvalidSQL) {
     // 20260319 ZJH 打开内存数据库
-    auto dbResult = df::Database::open(":memory:");
+    auto dbResult = om::Database::open(":memory:");
     ASSERT_TRUE(dbResult.has_value()) << dbResult.error().strMessage;
 
     auto& db = dbResult.value();  // 取 Database 引用

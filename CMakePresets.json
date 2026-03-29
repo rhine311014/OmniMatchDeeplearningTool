@@ -2,27 +2,29 @@
   "version": 6,
   "configurePresets": [
     {
-      "name": "windows-base",
+      "name": "qt6-base",
       "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "toolchainFile": "E:/DevelopmentTools/vcpkg/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
-        "CMAKE_CXX_STANDARD": "23"
+        "CMAKE_CXX_STANDARD": "23",
+        "CMAKE_PREFIX_PATH": "E:/DevelopmentTools/QT/6.10.1/msvc2022_64",
+        "CMAKE_CUDA_COMPILER": "E:/DevelopmentTools/cuda12.8/bin/nvcc.exe"
       }
     },
     {
-      "name": "windows-debug",
-      "displayName": "Windows Debug",
-      "inherits": "windows-base",
+      "name": "qt6-debug",
+      "displayName": "Qt6 Debug (CUDA ON)",
+      "inherits": "qt6-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
-      "name": "windows-release",
-      "displayName": "Windows Release",
-      "inherits": "windows-base",
+      "name": "qt6-release",
+      "displayName": "Qt6 Release (CUDA ON)",
+      "inherits": "qt6-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -30,18 +32,18 @@
   ],
   "buildPresets": [
     {
-      "name": "windows-debug",
-      "configurePreset": "windows-debug"
+      "name": "qt6-debug",
+      "configurePreset": "qt6-debug"
     },
     {
-      "name": "windows-release",
-      "configurePreset": "windows-release"
+      "name": "qt6-release",
+      "configurePreset": "qt6-release"
     }
   ],
   "testPresets": [
     {
-      "name": "windows-debug",
-      "configurePreset": "windows-debug",
+      "name": "qt6-debug",
+      "configurePreset": "qt6-debug",
       "output": { "outputOnFailure": true }
     }
   ]

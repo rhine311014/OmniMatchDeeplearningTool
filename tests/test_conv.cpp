@@ -8,21 +8,21 @@
 #include <cstdio>
 
 // 20260319 ZJH 导入所有需要的模块
-import df.engine.tensor;
-import df.engine.tensor_ops;
-import df.engine.module;
-import df.engine.linear;
-import df.engine.activations;
-import df.engine.conv;
-import df.engine.serializer;
+import om.engine.tensor;
+import om.engine.tensor_ops;
+import om.engine.module;
+import om.engine.linear;
+import om.engine.activations;
+import om.engine.conv;
+import om.engine.serializer;
 
 // ===== 1. Conv2dForward =====
 // 20260319 ZJH 测试 Conv2d(1,4,3,stride=1,pad=1) 在 [1,1,8,8] 上的前向传播
 TEST(ConvTest, Conv2dForward) {
     // 20260319 ZJH 创建 Conv2d(1, 4, 3, stride=1, padding=1) 层
-    df::Conv2d layer(1, 4, 3, 1, 1);
+    om::Conv2d layer(1, 4, 3, 1, 1);
     // 20260319 ZJH 创建 [1, 1, 8, 8] 全 1 输入
-    auto input = df::Tensor::ones({1, 1, 8, 8});
+    auto input = om::Tensor::ones({1, 1, 8, 8});
     auto output = layer.forward(input);
     // 20260319 ZJH 验证输出形状: pad=1 保持空间维度，所以 [1, 4, 8, 8]
     ASSERT_EQ(output.ndim(), 4);
@@ -35,8 +35,8 @@ TEST(ConvTest, Conv2dForward) {
 // ===== 2. Conv2dNoPad =====
 // 20260319 ZJH 测试 Conv2d(1,4,3,stride=1,pad=0) 在 [1,1,8,8] 上
 TEST(ConvTest, Conv2dNoPad) {
-    df::Conv2d layer(1, 4, 3, 1, 0);
-    auto input = df::Tensor::ones({1, 1, 8, 8});
+    om::Conv2d layer(1, 4, 3, 1, 0);
+    auto input = om::Tensor::ones({1, 1, 8, 8});
     auto output = layer.forward(input);
     // 20260319 ZJH 验证输出形状: (8 - 3) / 1 + 1 = 6, 所以 [1, 4, 6, 6]
     ASSERT_EQ(output.ndim(), 4);
@@ -49,9 +49,9 @@ TEST(ConvTest, Conv2dNoPad) {
 // ===== 3. BatchNorm2dForward =====
 // 20260319 ZJH 测试 BatchNorm2d(4) 在 [2,4,8,8] 上
 TEST(ConvTest, BatchNorm2dForward) {
-    df::BatchNorm2d layer(4);
+    om::BatchNorm2d layer(4);
     // 20260319 ZJH 创建随机输入
-    auto input = df::Tensor::randn({2, 4, 8, 8});
+    auto input = om::Tensor::randn({2, 4, 8, 8});
     auto output = layer.forward(input);
     // 20260319 ZJH 验证输出形状不变
     ASSERT_EQ(output.ndim(), 4);
@@ -70,9 +70,9 @@ TEST(ConvTest, BatchNorm2dForward) {
 // ===== 4. MaxPool2dForward =====
 // 20260319 ZJH 测试 MaxPool2d(2,2) 在 [1,1,4,4] 上
 TEST(ConvTest, MaxPool2dForward) {
-    df::MaxPool2d layer(2, 2);
+    om::MaxPool2d layer(2, 2);
     // 20260319 ZJH 创建 [1,1,4,4] 输入并手动设置值
-    auto input = df::Tensor::zeros({1, 1, 4, 4});
+    auto input = om::Tensor::zeros({1, 1, 4, 4});
     // 20260319 ZJH 填充 0-15 的值
     float* pData = input.mutableFloatDataPtr();
     for (int i = 0; i < 16; ++i) pData[i] = static_cast<float>(i);
@@ -99,8 +99,8 @@ TEST(ConvTest, MaxPool2dForward) {
 // ===== 5. AvgPool2dForward =====
 // 20260319 ZJH 测试 AvgPool2d(2,2) 在 [1,1,4,4] 上
 TEST(ConvTest, AvgPool2dForward) {
-    df::AvgPool2d layer(2, 2);
-    auto input = df::Tensor::zeros({1, 1, 4, 4});
+    om::AvgPool2d layer(2, 2);
+    auto input = om::Tensor::zeros({1, 1, 4, 4});
     float* pData = input.mutableFloatDataPtr();
     for (int i = 0; i < 16; ++i) pData[i] = static_cast<float>(i);
     auto output = layer.forward(input);
@@ -116,8 +116,8 @@ TEST(ConvTest, AvgPool2dForward) {
 // ===== 6. FlattenForward =====
 // 20260319 ZJH 测试 Flatten 将 [2,3,4,4] 展平为 [2,48]
 TEST(ConvTest, FlattenForward) {
-    df::Flatten layer;
-    auto input = df::Tensor::ones({2, 3, 4, 4});
+    om::Flatten layer;
+    auto input = om::Tensor::ones({2, 3, 4, 4});
     auto output = layer.forward(input);
     // 20260319 ZJH 验证输出形状
     ASSERT_EQ(output.ndim(), 2);
@@ -128,8 +128,8 @@ TEST(ConvTest, FlattenForward) {
 // ===== 7. DropoutForward =====
 // 20260319 ZJH 测试 Dropout 形状不变，评估模式直接透传
 TEST(ConvTest, DropoutForward) {
-    df::Dropout layer(0.5f);
-    auto input = df::Tensor::ones({4, 10});
+    om::Dropout layer(0.5f);
+    auto input = om::Tensor::ones({4, 10});
 
     // 20260319 ZJH 训练模式
     layer.train(true);
@@ -149,20 +149,20 @@ TEST(ConvTest, DropoutForward) {
 // ===== 8. Conv2dBackward =====
 // 20260319 ZJH 测试 Conv2d 反向传播，验证权重梯度形状匹配
 TEST(ConvTest, Conv2dBackward) {
-    df::Conv2d layer(1, 2, 3, 1, 1);  // 20260319 ZJH Conv2d(1, 2, 3, stride=1, pad=1)
-    auto input = df::Tensor::ones({1, 1, 4, 4});
+    om::Conv2d layer(1, 2, 3, 1, 1);  // 20260319 ZJH Conv2d(1, 2, 3, stride=1, pad=1)
+    auto input = om::Tensor::ones({1, 1, 4, 4});
     auto output = layer.forward(input);
     // 20260319 ZJH 计算损失: sum(output)
-    auto loss = df::tensorSum(output);
+    auto loss = om::tensorSum(output);
     layer.zeroGrad();
-    df::tensorBackward(loss);
+    om::tensorBackward(loss);
 
     // 20260319 ZJH 验证参数梯度存在
     auto vecParams = layer.parameters();
     ASSERT_GE(vecParams.size(), static_cast<size_t>(1));
 
     // 20260319 ZJH 验证权重梯度形状: [2, 1, 3, 3]
-    auto gradWeight = df::tensorGetGrad(*vecParams[0]);
+    auto gradWeight = om::tensorGetGrad(*vecParams[0]);
     ASSERT_EQ(gradWeight.numel(), 2 * 1 * 3 * 3);  // 20260319 ZJH 18 个元素
     EXPECT_EQ(gradWeight.shape(0), 2);   // 20260319 ZJH Cout
     EXPECT_EQ(gradWeight.shape(1), 1);   // 20260319 ZJH Cin
@@ -171,7 +171,7 @@ TEST(ConvTest, Conv2dBackward) {
 
     // 20260319 ZJH 验证偏置梯度
     if (vecParams.size() >= 2) {
-        auto gradBias = df::tensorGetGrad(*vecParams[1]);
+        auto gradBias = om::tensorGetGrad(*vecParams[1]);
         ASSERT_EQ(gradBias.numel(), 2);  // 20260319 ZJH 偏置梯度 [2]
     }
 }
@@ -180,21 +180,21 @@ TEST(ConvTest, Conv2dBackward) {
 // 20260319 ZJH 测试模型序列化：保存后加载到新模型，验证参数匹配
 TEST(ConvTest, SerializeSaveLoad) {
     // 20260319 ZJH 构建一个简单模型
-    auto pModel1 = std::make_shared<df::Sequential>();
-    pModel1->add(std::make_shared<df::Linear>(4, 3));
-    pModel1->add(std::make_shared<df::Linear>(3, 2));
+    auto pModel1 = std::make_shared<om::Sequential>();
+    pModel1->add(std::make_shared<om::Linear>(4, 3));
+    pModel1->add(std::make_shared<om::Linear>(3, 2));
 
     // 20260319 ZJH 保存模型
     std::string strPath = "test_model_serialize.dfm";
-    df::ModelSerializer::save(*pModel1, strPath);
+    om::ModelSerializer::save(*pModel1, strPath);
 
     // 20260319 ZJH 创建相同结构的新模型
-    auto pModel2 = std::make_shared<df::Sequential>();
-    pModel2->add(std::make_shared<df::Linear>(4, 3));
-    pModel2->add(std::make_shared<df::Linear>(3, 2));
+    auto pModel2 = std::make_shared<om::Sequential>();
+    pModel2->add(std::make_shared<om::Linear>(4, 3));
+    pModel2->add(std::make_shared<om::Linear>(3, 2));
 
     // 20260319 ZJH 加载参数
-    df::ModelSerializer::load(*pModel2, strPath);
+    om::ModelSerializer::load(*pModel2, strPath);
 
     // 20260319 ZJH 验证参数匹配
     auto vecParams1 = pModel1->parameters();
@@ -218,20 +218,20 @@ TEST(ConvTest, SerializeSaveLoad) {
 // 20260319 ZJH 测试简单 CNN: Sequential(Conv2d, ReLU, MaxPool2d, Flatten, Linear) 前向传播形状正确
 TEST(ConvTest, SimpleCNN) {
     // 20260319 ZJH 构建简单 CNN 模型
-    auto pModel = std::make_shared<df::Sequential>();
+    auto pModel = std::make_shared<om::Sequential>();
     // 20260319 ZJH Conv2d(1, 4, 3, stride=1, pad=1): [N,1,8,8] -> [N,4,8,8]
-    pModel->add(std::make_shared<df::Conv2d>(1, 4, 3, 1, 1));
+    pModel->add(std::make_shared<om::Conv2d>(1, 4, 3, 1, 1));
     // 20260319 ZJH ReLU
-    pModel->add(std::make_shared<df::ReLU>());
+    pModel->add(std::make_shared<om::ReLU>());
     // 20260319 ZJH MaxPool2d(2, 2): [N,4,8,8] -> [N,4,4,4]
-    pModel->add(std::make_shared<df::MaxPool2d>(2, 2));
+    pModel->add(std::make_shared<om::MaxPool2d>(2, 2));
     // 20260319 ZJH Flatten: [N,4,4,4] -> [N,64]
-    pModel->add(std::make_shared<df::Flatten>());
+    pModel->add(std::make_shared<om::Flatten>());
     // 20260319 ZJH Linear(64, 10): [N,64] -> [N,10]
-    pModel->add(std::make_shared<df::Linear>(64, 10));
+    pModel->add(std::make_shared<om::Linear>(64, 10));
 
     // 20260319 ZJH 创建输入 [2, 1, 8, 8]
-    auto input = df::Tensor::randn({2, 1, 8, 8});
+    auto input = om::Tensor::randn({2, 1, 8, 8});
     auto output = pModel->forward(input);
 
     // 20260319 ZJH 验证输出形状 [2, 10]

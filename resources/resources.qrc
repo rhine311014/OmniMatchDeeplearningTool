@@ -1,0 +1,8 @@
+<!DOCTYPE RCC>
+<!-- 20260322 ZJH Qt6 资源文件：包含暗色和亮色主题样式表 -->
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>themes/dark_theme.qss</file>
+        <file>themes/light_theme.qss</file>
+    </qresource>
+</RCC>

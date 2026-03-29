@@ -1,12 +1,12 @@
 // 20260319 ZJH MemoryPool 单元测试
 // 验证：对齐分配、内存可用性、零字节分配、多次分配/释放、统计字节数追踪
 #include <gtest/gtest.h>
-import df.platform.memory;
+import om.platform.memory;
 
 // 20260319 ZJH 测试1：基本分配与释放
 // 验证 allocate(1024) 返回非 nullptr 指针，deallocate 不崩溃
 TEST(MemoryPool, AllocateAndDeallocate) {
-    df::MemoryPool pool;  // 创建内存池实例
+    om::MemoryPool pool;  // 创建内存池实例
 
     // 20260319 ZJH 分配 1024 字节，期望返回有效指针
     void* pPtr = pool.allocate(1024);
@@ -19,7 +19,7 @@ TEST(MemoryPool, AllocateAndDeallocate) {
 // 20260319 ZJH 测试2：分配的内存可正常读写
 // 分配 100 个 float 的空间，逐个写入并回读验证数据完整性
 TEST(MemoryPool, MemoryIsUsable) {
-    df::MemoryPool pool;  // 创建内存池实例
+    om::MemoryPool pool;  // 创建内存池实例
 
     // 20260319 ZJH 分配足以存放 100 个 float 的内存块
     const size_t nCount = 100;  // 元素数量
@@ -45,7 +45,7 @@ TEST(MemoryPool, MemoryIsUsable) {
 
 // 20260319 ZJH 测试3：分配 0 字节应返回 nullptr
 TEST(MemoryPool, ZeroSizeReturnsNull) {
-    df::MemoryPool pool;  // 创建内存池实例
+    om::MemoryPool pool;  // 创建内存池实例
 
     // 20260319 ZJH 分配 0 字节，期望返回 nullptr（不触发实际分配）
     void* pPtr = pool.allocate(0);
@@ -55,7 +55,7 @@ TEST(MemoryPool, ZeroSizeReturnsNull) {
 // 20260319 ZJH 测试4：连续 100 次分配与释放不崩溃
 // 验证内存池在高频分配/释放场景下的稳定性
 TEST(MemoryPool, MultipleAllocations) {
-    df::MemoryPool pool;  // 创建内存池实例
+    om::MemoryPool pool;  // 创建内存池实例
 
     const int nIterations = 100;  // 分配/释放轮次数
     for (int i = 0; i < nIterations; ++i) {
@@ -74,7 +74,7 @@ TEST(MemoryPool, MultipleAllocations) {
 // 20260319 ZJH 测试5：allocatedBytes() 正确追踪已分配字节数
 // 场景：初始为 0 -> 分配两块后 >= 2048 -> 全部释放后回到 0
 TEST(MemoryPool, Statistics) {
-    df::MemoryPool pool;  // 创建内存池实例
+    om::MemoryPool pool;  // 创建内存池实例
 
     // 20260319 ZJH 初始状态：未分配任何内存，统计应为 0
     EXPECT_EQ(pool.allocatedBytes(), 0u);

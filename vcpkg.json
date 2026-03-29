@@ -1,18 +1,11 @@
 {
-  "name": "deepforge",
-  "version": "0.1.0",
-  "description": "Pure C++ Deep Learning Vision Platform",
+  "name": "omnimatch",
+  "version": "2.0.0",
+  "description": "Pure C++ Deep Learning Vision Platform (Qt6)",
   "dependencies": [
     "spdlog",
     "nlohmann-json",
     "sqlite3",
-    "gtest",
-    "sdl3",
-    {
-      "name": "imgui",
-      "features": ["sdl3-binding", "sdl3-renderer-binding", "docking-experimental"]
-    },
-    "implot",
-    "stb"
+    "gtest"
   ]
 }

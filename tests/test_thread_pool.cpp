@@ -5,12 +5,12 @@
 #include <vector>    // std::vector，存储 future
 #include <future>    // std::future，接收 submit 结果
 
-import df.platform.thread_pool;
+import om.platform.thread_pool;
 
 // 20260319 ZJH 测试1：提交一个返回 int 的 lambda，验证 future.get() 返回正确值
 TEST(ThreadPoolTest, SubmitAndGetResult) {
     // 20260319 ZJH 创建 2 线程的线程池，足够运行单个任务
-    df::ThreadPool pool(2);
+    om::ThreadPool pool(2);
 
     // 20260319 ZJH 提交返回 42 的 lambda，立即获取 future
     auto fut = pool.submit([]() -> int {
@@ -26,7 +26,7 @@ TEST(ThreadPoolTest, SubmitAndGetResult) {
 // 20260319 ZJH 测试2：提交 100 个计算 i*i 的任务，验证所有 future 返回正确结果
 TEST(ThreadPoolTest, MultipleTasks) {
     // 20260319 ZJH 创建 4 线程的线程池，模拟多核并行
-    df::ThreadPool pool(4);
+    om::ThreadPool pool(4);
 
     // 20260319 ZJH 存放所有 future，避免在 submit 后立即 get 导致串行
     std::vector<std::future<int>> vecFutures;
@@ -49,7 +49,7 @@ TEST(ThreadPoolTest, MultipleTasks) {
 // 20260319 ZJH 测试3：提交 1000 个递增原子计数的任务，waitAll() 后验证计数恰好为 1000
 TEST(ThreadPoolTest, AllTasksExecuted) {
     // 20260319 ZJH 创建 4 线程的线程池
-    df::ThreadPool pool(4);
+    om::ThreadPool pool(4);
 
     // 20260319 ZJH 原子计数器，线程安全地统计任务执行次数
     std::atomic<int> nCounter{0};
@@ -72,7 +72,7 @@ TEST(ThreadPoolTest, AllTasksExecuted) {
 // 20260319 ZJH 测试4：验证 threadCount() 返回构造时指定的线程数
 TEST(ThreadPoolTest, ThreadCount) {
     // 20260319 ZJH 创建 3 线程的线程池
-    df::ThreadPool pool(3);
+    om::ThreadPool pool(3);
 
     // 20260319 ZJH threadCount() 应返回构造时传入的线程数 3
     EXPECT_EQ(pool.threadCount(), 3);
@@ -81,7 +81,7 @@ TEST(ThreadPoolTest, ThreadCount) {
 // 20260319 ZJH 测试5：提交 void 返回类型的 lambda，通过 future.get() 验证执行完成
 TEST(ThreadPoolTest, VoidTask) {
     // 20260319 ZJH 创建 2 线程的线程池
-    df::ThreadPool pool(2);
+    om::ThreadPool pool(2);
 
     // 20260319 ZJH 使用原子标志跟踪 void 任务是否被执行
     std::atomic<bool> bExecuted{false};

@@ -6,24 +6,24 @@
 #include <cstdio>
 
 // 20260320 ZJH 导入所有需要的模块
-import df.engine.tensor;
-import df.engine.tensor_ops;
-import df.engine.module;
-import df.engine.activations;
-import df.engine.conv;
-import df.engine.loss;
-import df.engine.unet;
-import df.engine.yolo;
-import df.engine.autoencoder;
-import df.hal.cpu_backend;
+import om.engine.tensor;
+import om.engine.tensor_ops;
+import om.engine.module;
+import om.engine.activations;
+import om.engine.conv;
+import om.engine.loss;
+import om.engine.unet;
+import om.engine.yolo;
+import om.engine.autoencoder;
+import om.hal.cpu_backend;
 
 // ===== 1. UNetForward =====
 // 20260320 ZJH 测试 UNet(1,2) 在 [1,1,64,64] 上前向传播，输出 [1,2,64,64]
 TEST(ModelsTest, UNetForward) {
     // 20260320 ZJH 创建 UNet，1 通道输入，2 类输出
-    df::UNet model(1, 2);
+    om::UNet model(1, 2);
     // 20260320 ZJH 创建 [1, 1, 64, 64] 随机输入
-    auto input = df::Tensor::randn({1, 1, 64, 64});
+    auto input = om::Tensor::randn({1, 1, 64, 64});
     auto output = model.forward(input);
     // 20260320 ZJH 验证输出形状: [1, 2, 64, 64]
     ASSERT_EQ(output.ndim(), 4);
@@ -40,7 +40,7 @@ TEST(ModelsTest, UNetForward) {
 // ===== 2. UNetParameters =====
 // 20260320 ZJH 测试 UNet 参数量在合理范围内
 TEST(ModelsTest, UNetParameters) {
-    df::UNet model(1, 2);
+    om::UNet model(1, 2);
     auto vecParams = model.parameters();
     int nTotalParams = 0;
     for (auto* pParam : vecParams) {
@@ -58,9 +58,9 @@ TEST(ModelsTest, UNetParameters) {
 // 20260320 ZJH 测试 YOLOv5Nano(20) 在 [1,3,128,128] 上前向传播
 TEST(ModelsTest, YOLOForward) {
     // 20260320 ZJH 创建 YOLOv5Nano，20 个类别
-    df::YOLOv5Nano model(20, 3);
+    om::YOLOv5Nano model(20, 3);
     // 20260320 ZJH 创建 [1, 3, 128, 128] 随机输入
-    auto input = df::Tensor::randn({1, 3, 128, 128});
+    auto input = om::Tensor::randn({1, 3, 128, 128});
     auto output = model.forward(input);
     // 20260320 ZJH 验证输出形状: [1, numPredictions, 25]
     // numPredictions = (128/16)*(128/16)*3 = 8*8*3 = 192
@@ -77,8 +77,8 @@ TEST(ModelsTest, YOLOForward) {
 // ===== 4. AutoEncoderForward =====
 // 20260320 ZJH 测试 ConvAutoEncoder(1) 在 [1,1,28,28] 上前向传播
 TEST(ModelsTest, AutoEncoderForward) {
-    df::ConvAutoEncoder model(1, 64);
-    auto input = df::Tensor::randn({1, 1, 28, 28});
+    om::ConvAutoEncoder model(1, 64);
+    auto input = om::Tensor::randn({1, 1, 28, 28});
     auto output = model.forward(input);
     // 20260320 ZJH 验证输出形状: [1, 1, 28, 28]（重建与输入同形状）
     ASSERT_EQ(output.ndim(), 4);
@@ -97,8 +97,8 @@ TEST(ModelsTest, AutoEncoderForward) {
 // ===== 5. AutoEncoderEncodeDecode =====
 // 20260320 ZJH 测试编码和解码分别调用，验证中间形状
 TEST(ModelsTest, AutoEncoderEncodeDecode) {
-    df::ConvAutoEncoder model(1, 64);
-    auto input = df::Tensor::randn({1, 1, 28, 28});
+    om::ConvAutoEncoder model(1, 64);
+    auto input = om::Tensor::randn({1, 1, 28, 28});
     // 20260320 ZJH 编码
     auto latent = model.encode(input);
     ASSERT_EQ(latent.ndim(), 4);
@@ -119,9 +119,9 @@ TEST(ModelsTest, AutoEncoderEncodeDecode) {
 // 20260320 ZJH 测试 ConvTranspose2d 的形状计算
 TEST(ModelsTest, ConvTranspose2dForward) {
     // 20260320 ZJH ConvTranspose2d(4, 2, kernel=2, stride=2, pad=0)
-    df::ConvTranspose2d deconv(4, 2, 2, 2, 0, true);
+    om::ConvTranspose2d deconv(4, 2, 2, 2, 0, true);
     // 20260320 ZJH 输入 [1, 4, 7, 7]
-    auto input = df::Tensor::randn({1, 4, 7, 7});
+    auto input = om::Tensor::randn({1, 4, 7, 7});
     auto output = deconv.forward(input);
     // 20260320 ZJH 输出: Hout = (7-1)*2 - 2*0 + 2 = 14
     ASSERT_EQ(output.ndim(), 4);
@@ -134,8 +134,8 @@ TEST(ModelsTest, ConvTranspose2dForward) {
 // ===== 7. SigmoidForward =====
 // 20260320 ZJH 验证 Sigmoid 输出在 [0, 1] 范围内
 TEST(ModelsTest, SigmoidForward) {
-    auto input = df::Tensor::randn({2, 10});
-    auto output = df::tensorSigmoid(input);
+    auto input = om::Tensor::randn({2, 10});
+    auto output = om::tensorSigmoid(input);
     ASSERT_EQ(output.ndim(), 2);
     EXPECT_EQ(output.shape(0), 2);
     EXPECT_EQ(output.shape(1), 10);
@@ -146,8 +146,8 @@ TEST(ModelsTest, SigmoidForward) {
         EXPECT_LE(fVal, 1.0f);
     }
     // 20260320 ZJH 验证 sigmoid(0) ≈ 0.5
-    auto zero = df::Tensor::zeros({1});
-    auto half = df::tensorSigmoid(zero);
+    auto zero = om::Tensor::zeros({1});
+    auto half = om::tensorSigmoid(zero);
     EXPECT_NEAR(half.floatDataPtr()[0], 0.5f, 1e-6f);
 }
 
@@ -156,9 +156,9 @@ TEST(ModelsTest, SigmoidForward) {
 TEST(ModelsTest, LeakyReLUForward) {
     // 20260320 ZJH 创建测试数据: [-2, -1, 0, 1, 2]
     float arrData[] = {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f};
-    auto input = df::Tensor::fromData(arrData, {5});
+    auto input = om::Tensor::fromData(arrData, {5});
     float fSlope = 0.1f;
-    auto output = df::tensorLeakyReLU(input, fSlope);
+    auto output = om::tensorLeakyReLU(input, fSlope);
     ASSERT_EQ(output.numel(), 5);
     // 20260320 ZJH 验证输出值
     EXPECT_NEAR(output.floatDataPtr()[0], -0.2f, 1e-6f);   // -2 * 0.1
@@ -174,16 +174,16 @@ TEST(ModelsTest, DiceLossForward) {
     // 20260320 ZJH 完全匹配时 Dice 损失应接近 0
     float arrPred[] = {1.0f, 1.0f, 0.0f, 0.0f};
     float arrTarget[] = {1.0f, 1.0f, 0.0f, 0.0f};
-    auto pred = df::Tensor::fromData(arrPred, {4});
-    auto target = df::Tensor::fromData(arrTarget, {4});
-    df::DiceLoss diceLoss;
+    auto pred = om::Tensor::fromData(arrPred, {4});
+    auto target = om::Tensor::fromData(arrTarget, {4});
+    om::DiceLoss diceLoss;
     auto loss = diceLoss.forward(pred, target);
     // 20260320 ZJH Dice = 2*2/(2+2+eps) ≈ 1.0, loss ≈ 0.0
     EXPECT_LT(loss.item(), 0.01f);
 
     // 20260320 ZJH 完全不匹配时 Dice 损失应接近 1
     float arrPred2[] = {0.0f, 0.0f, 1.0f, 1.0f};
-    auto pred2 = df::Tensor::fromData(arrPred2, {4});
+    auto pred2 = om::Tensor::fromData(arrPred2, {4});
     auto loss2 = diceLoss.forward(pred2, target);
     EXPECT_GT(loss2.item(), 0.9f);
 }
@@ -193,9 +193,9 @@ TEST(ModelsTest, DiceLossForward) {
 // YOLOv8 使用解耦头（anchor-free），输出维度为 [N, H*W, 4+nClasses]
 TEST(ModelsTest, YOLOv8NanoForward) {
     // 20260320 ZJH 创建 YOLOv8Nano，20 个类别
-    df::YOLOv8Nano model(20, 3);
+    om::YOLOv8Nano model(20, 3);
     // 20260320 ZJH 创建 [1, 3, 128, 128] 随机输入
-    auto input = df::Tensor::randn({1, 3, 128, 128});
+    auto input = om::Tensor::randn({1, 3, 128, 128});
     auto output = model.forward(input);
     // 20260320 ZJH 验证输出形状: [1, (128/16)*(128/16), 4+20] = [1, 64, 24]
     ASSERT_EQ(output.ndim(), 3);
@@ -213,9 +213,9 @@ TEST(ModelsTest, YOLOv8NanoForward) {
 // YOLOv7-Tiny 使用 ELAN 块 + anchor-based 检测头，3 级下采样（总 /8）
 TEST(ModelsTest, YOLOv7TinyForward) {
     // 20260320 ZJH 创建 YOLOv7Tiny，20 个类别
-    df::YOLOv7Tiny model(20, 3);
+    om::YOLOv7Tiny model(20, 3);
     // 20260320 ZJH 创建 [1, 3, 128, 128] 随机输入
-    auto input = df::Tensor::randn({1, 3, 128, 128});
+    auto input = om::Tensor::randn({1, 3, 128, 128});
     auto output = model.forward(input);
     // 20260320 ZJH 验证输出形状: [1, (128/8)*(128/8)*3, 5+20] = [1, 768, 25]
     ASSERT_EQ(output.ndim(), 3);
@@ -233,9 +233,9 @@ TEST(ModelsTest, YOLOv7TinyForward) {
 // YOLOv10 使用 SCDown 解耦下采样 + C2f 块 + 解耦头，3 级下采样（总 /8）
 TEST(ModelsTest, YOLOv10NanoForward) {
     // 20260320 ZJH 创建 YOLOv10Nano，20 个类别
-    df::YOLOv10Nano model(20, 3);
+    om::YOLOv10Nano model(20, 3);
     // 20260320 ZJH 创建 [1, 3, 128, 128] 随机输入
-    auto input = df::Tensor::randn({1, 3, 128, 128});
+    auto input = om::Tensor::randn({1, 3, 128, 128});
     auto output = model.forward(input);
     // 20260320 ZJH 验证输出形状: [1, (128/8)*(128/8), 4+20] = [1, 256, 24]
     // SCDown 下采样 3 次: 128 -> 64 -> 32 -> 16, 所以 16*16 = 256
@@ -253,9 +253,9 @@ TEST(ModelsTest, YOLOv10NanoForward) {
 // 20260320 ZJH 测试沿通道维度拼接
 TEST(ModelsTest, ConcatChannels) {
     // 20260320 ZJH [1, 3, 4, 4] + [1, 5, 4, 4] -> [1, 8, 4, 4]
-    auto a = df::Tensor::ones({1, 3, 4, 4});
-    auto b = df::Tensor::full({1, 5, 4, 4}, 2.0f);
-    auto result = df::tensorConcatChannels(a, b);
+    auto a = om::Tensor::ones({1, 3, 4, 4});
+    auto b = om::Tensor::full({1, 5, 4, 4}, 2.0f);
+    auto result = om::tensorConcatChannels(a, b);
     ASSERT_EQ(result.ndim(), 4);
     EXPECT_EQ(result.shape(0), 1);  // 20260320 ZJH 批次
     EXPECT_EQ(result.shape(1), 8);  // 20260320 ZJH 3 + 5 = 8

@@ -8,22 +8,22 @@
 #include <cstdio>
 
 // 20260319 ZJH 导入所有需要的模块
-import df.engine.tensor;
-import df.engine.tensor_ops;
-import df.engine.module;
-import df.engine.linear;
-import df.engine.activations;
-import df.engine.conv;
-import df.engine.resnet;
-import df.engine.serializer;
+import om.engine.tensor;
+import om.engine.tensor_ops;
+import om.engine.module;
+import om.engine.linear;
+import om.engine.activations;
+import om.engine.conv;
+import om.engine.resnet;
+import om.engine.serializer;
 
 // ===== 1. BasicBlockSameSize =====
 // 20260319 ZJH 测试 BasicBlock(64,64) 在 [1,64,8,8] 上前向传播，输出形状不变
 TEST(ResNetTest, BasicBlockSameSize) {
     // 20260319 ZJH 创建 BasicBlock(64, 64, stride=1)
-    df::BasicBlock block(64, 64, 1);
+    om::BasicBlock block(64, 64, 1);
     // 20260319 ZJH 创建 [1, 64, 8, 8] 随机输入
-    auto input = df::Tensor::randn({1, 64, 8, 8});
+    auto input = om::Tensor::randn({1, 64, 8, 8});
     auto output = block.forward(input);
     // 20260319 ZJH 验证输出形状: 步幅 1、通道不变，空间维度不变
     ASSERT_EQ(output.ndim(), 4);
@@ -41,9 +41,9 @@ TEST(ResNetTest, BasicBlockSameSize) {
 // 20260319 ZJH 测试 BasicBlock(64,128,stride=2) 在 [1,64,8,8] 上前向传播，空间下采样
 TEST(ResNetTest, BasicBlockDownsample) {
     // 20260319 ZJH 创建 BasicBlock(64, 128, stride=2)
-    df::BasicBlock block(64, 128, 2);
+    om::BasicBlock block(64, 128, 2);
     // 20260319 ZJH 创建 [1, 64, 8, 8] 随机输入
-    auto input = df::Tensor::randn({1, 64, 8, 8});
+    auto input = om::Tensor::randn({1, 64, 8, 8});
     auto output = block.forward(input);
     // 20260319 ZJH 验证输出形状: 通道 64->128，空间 8->4（stride=2）
     ASSERT_EQ(output.ndim(), 4);
@@ -61,9 +61,9 @@ TEST(ResNetTest, BasicBlockDownsample) {
 // 20260319 ZJH 测试 ResNet18(10) 在 [1,1,28,28] 上的完整前向传播
 TEST(ResNetTest, ResNet18Forward) {
     // 20260319 ZJH 创建 ResNet18，10 个类别
-    df::ResNet18 model(10);
+    om::ResNet18 model(10);
     // 20260319 ZJH 创建 [1, 1, 28, 28] 随机输入（模拟 MNIST 灰度图）
-    auto input = df::Tensor::randn({1, 1, 28, 28});
+    auto input = om::Tensor::randn({1, 1, 28, 28});
     auto output = model.forward(input);
     // 20260319 ZJH 验证输出形状: [1, 10]
     ASSERT_EQ(output.ndim(), 2);
@@ -80,7 +80,7 @@ TEST(ResNetTest, ResNet18Forward) {
 // 20260319 ZJH 测试 ResNet18 参数量在合理范围内
 TEST(ResNetTest, ResNet18Parameters) {
     // 20260319 ZJH 创建 ResNet18
-    df::ResNet18 model(10);
+    om::ResNet18 model(10);
     auto vecParams = model.parameters();
     // 20260319 ZJH 计算总参数量
     int nTotalParams = 0;
@@ -103,17 +103,17 @@ TEST(ResNetTest, ResNet18Parameters) {
 // 20260319 ZJH 测试 ResNet18 的保存和加载，验证参数完全匹配
 TEST(ResNetTest, ResNet18SaveLoad) {
     // 20260319 ZJH 创建原始 ResNet18
-    df::ResNet18 model1(10);
+    om::ResNet18 model1(10);
 
     // 20260319 ZJH 保存模型
     std::string strPath = "test_resnet18_serialize.dfm";
-    df::ModelSerializer::save(model1, strPath);
+    om::ModelSerializer::save(model1, strPath);
 
     // 20260319 ZJH 创建相同结构的新 ResNet18
-    df::ResNet18 model2(10);
+    om::ResNet18 model2(10);
 
     // 20260319 ZJH 加载参数
-    df::ModelSerializer::load(model2, strPath);
+    om::ModelSerializer::load(model2, strPath);
 
     // 20260319 ZJH 验证参数匹配
     auto vecParams1 = model1.parameters();
