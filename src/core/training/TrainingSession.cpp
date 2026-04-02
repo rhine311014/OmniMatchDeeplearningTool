@@ -17,6 +17,7 @@
 #include <QPainter>          // 20260328 ZJH QPainter 用于将标注渲染为像素级分割掩码
 #include <algorithm>         // 20260326 ZJH std::min, std::max 用于亮度裁剪
 #include <cmath>  // 20260322 ZJH std::exp
+#include <future>  // 20260330 ZJH std::async/std::future 异步预取训练图像
 #ifdef _MSC_VER
 #include <windows.h>         // 20260326 ZJH EXCEPTION_EXECUTE_HANDLER for SEH
 #endif
@@ -130,6 +131,7 @@ std::string TrainingSession::architectureToEngineString(om::ModelArchitecture eA
         // 20260325 ZJH 语义分割模型
         case om::ModelArchitecture::UNet:              return "UNet";
         case om::ModelArchitecture::DeepLabV3Plus:     return "DeepLabV3Plus";
+        case om::ModelArchitecture::MobileSegNet:      return "MobileSegNet";  // 20260401 ZJH 轻量分割
         // 20260325 ZJH 异常检测模型
         case om::ModelArchitecture::EfficientAD:       return "EfficientAD";
         // 20260325 ZJH 实例分割模型
@@ -223,6 +225,25 @@ void TrainingSession::runTrainingLoopImpl()
     int nTrainCount = pDataset->countBySplit(om::SplitType::Train);       // 20260324 ZJH 训练集数量
     int nValCount   = pDataset->countBySplit(om::SplitType::Validation);  // 20260324 ZJH 验证集数量
 
+    // 20260402 ZJH ===== 自动模型缩放（小数据集 → 轻量模型）=====
+    // 32 张图训 16M 参数的 DeepLabV3+ = 严重过拟合
+    // 策略: <30 张 → MobileSegNet, <100 张 → UNet, >=100 张 → 保持原架构
+    if (bIsSegmentation && nTrainCount > 0) {
+        if (nTrainCount < 30) {
+            if (localConfig.eArchitecture == om::ModelArchitecture::DeepLabV3Plus) {
+                emit trainingLog("[INFO] Auto-scaling: " + QString::number(nTrainCount)
+                    + " images too few for DeepLabV3+ → switching to MobileSegNet");
+                localConfig.eArchitecture = om::ModelArchitecture::MobileSegNet;
+            }
+        } else if (nTrainCount < 100) {
+            if (localConfig.eArchitecture == om::ModelArchitecture::DeepLabV3Plus) {
+                emit trainingLog("[INFO] Auto-scaling: " + QString::number(nTrainCount)
+                    + " images → switching DeepLabV3+ to UNet (lighter)");
+                localConfig.eArchitecture = om::ModelArchitecture::UNet;
+            }
+        }
+    }
+
     // 20260324 ZJH 输出训练启动日志
     emit trainingLog(QStringLiteral("========================================"));
     emit trainingLog(QStringLiteral("[%1] 训练开始 (真实数据模式)").arg(QDateTime::currentDateTime().toString("hh:mm:ss")));
@@ -283,7 +304,78 @@ void TrainingSession::runTrainingLoopImpl()
     int nValLoaded   = 0;  // 20260324 ZJH 成功加载的验证图像数
     int nLoadFailed  = 0;  // 20260324 ZJH 加载失败的图像数
 
-    for (const ImageEntry& entry : vecImages) {
+    // 20260330 ZJH ===== 异步预取：双缓冲 I/O 与 CPU 预处理并行 =====
+    // 在处理当前图像时，后台线程预取下一张图像的磁盘 I/O
+    std::future<QImage> futPrefetch;  // 20260330 ZJH 下一张图像的异步 future
+    int nPrefetchIdx = -1;            // 20260330 ZJH 已启动预取的图像索引
+    int nTotalImages = static_cast<int>(vecImages.size());
+
+    // 20260330 ZJH 启动下一个有效图像的预取
+    auto fnStartPrefetch = [&](int nFrom) {
+        for (int i = nFrom; i < nTotalImages; ++i) {
+            const auto& e = vecImages[static_cast<size_t>(i)];
+            if (e.eSplit != om::SplitType::Train && e.eSplit != om::SplitType::Validation) continue;
+            int nLbl = e.nLabelId;
+            if (nLbl < 0 && !e.vecAnnotations.isEmpty()) {
+                for (const Annotation& a : e.vecAnnotations)
+                    if (a.nLabelId >= 0) { nLbl = a.nLabelId; break; }
+            }
+            if (nLbl < 0) continue;
+            nPrefetchIdx = i;
+            QString strP = e.strFilePath;
+            futPrefetch = std::async(std::launch::async, [strP]() -> QImage {
+                return QImage(strP);
+            });
+            return;
+        }
+        nPrefetchIdx = nTotalImages;
+    };
+    fnStartPrefetch(0);  // 20260330 ZJH 启动首张预取
+
+    // 20260401 ZJH ===== 自适应 Crop 策略（对标海康 VisionTrain 缺陷尺寸分析）=====
+    // Phase 4.1: 分析所有标注的 bounding box 尺寸分布 → 推荐最优 crop 大小
+    // 目标: 选择 crop 使得 P95 的缺陷能完整包含在一个 crop 内
+    int nAdaptiveCropSize = localConfig.nCropSize;  // 20260401 ZJH 默认使用配置值
+    {
+        std::vector<int> vecDefectMaxDims;  // 20260401 ZJH 收集每个缺陷的 max(宽, 高)
+        for (const auto& img : vecImages) {
+            if (img.eSplit != om::SplitType::Train) continue;
+            for (const Annotation& anno : img.vecAnnotations) {
+                if (anno.nLabelId < 0) continue;
+                int nW = static_cast<int>(anno.rectBounds.width());
+                int nH = static_cast<int>(anno.rectBounds.height());
+                int nMaxDim = std::max(nW, nH);
+                if (nMaxDim > 0) vecDefectMaxDims.push_back(nMaxDim);
+            }
+        }
+        if (vecDefectMaxDims.size() >= 5) {
+            // 20260401 ZJH 排序后取 P95 分位数
+            std::sort(vecDefectMaxDims.begin(), vecDefectMaxDims.end());
+            size_t nP95Idx = static_cast<size_t>(vecDefectMaxDims.size() * 0.95);
+            int nP95Size = vecDefectMaxDims[std::min(nP95Idx, vecDefectMaxDims.size() - 1)];
+            // 20260401 ZJH crop 大小 = P95 缺陷尺寸 × 2.5（留足上下文边距）
+            // 然后对齐到 32 像素（CNN 友好）
+            int nRecommended = ((nP95Size * 5 / 2 + 31) / 32) * 32;
+            // 20260401 ZJH 夹紧到合理范围 [256, 1024]
+            nRecommended = std::max(256, std::min(1024, nRecommended));
+            // 20260401 ZJH 仅当推荐值与配置值差异 > 20% 时才覆盖（尊重用户手动设置）
+            if (localConfig.nCropSize <= 0 ||
+                std::abs(nRecommended - localConfig.nCropSize) > localConfig.nCropSize / 5) {
+                nAdaptiveCropSize = nRecommended;
+                emit trainingLog(QStringLiteral("[INFO] 自适应 Crop: 分析 %1 个缺陷, P95=%2px, 推荐 crop=%3px (原=%4)")
+                    .arg(vecDefectMaxDims.size()).arg(nP95Size).arg(nAdaptiveCropSize).arg(localConfig.nCropSize));
+            }
+            // 20260401 ZJH 统计信息日志
+            int nMin = vecDefectMaxDims.front();
+            int nMax = vecDefectMaxDims.back();
+            int nMedian = vecDefectMaxDims[vecDefectMaxDims.size() / 2];
+            emit trainingLog(QStringLiteral("[INFO] 缺陷尺寸分布: min=%1 median=%2 P95=%3 max=%4 (共%5个)")
+                .arg(nMin).arg(nMedian).arg(nP95Size).arg(nMax).arg(vecDefectMaxDims.size()));
+        }
+    }
+
+    for (int nImgIdx = 0; nImgIdx < nTotalImages; ++nImgIdx) {
+        const ImageEntry& entry = vecImages[static_cast<size_t>(nImgIdx)];
         // 20260324 ZJH 检查停止请求（数据加载期间也响应停止）
         if (m_bStopRequested.load()) {
             emit trainingLog(QStringLiteral("[信息] 数据加载期间收到停止请求"));
@@ -316,7 +408,14 @@ void TrainingSession::runTrainingLoopImpl()
         if (nEffectiveLabelId < 0) continue;
 
         // 20260329 ZJH 加载完整原始图像
-        QImage imgFull(entry.strFilePath);  // 20260329 ZJH 从磁盘加载原始分辨率图像
+        // 20260330 ZJH 异步预取：若当前图像已被预取则直接获取，否则回退同步加载
+        QImage imgFull;
+        if (nPrefetchIdx == nImgIdx && futPrefetch.valid()) {
+            imgFull = futPrefetch.get();  // 20260330 ZJH 从预取获取（可能零等待）
+        } else {
+            imgFull = QImage(entry.strFilePath);  // 20260330 ZJH 回退同步加载
+        }
+        fnStartPrefetch(nImgIdx + 1);  // 20260330 ZJH 立即启动下一张预取（与当前处理并行） 从磁盘加载原始分辨率图像
         if (imgFull.isNull()) {
             nLoadFailed++;  // 20260329 ZJH 图像加载失败计数
             continue;       // 20260329 ZJH 跳过无法加载的图像
@@ -327,12 +426,16 @@ void TrainingSession::runTrainingLoopImpl()
         // 20260329 ZJH 获取原始图像实际尺寸（entry.nWidth/nHeight 可能为 0，必须用 QImage 实际值兜底）
         int nOrigW = imgFull.width();   // 20260329 ZJH 原始图像实际宽度（像素）
         int nOrigH = imgFull.height();  // 20260329 ZJH 原始图像实际高度（像素）
-        int nPatchSize = localConfig.nInputSize;  // 20260329 ZJH 模型输入尺寸，即 patch 边长（如 416）
+        // 20260401 ZJH Crop 尺寸与模型输入尺寸解耦（借鉴海康 crop_size=720）
+        // nCropSize: 从原图裁剪的 patch 大小（保留缺陷原始像素精度）
+        // nPatchSize: 模型实际输入尺寸（crop 后 resize 到此尺寸）
+        // 20260401 ZJH 使用自适应 crop 尺寸（Phase 4 优化），回退到配置值或输入尺寸
+        int nCropSize = (nAdaptiveCropSize > 0) ? nAdaptiveCropSize : localConfig.nInputSize;
+        int nPatchSize = localConfig.nInputSize;  // 20260329 ZJH 模型输入尺寸
 
-        // 20260329 ZJH 判断是否启用 patch 模式：图像任一边 > 2 倍 patch 尺寸时启用
-        // 例如 5472×3648 vs 416：远超 2 倍，使用 patch 模式提取局部区域训练
-        // 小图（如 800×600 vs 416）则直接缩放到 inputSize
-        bool bUsePatchMode = (nOrigW > nPatchSize * 2 || nOrigH > nPatchSize * 2);
+        // 20260329 ZJH 判断是否启用 patch 模式：图像任一边 > 2 倍 crop 尺寸时启用
+        // 20260401 ZJH 使用 nCropSize 而非 nPatchSize 判断（720 vs 256 的区别）
+        bool bUsePatchMode = (nOrigW > nCropSize * 2 || nOrigH > nCropSize * 2);
 
         if (bUsePatchMode) {
             // 20260329 ZJH ===== PATCH 模式：从大图中提取 patch 进行训练 =====
@@ -352,21 +455,25 @@ void TrainingSession::runTrainingLoopImpl()
                 int nCenterX = static_cast<int>(bounds.x() + bounds.width() / 2);   // 20260329 ZJH 标注中心 X
                 int nCenterY = static_cast<int>(bounds.y() + bounds.height() / 2);  // 20260329 ZJH 标注中心 Y
 
-                // 20260329 ZJH 训练集增加随机偏移 ±64px，增强位置多样性
+                // 20260401 ZJH 训练集增加随机偏移，偏移量与缺陷尺寸成正比
+                // 大缺陷允许更大偏移（更多上下文变化），小缺陷限制偏移（防止缺陷出界）
+                // 偏移范围 = max(64, min(缺陷最大边/2, cropSize/4))
                 // 验证集不加偏移，保持可复现性
                 if (bIsTrain) {
-                    nCenterX += QRandomGenerator::global()->bounded(129) - 64;  // 20260329 ZJH X 方向 [-64, +64] 随机偏移
-                    nCenterY += QRandomGenerator::global()->bounded(129) - 64;  // 20260329 ZJH Y 方向 [-64, +64] 随机偏移
+                    int nDefectMax = std::max(static_cast<int>(bounds.width()), static_cast<int>(bounds.height()));
+                    int nOffsetRange = std::max(64, std::min(nDefectMax / 2, nCropSize / 4));
+                    nCenterX += QRandomGenerator::global()->bounded(2 * nOffsetRange + 1) - nOffsetRange;
+                    nCenterY += QRandomGenerator::global()->bounded(2 * nOffsetRange + 1) - nOffsetRange;
                 }
 
-                // 20260329 ZJH 根据中心点计算 patch 左上角坐标
-                int nPatchX = nCenterX - nPatchSize / 2;  // 20260329 ZJH patch 左上角 X
-                int nPatchY = nCenterY - nPatchSize / 2;  // 20260329 ZJH patch 左上角 Y
-                // 20260329 ZJH 边界裁剪：确保 patch 不超出原始图像范围
-                nPatchX = std::max(0, std::min(nPatchX, nOrigW - nPatchSize));  // 20260329 ZJH X 方向夹紧
-                nPatchY = std::max(0, std::min(nPatchY, nOrigH - nPatchSize));  // 20260329 ZJH Y 方向夹紧
+                // 20260401 ZJH 根据中心点计算 crop 左上角坐标（使用 nCropSize 裁剪）
+                int nPatchX = nCenterX - nCropSize / 2;  // 20260401 ZJH crop 左上角 X
+                int nPatchY = nCenterY - nCropSize / 2;  // 20260401 ZJH crop 左上角 Y
+                // 20260329 ZJH 边界裁剪：确保 crop 不超出原始图像范围
+                nPatchX = std::max(0, std::min(nPatchX, nOrigW - nCropSize));  // 20260401 ZJH X 方向夹紧
+                nPatchY = std::max(0, std::min(nPatchY, nOrigH - nCropSize));  // 20260401 ZJH Y 方向夹紧
 
-                vecPatches.append(QRect(nPatchX, nPatchY, nPatchSize, nPatchSize));  // 20260329 ZJH 记录 patch 区域
+                vecPatches.append(QRect(nPatchX, nPatchY, nCropSize, nCropSize));  // 20260401 ZJH 记录 crop 区域
                 vecPatchLabels.append(anno.nLabelId);  // 20260329 ZJH 记录该 patch 的标签（标注的类别）
             }
 
@@ -376,11 +483,11 @@ void TrainingSession::runTrainingLoopImpl()
             if (!entry.vecAnnotations.isEmpty()) {
                 int nBgPatches = bIsTrain ? std::min(static_cast<int>(vecPatches.size()), 3) : 1;  // 20260329 ZJH 背景 patch 数量
                 for (int bg = 0; bg < nBgPatches; ++bg) {
-                    // 20260329 ZJH 在原图内随机选取背景 patch 位置
-                    int nBgX = QRandomGenerator::global()->bounded(std::max(1, nOrigW - nPatchSize));  // 20260329 ZJH 随机 X
-                    int nBgY = QRandomGenerator::global()->bounded(std::max(1, nOrigH - nPatchSize));  // 20260329 ZJH 随机 Y
-                    vecPatches.append(QRect(nBgX, nBgY, nPatchSize, nPatchSize));  // 20260329 ZJH 记录背景 patch
-                    vecPatchLabels.append(nEffectiveLabelId);  // 20260329 ZJH 背景 patch 使用图像级标签
+                    // 20260401 ZJH 在原图内随机选取背景 crop 位置（使用 nCropSize）
+                    int nBgX = QRandomGenerator::global()->bounded(std::max(1, nOrigW - nCropSize));
+                    int nBgY = QRandomGenerator::global()->bounded(std::max(1, nOrigH - nCropSize));
+                    vecPatches.append(QRect(nBgX, nBgY, nCropSize, nCropSize));
+                    vecPatchLabels.append(0);  // 20260330 ZJH 背景 patch 使用类别 0（背景类），而非图像级标签
                 }
             }
 
@@ -389,10 +496,10 @@ void TrainingSession::runTrainingLoopImpl()
             if (entry.vecAnnotations.isEmpty()) {
                 int nNumRandom = bIsTrain ? 2 : 1;  // 20260329 ZJH 训练集 2 个随机 patch，验证集 1 个
                 for (int r = 0; r < nNumRandom; ++r) {
-                    // 20260329 ZJH 在原图内随机选取 patch 位置
-                    int nRx = QRandomGenerator::global()->bounded(std::max(1, nOrigW - nPatchSize));  // 20260329 ZJH 随机 X
-                    int nRy = QRandomGenerator::global()->bounded(std::max(1, nOrigH - nPatchSize));  // 20260329 ZJH 随机 Y
-                    vecPatches.append(QRect(nRx, nRy, nPatchSize, nPatchSize));  // 20260329 ZJH 记录随机 patch
+                    // 20260401 ZJH 在原图内随机选取 crop 位置（使用 nCropSize）
+                    int nRx = QRandomGenerator::global()->bounded(std::max(1, nOrigW - nCropSize));
+                    int nRy = QRandomGenerator::global()->bounded(std::max(1, nOrigH - nCropSize));
+                    vecPatches.append(QRect(nRx, nRy, nCropSize, nCropSize));
                     vecPatchLabels.append(nEffectiveLabelId);  // 20260329 ZJH 使用图像级标签（无标注 → 背景类/OK类）
                 }
             }
@@ -401,25 +508,27 @@ void TrainingSession::runTrainingLoopImpl()
             for (int p = 0; p < vecPatches.size(); ++p) {
                 QRect patchRect = vecPatches[p];  // 20260329 ZJH 当前 patch 在原图中的区域
 
-                // 20260329 ZJH 从原始大图中裁剪 patch（native 分辨率，无缩放）
+                // 20260401 ZJH 从原始大图中裁剪 crop（nCropSize，native 分辨率保留缺陷细节）
                 QImage imgPatch = imgFull.copy(patchRect);  // 20260329 ZJH QImage::copy 提取子区域
 
-                // 20260329 ZJH 边缘安全：若裁剪结果尺寸不一致（图像边缘截断），强制缩放到目标尺寸
+                // 20260401 ZJH crop → resize: 将 nCropSize×nCropSize 的 crop 缩放到模型输入尺寸
+                // 这是海康策略的核心: crop 720 保留细节 → resize 256 送入轻量模型
                 if (imgPatch.width() != nPatchSize || imgPatch.height() != nPatchSize) {
                     imgPatch = imgPatch.scaled(nPatchSize, nPatchSize,
-                                               Qt::IgnoreAspectRatio, Qt::SmoothTransformation);  // 20260329 ZJH 强制缩放修正
+                                               Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
                 }
 
-                // 20260329 ZJH ===== 分割模型：生成 patch 局部掩码 =====
-                // 掩码坐标 = 标注原始坐标 - patch 左上角偏移（无缩放，native 像素对齐）
-                QImage imgMask;  // 20260329 ZJH 当前 patch 的分割掩码
+                // 20260401 ZJH ===== 分割模型：生成 crop 级别掩码，再 resize 到模型输入尺寸 =====
+                // 先在 nCropSize 上渲染掩码（native 像素对齐），再缩放到 nPatchSize
+                QImage imgMask;
                 if (bIsSegmentation) {
-                    // 20260329 ZJH 创建 patch 尺寸的灰度掩码，初始化全 0（背景）
-                    imgMask = QImage(nPatchSize, nPatchSize, QImage::Format_Grayscale8);
-                    imgMask.fill(0);  // 20260329 ZJH 所有像素初始为背景类
+                    // 20260401 ZJH 在 crop 原始尺寸上创建掩码（保留标注精度）
+                    int nMaskRenderSize = patchRect.width();  // 20260401 ZJH = nCropSize
+                    QImage imgMaskFull(nMaskRenderSize, nMaskRenderSize, QImage::Format_Grayscale8);
+                    imgMaskFull.fill(0);  // 20260329 ZJH 所有像素初始为背景类
 
-                    // 20260329 ZJH 使用 QPainter 将落入 patch 范围内的标注渲染到掩码上
-                    QPainter painter(&imgMask);
+                    // 20260329 ZJH 使用 QPainter 将落入 crop 范围内的标注渲染到掩码上
+                    QPainter painter(&imgMaskFull);
                     painter.setPen(Qt::NoPen);  // 20260329 ZJH 无描边，仅填充
 
                     for (const Annotation& anno : entry.vecAnnotations) {
@@ -454,6 +563,15 @@ void TrainingSession::runTrainingLoopImpl()
                     }
 
                     painter.end();  // 20260329 ZJH 结束掩码绘制，释放 QPainter
+
+                    // 20260401 ZJH 将 crop 尺寸掩码 resize 到模型输入尺寸
+                    // 使用最近邻插值（Qt::FastTransformation）避免类别 ID 被线性混合
+                    if (nMaskRenderSize != nPatchSize) {
+                        imgMask = imgMaskFull.scaled(nPatchSize, nPatchSize,
+                                                      Qt::IgnoreAspectRatio, Qt::FastTransformation);
+                    } else {
+                        imgMask = imgMaskFull;
+                    }
                 }
 
                 // 20260329 ZJH ===== 数据增强（仅训练集 patch，验证集不增强）=====
@@ -497,6 +615,30 @@ void TrainingSession::runTrainingLoopImpl()
                         for (int x = 0; x < nPatchSize; ++x) {  // 20260329 ZJH 遍历列
                             // 20260329 ZJH 从 RGB888 格式读取像素值并归一化到 [0, 1]
                             vecTargetData.push_back(pBits[y * nBytesPerLine + x * 3 + c] / 255.0f);
+                        }
+                    }
+                }
+
+                // 20260330 ZJH ImageNet 归一化（与推理端 om.engine.data_pipeline 保持一致）
+                // ResNet/MobileNet/ViT 等预训练骨干网络需要 ImageNet mean/std
+                // YOLO/UNet 等使用 [0,1] 范围即可，此处通过 bUseImageNetNorm 控制
+                {
+                    // 20260330 ZJH 只有分类模型(ResNet/MobileNet/ViT)使用 ImageNet 归一化
+                    // UNet/DeepLabV3 分割模型和 YOLO 检测模型使用 [0,1] 范围
+                    // 注意: EngineBridge 内部也会根据 selectNormPreset 做归一化，此处不能重复
+                    bool bUseImageNetNorm = false;  // 20260330 ZJH 禁用：归一化已移至 EngineBridge 内部统一处理
+                    if (bUseImageNetNorm) {
+                        // 20260330 ZJH RGB 通道的 ImageNet 均值和标准差
+                        const float fMeanR = 0.485f, fMeanG = 0.456f, fMeanB = 0.406f;
+                        const float fStdR  = 0.229f, fStdG  = 0.224f, fStdB  = 0.225f;
+                        // 20260330 ZJH 对刚追加的 3*nPatchSize*nPatchSize 个元素做 per-channel 归一化
+                        // (val - mean) / std，Channel 0=R, 1=G, 2=B (CHW 布局)
+                        int nPixels = nPatchSize * nPatchSize;  // 20260330 ZJH 单通道像素数
+                        size_t nOffset = vecTargetData.size() - static_cast<size_t>(3 * nPixels);  // 20260330 ZJH 本样本起始偏移
+                        for (int i = 0; i < nPixels; ++i) {
+                            vecTargetData[nOffset + 0 * nPixels + i] = (vecTargetData[nOffset + 0 * nPixels + i] - fMeanR) / fStdR;  // 20260330 ZJH R 通道
+                            vecTargetData[nOffset + 1 * nPixels + i] = (vecTargetData[nOffset + 1 * nPixels + i] - fMeanG) / fStdG;  // 20260330 ZJH G 通道
+                            vecTargetData[nOffset + 2 * nPixels + i] = (vecTargetData[nOffset + 2 * nPixels + i] - fMeanB) / fStdB;  // 20260330 ZJH B 通道
                         }
                     }
                 }
@@ -617,6 +759,60 @@ void TrainingSession::runTrainingLoopImpl()
                     }
                     img = imgAug;  // 20260329 ZJH 用增强后的图像替换
                 }
+
+                // 20260330 ZJH ===== 随机对比度抖动 (0.7~1.3x, 60%概率) =====
+                // 对标 MVTec/海康的颜色空间增强，提升光照变化鲁棒性
+                if (QRandomGenerator::global()->bounded(100) < 60) {
+                    float fContrast = 0.7f + QRandomGenerator::global()->bounded(61) / 100.0f;
+                    for (int y = 0; y < img.height(); ++y) {
+                        uchar* pRow = img.scanLine(y);
+                        for (int x = 0; x < img.width() * 3; ++x) {
+                            int nVal = static_cast<int>((pRow[x] - 128) * fContrast + 128);
+                            pRow[x] = static_cast<uchar>(std::min(255, std::max(0, nVal)));
+                        }
+                    }
+                }
+
+                // 20260330 ZJH ===== 随机高斯噪声 (sigma=3~8, 30%概率) =====
+                // 提升模型对传感器噪声的鲁棒性（工业相机常见）
+                if (QRandomGenerator::global()->bounded(100) < 30) {
+                    float fSigma = 3.0f + QRandomGenerator::global()->bounded(51) / 10.0f;
+                    for (int y = 0; y < img.height(); ++y) {
+                        uchar* pRow = img.scanLine(y);
+                        for (int x = 0; x < img.width() * 3; ++x) {
+                            // 20260330 ZJH Box-Muller 快速高斯近似（避免 <random> 开销）
+                            float fU1 = (QRandomGenerator::global()->bounded(1000) + 1) / 1001.0f;
+                            float fU2 = (QRandomGenerator::global()->bounded(1000) + 1) / 1001.0f;
+                            float fNoise = fSigma * std::sqrt(-2.0f * std::log(fU1)) * std::cos(6.2832f * fU2);
+                            int nVal = static_cast<int>(pRow[x] + fNoise);
+                            pRow[x] = static_cast<uchar>(std::min(255, std::max(0, nVal)));
+                        }
+                    }
+                }
+
+                // 20260330 ZJH ===== 随机90度旋转 (25%概率) =====
+                // 工业缺陷可能出现在任意方向（划痕、裂纹等）
+                {
+                    int nRotChoice = QRandomGenerator::global()->bounded(4);  // 0=不旋转, 1=90, 2=180, 3=270
+                    if (nRotChoice > 0) {
+                        QTransform transform;
+                        transform.rotate(nRotChoice * 90.0);
+                        img = img.transformed(transform, Qt::FastTransformation);
+                        // 20260330 ZJH 掩码同步旋转
+                        if (bIsSegmentation) {
+                            imgMask = imgMask.transformed(transform, Qt::FastTransformation);
+                        }
+                        // 20260330 ZJH 旋转后尺寸可能变化（90/270度时宽高互换），强制缩回 inputSize
+                        if (img.width() != localConfig.nInputSize || img.height() != localConfig.nInputSize) {
+                            img = img.scaled(localConfig.nInputSize, localConfig.nInputSize,
+                                             Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                            if (bIsSegmentation) {
+                                imgMask = imgMask.scaled(localConfig.nInputSize, localConfig.nInputSize,
+                                                         Qt::IgnoreAspectRatio, Qt::FastTransformation);
+                            }
+                        }
+                    }
+                }
             }
 
             // 20260329 ZJH ===== 将像素转换为 CHW 格式的 float [0, 1] =====
@@ -626,11 +822,34 @@ void TrainingSession::runTrainingLoopImpl()
             std::vector<float>& vecTargetData   = bIsTrain ? vecTrainData   : vecValData;    // 20260329 ZJH 选择数据容器
             std::vector<int>&   vecTargetLabels = bIsTrain ? vecTrainLabels : vecValLabels;  // 20260329 ZJH 选择标签容器
 
+            // 20260330 ZJH 记录 CHW 数据写入的起始偏移量（用于后续 ImageNet 归一化原地修改）
+            size_t nCHWOffset = vecTargetData.size();
+
             for (int c = 0; c < 3; ++c) {  // 20260329 ZJH 遍历 3 通道 (R=0, G=1, B=2)
                 for (int y = 0; y < localConfig.nInputSize; ++y) {  // 20260329 ZJH 遍历行
                     for (int x = 0; x < localConfig.nInputSize; ++x) {  // 20260329 ZJH 遍历列
                         float fVal = pBits[y * nBytesPerLine + x * 3 + c] / 255.0f;  // 20260329 ZJH 归一化到 [0, 1]
                         vecTargetData.push_back(fVal);  // 20260329 ZJH 追加到数据向量
+                    }
+                }
+            }
+
+            // 20260330 ZJH ImageNet 归一化（与推理端 om.engine.data_pipeline 保持一致）
+            // ResNet/MobileNet/ViT 等预训练骨干网络需要 ImageNet mean/std
+            // YOLO/UNet 等使用 [0,1] 范围即可，此处通过 bUseImageNetNorm 控制
+            {
+                bool bUseImageNetNorm = true;  // TODO: 从 TrainingConfig 读取
+                if (bUseImageNetNorm) {
+                    // 20260330 ZJH RGB 通道的 ImageNet 均值和标准差
+                    const float fMeanR = 0.485f, fMeanG = 0.456f, fMeanB = 0.406f;
+                    const float fStdR  = 0.229f, fStdG  = 0.224f, fStdB  = 0.225f;
+                    // 20260330 ZJH 对刚追加的 3*inputSize*inputSize 个元素做 per-channel 归一化
+                    // (val - mean) / std，Channel 0=R, 1=G, 2=B (CHW 布局)
+                    int nPixels = localConfig.nInputSize * localConfig.nInputSize;  // 20260330 ZJH 单通道像素数
+                    for (int i = 0; i < nPixels; ++i) {
+                        vecTargetData[nCHWOffset + 0 * nPixels + i] = (vecTargetData[nCHWOffset + 0 * nPixels + i] - fMeanR) / fStdR;  // 20260330 ZJH R 通道
+                        vecTargetData[nCHWOffset + 1 * nPixels + i] = (vecTargetData[nCHWOffset + 1 * nPixels + i] - fMeanG) / fStdG;  // 20260330 ZJH G 通道
+                        vecTargetData[nCHWOffset + 2 * nPixels + i] = (vecTargetData[nCHWOffset + 2 * nPixels + i] - fMeanB) / fStdB;  // 20260330 ZJH B 通道
                     }
                 }
             }
@@ -717,8 +936,32 @@ void TrainingSession::runTrainingLoopImpl()
     // 20260324 ZJH 获取引擎识别的模型类型字符串
     std::string strModelType = architectureToEngineString(localConfig.eArchitecture);
 
-    // 20260324 ZJH 创建模型
-    bool bModelOk = m_pEngine->createModel(strModelType, localConfig.nInputSize, nNumClasses);
+    // 20260330 ZJH 大分辨率安全限制：DeepLabV3+/UNet 在 >512 时参数量爆炸
+    int nTrainInputSize = localConfig.nInputSize;
+    if (nTrainInputSize > 512 && (strModelType == "DeepLabV3+" || strModelType == "DeepLabV3"
+        || strModelType == "DeepLabV3Plus")) {
+        emit trainingLog(QStringLiteral("[警告] DeepLabV3+ 输入尺寸 %1 过大，自动降为 512（防止内存溢出）")
+            .arg(nTrainInputSize));
+        nTrainInputSize = 512;
+    }
+    if (nTrainInputSize > 640 && strModelType == "UNet") {
+        emit trainingLog(QStringLiteral("[警告] UNet 输入尺寸 %1 过大，自动降为 512")
+            .arg(nTrainInputSize));
+        nTrainInputSize = 512;
+    }
+
+    // 20260330 ZJH 创建模型（每步加日志定位崩溃点）
+    emit trainingLog(QStringLiteral("[信息] 模型类型: %1 | 输入: %2 | 类别: %3")
+        .arg(QString::fromStdString(strModelType)).arg(nTrainInputSize).arg(nNumClasses));
+    bool bModelOk = false;
+    try {
+        bModelOk = m_pEngine->createModel(strModelType, nTrainInputSize, nNumClasses);
+        emit trainingLog(QStringLiteral("[信息] createModel 返回: %1").arg(bModelOk ? "成功" : "失败"));
+    } catch (const std::exception& e) {
+        emit trainingLog(QStringLiteral("[错误] 模型创建异常: %1").arg(QString::fromStdString(e.what())));
+    } catch (...) {
+        emit trainingLog(QStringLiteral("[错误] 模型创建时发生未知异常（可能内存不足）"));
+    }
     if (!bModelOk) {
         emit trainingLog(QStringLiteral("[错误] 模型创建失败: %1").arg(QString::fromStdString(strModelType)));
         emit trainingFinished(false, QStringLiteral("模型创建失败"));
@@ -726,18 +969,25 @@ void TrainingSession::runTrainingLoopImpl()
         return;
     }
 
-    // 20260324 ZJH 输出模型信息
-    int64_t nTotalParams = m_pEngine->totalParameters();
-    emit trainingLog(QStringLiteral("[信息] 模型创建成功: %1 | 参数量: %2")
+    // 20260330 ZJH 输出模型信息（totalParameters 可能在大模型上耗时/崩溃）
+    emit trainingLog(QStringLiteral("[信息] createModel 成功，正在计算参数量..."));
+    int64_t nTotalParams = 0;
+    try {
+        nTotalParams = m_pEngine->totalParameters();
+    } catch (...) {
+        emit trainingLog(QStringLiteral("[警告] 参数量计算失败，跳过"));
+    }
+    emit trainingLog(QStringLiteral("[信息] 模型: %1 | 参数量: %2 | 输入: %3x%3")
         .arg(QString::fromStdString(strModelType))
-        .arg(nTotalParams));
+        .arg(nTotalParams)
+        .arg(nTrainInputSize));
 
     // 20260324 ZJH ===== 第 3 步：配置训练参数并启动真实训练 =====
 
     // 20260324 ZJH 构建 BridgeTrainParams
     BridgeTrainParams params;
     params.strModelType = strModelType;                                      // 20260324 ZJH 模型类型
-    params.nInputSize   = localConfig.nInputSize;                            // 20260324 ZJH 输入尺寸
+    params.nInputSize   = nTrainInputSize;                                    // 20260330 ZJH 使用安全限制后的输入尺寸
     params.nNumClasses  = nNumClasses;                                       // 20260324 ZJH 类别数
     params.nEpochs      = localConfig.nEpochs;                               // 20260324 ZJH 训练轮次
     params.nBatchSize   = localConfig.nBatchSize;                            // 20260324 ZJH 批量大小
@@ -745,7 +995,31 @@ void TrainingSession::runTrainingLoopImpl()
     params.nPatience    = localConfig.nPatience;                             // 20260324 ZJH 早停耐心
     params.bUseCuda     = (localConfig.eDevice == om::DeviceType::CUDA);     // 20260324 ZJH 是否使用 CUDA
     // 20260324 ZJH 优化器名称映射
-    params.strOptimizer = (localConfig.eOptimizer == om::OptimizerType::SGD) ? "SGD" : "Adam";
+    // 20260331 ZJH 修复: AdamW 此前被映射为 "Adam"，现在正确映射为 "AdamW"
+    if (localConfig.eOptimizer == om::OptimizerType::SGD)
+        params.strOptimizer = "SGD";
+    else if (localConfig.eOptimizer == om::OptimizerType::AdamW)
+        params.strOptimizer = "AdamW";
+    else
+        params.strOptimizer = "Adam";
+
+    // 20260331 ZJH 预训练权重路径（迁移学习: 从 UI 配置传递到引擎层）
+    // 此前此字段未赋值导致引擎始终跳过预训练加载，纯随机初始化训练
+    if (!localConfig.strPretrainedModelPath.isEmpty()) {
+        params.strPretrainedModelPath = localConfig.strPretrainedModelPath.toStdString();
+        emit trainingLog(QStringLiteral("[信息] 预训练权重: %1").arg(localConfig.strPretrainedModelPath));
+    }
+
+    // 20260331 ZJH 迁移学习参数（骨干冻结 + 分层学习率）
+    // 仅在加载了预训练权重时启用冻结（纯随机初始化无意义）
+    if (!localConfig.strPretrainedModelPath.isEmpty()) {
+        params.nFreezeEpochs = localConfig.nFreezeEpochs;
+        params.fBackboneLrMultiplier = static_cast<float>(localConfig.dBackboneLrMultiplier);
+    }
+
+    // 20260401 ZJH Phase 3: 梯度累积和 EMA 参数传递
+    params.nGradAccumSteps = localConfig.nGradAccumSteps;
+    params.fEmaDecay = static_cast<float>(localConfig.dEmaDecay);
 
     // 20260325 ZJH [Phase 4] 输出设备信息，区分 GPU 驻留训练和 CPU 路径
     if (localConfig.eDevice == om::DeviceType::CUDA) {
@@ -796,9 +1070,9 @@ void TrainingSession::runTrainingLoopImpl()
         return m_bStopRequested.load();
     };
 
-    // 20260324 ZJH 调用 EngineBridge::train() 执行真实训练
-    // 20260326 ZJH try/catch 保护：train() 内部的 forward/backward/optimizer 可能因维度不匹配、
-    // 内存不足等原因抛出异常，若异常逃逸到 QThread 会导致 std::terminate() → abort() 闪退
+    // 20260330 ZJH 训练前最后确认
+    emit trainingLog(QStringLiteral("[信息] 即将调用 EngineBridge::train()..."));
+
     bool bTrainOk = false;
     try {
         bTrainOk = m_pEngine->train(params,
@@ -808,8 +1082,13 @@ void TrainingSession::runTrainingLoopImpl()
                                          epochCb, batchCb, logCb, stopCheck);
     } catch (const std::exception& e) {
         emit trainingLog(QStringLiteral("[错误] 训练异常: %1").arg(QString::fromStdString(e.what())));
+    } catch (int nCode) {
+        emit trainingLog(QStringLiteral("[错误] 训练异常(int): code=%1").arg(nCode));
+    } catch (const char* pMsg) {
+        emit trainingLog(QStringLiteral("[错误] 训练异常(cstr): %1").arg(QString::fromUtf8(pMsg)));
     } catch (...) {
-        emit trainingLog(QStringLiteral("[错误] 训练中发生未知异常"));
+        // 20260331 ZJH 尝试获取 Windows SEH 异常信息
+        emit trainingLog(QStringLiteral("[错误] 训练中发生未知异常（可能是 CUDA/SEH 崩溃）"));
     }
 
     // 20260324 ZJH 检查训练是否被用户停止
@@ -834,7 +1113,7 @@ void TrainingSession::runTrainingLoopImpl()
                 emit trainingLog(QStringLiteral("[错误] 无法创建模型目录: %1").arg(strModelDir));
             }
 
-            // 20260324 ZJH 保存模型文件（.dfm 格式）
+            // 20260330 ZJH 保存模型文件（.omm v4 格式，含架构元数据）
             QString strModelPath = strModelDir + QStringLiteral("/best_model.omm");
             emit trainingLog(QStringLiteral("[信息] 正在保存模型: %1").arg(strModelPath));
 
@@ -848,6 +1127,25 @@ void TrainingSession::runTrainingLoopImpl()
                 if (fi.exists()) {
                     double dSizeMB = fi.size() / (1024.0 * 1024.0);
                     emit trainingLog(QStringLiteral("[信息] 模型文件大小: %1 MB").arg(dSizeMB, 0, 'f', 2));
+                }
+
+                // 20260330 ZJH 模型版本管理（对标 MVTec SOM + 海康 DataGrid 版本选择）
+                // 保存带时间戳的 checkpoint 副本，方便回溯和版本对比
+                {
+                    QString strTimestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+                    QString strCheckpoint = strModelDir + QStringLiteral("/checkpoint_%1.omm").arg(strTimestamp);
+                    QFile::copy(strModelPath, strCheckpoint);
+                    emit trainingLog(QStringLiteral("[信息] Checkpoint 已保存: %1").arg(QFileInfo(strCheckpoint).fileName()));
+
+                    // 20260330 ZJH 清理旧 checkpoint（保留最新 5 个，防止磁盘膨胀）
+                    QDir modelDir(strModelDir);
+                    QStringList vecCheckpoints = modelDir.entryList(
+                        QStringList() << QStringLiteral("checkpoint_*.omm"),
+                        QDir::Files, QDir::Name | QDir::Reversed);  // 20260330 ZJH 按名称倒序（最新在前）
+                    constexpr int nMaxCheckpoints = 5;
+                    for (int i = nMaxCheckpoints; i < vecCheckpoints.size(); ++i) {
+                        modelDir.remove(vecCheckpoints[i]);  // 20260330 ZJH 删除旧的
+                    }
                 }
             } else {
                 emit trainingLog(QStringLiteral("[错误] 模型保存失败，目标路径: %1").arg(strModelPath));

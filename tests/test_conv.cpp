@@ -185,7 +185,7 @@ TEST(ConvTest, SerializeSaveLoad) {
     pModel1->add(std::make_shared<om::Linear>(3, 2));
 
     // 20260319 ZJH 保存模型
-    std::string strPath = "test_model_serialize.dfm";
+    std::string strPath = "test_model_serialize.omm";
     om::ModelSerializer::save(*pModel1, strPath);
 
     // 20260319 ZJH 创建相同结构的新模型
@@ -212,6 +212,92 @@ TEST(ConvTest, SerializeSaveLoad) {
 
     // 20260319 ZJH 清理临时文件
     std::remove(strPath.c_str());
+}
+
+// ===== 11. GroupNorm2dForward =====
+// 20260402 ZJH GroupNorm2d 前向测试：验证输出形状、非 NaN、以及每组内均值≈0 方差≈1
+TEST(ConvTest, GroupNorm2dForward) {
+    // 20260402 ZJH 创建 GroupNorm2d(32 channels, 8 groups)
+    om::GroupNorm2d gn(32, 8);
+    // 20260402 ZJH 输入 [1, 32, 4, 4] 随机张量
+    auto input = om::Tensor::randn({1, 32, 4, 4});
+    auto output = gn.forward(input);
+
+    // 20260402 ZJH 验证输出形状不变: [1, 32, 4, 4]
+    ASSERT_EQ(output.ndim(), 4);
+    EXPECT_EQ(output.shape(0), 1);   // 20260402 ZJH 批次大小
+    EXPECT_EQ(output.shape(1), 32);  // 20260402 ZJH 通道数
+    EXPECT_EQ(output.shape(2), 4);   // 20260402 ZJH 高度
+    EXPECT_EQ(output.shape(3), 4);   // 20260402 ZJH 宽度
+
+    // 20260402 ZJH 获取输出数据指针，验证无 NaN、非全零
+    auto pOut = output.contiguous().floatDataPtr();
+    bool bNonZero = false;  // 20260402 ZJH 标记是否存在非零元素
+    for (int i = 0; i < output.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(pOut[i]));  // 20260402 ZJH 无 NaN
+        if (std::abs(pOut[i]) > 1e-6f) bNonZero = true;
+    }
+    EXPECT_TRUE(bNonZero);  // 20260402 ZJH 输出不应全为零
+
+    // 20260402 ZJH 验证每组内归一化统计量（gamma=1, beta=0 时均值≈0, 方差≈1）
+    int nChannelsPerGroup = 32 / 8;  // 20260402 ZJH 每组 4 个通道
+    int nHW = 4 * 4;                 // 20260402 ZJH 每通道空间元素数
+    int nCountPerGroup = nChannelsPerGroup * nHW;  // 20260402 ZJH 每组元素总数 = 4*16 = 64
+    for (int g = 0; g < 8; ++g) {
+        float fSum = 0.0f;    // 20260402 ZJH 累积该组元素之和
+        float fSumSq = 0.0f;  // 20260402 ZJH 累积该组元素平方之和
+        int nStart = g * nCountPerGroup;  // 20260402 ZJH 该组在展平后数组中的起始偏移
+        for (int i = 0; i < nCountPerGroup; ++i) {
+            fSum   += pOut[nStart + i];
+            fSumSq += pOut[nStart + i] * pOut[nStart + i];
+        }
+        float fMean = fSum / static_cast<float>(nCountPerGroup);  // 20260402 ZJH 组内均值
+        // 20260402 ZJH 方差 = E[x^2] - (E[x])^2
+        float fVar = fSumSq / static_cast<float>(nCountPerGroup) - fMean * fMean;
+        // 20260402 ZJH 允许浮点计算误差：均值≈0（容差 0.15），方差≈1（容差 0.3）
+        EXPECT_NEAR(fMean, 0.0f, 0.15f) << "Group " << g << " mean out of range";
+        EXPECT_NEAR(fVar,  1.0f, 0.3f)  << "Group " << g << " var out of range";
+    }
+}
+
+// ===== 12. GroupNormAutoGroups =====
+// 20260402 ZJH GroupNorm2d 自动分组调整测试：当 groups 不能整除 channels 时自动降级
+TEST(ConvTest, GroupNormAutoGroups) {
+    // 20260402 ZJH channels=17（质数），请求 groups=32，无法整除 → 自动降级
+    om::GroupNorm2d gn1(17, 32);
+    // 20260402 ZJH 实际 groups 必须能整除 17
+    EXPECT_EQ(17 % gn1.groups(), 0) << "groups=" << gn1.groups() << " must divide channels=17";
+    // 20260402 ZJH 17 是质数，最终只能是 1 或 17
+    EXPECT_TRUE(gn1.groups() == 1 || gn1.groups() == 17)
+        << "Expected groups=1 or 17, got " << gn1.groups();
+
+    // 20260402 ZJH channels=64, groups=32 → 可以整除，保持 32
+    om::GroupNorm2d gn2(64, 32);
+    EXPECT_EQ(gn2.groups(), 32);  // 20260402 ZJH 64 % 32 == 0，不应降级
+
+    // 20260402 ZJH channels=3, groups=32 → 无法整除，自动降级
+    om::GroupNorm2d gn3(3, 32);
+    EXPECT_EQ(3 % gn3.groups(), 0) << "groups=" << gn3.groups() << " must divide channels=3";
+    // 20260402 ZJH 3 的因子只有 1 和 3
+    EXPECT_TRUE(gn3.groups() == 1 || gn3.groups() == 3)
+        << "Expected groups=1 or 3, got " << gn3.groups();
+}
+
+// ===== 13. GroupNormParameters =====
+// 20260402 ZJH GroupNorm2d 参数收集测试：验证 gamma/beta 数量及 buffers 为空
+TEST(ConvTest, GroupNormParameters) {
+    // 20260402 ZJH 创建 GroupNorm2d(64 channels, 32 groups)
+    om::GroupNorm2d gn(64, 32);
+
+    // 20260402 ZJH 参数应有 2 个：gamma [64] 和 beta [64]
+    auto vecParams = gn.parameters();
+    ASSERT_EQ(vecParams.size(), static_cast<size_t>(2));  // 20260402 ZJH gamma + beta
+    EXPECT_EQ(vecParams[0]->numel(), 64);  // 20260402 ZJH gamma 形状 [64]
+    EXPECT_EQ(vecParams[1]->numel(), 64);  // 20260402 ZJH beta 形状 [64]
+
+    // 20260402 ZJH GroupNorm 无 running stats，buffers 应为空
+    auto vecBufs = gn.buffers();
+    EXPECT_TRUE(vecBufs.empty());  // 20260402 ZJH 无 running_mean / running_var
 }
 
 // ===== 10. SimpleCNN =====
@@ -243,4 +329,79 @@ TEST(ConvTest, SimpleCNN) {
     for (int i = 0; i < output.numel(); ++i) {
         EXPECT_FALSE(std::isnan(output.floatDataPtr()[i]));
     }
+}
+
+// ===== GroupNorm2d 测试 =====
+
+// 20260402 ZJH 测试 GroupNorm2d 前向传播: 32 通道 8 组
+TEST(ConvTest, GroupNorm2dForward) {
+    // 20260402 ZJH 创建 GroupNorm2d(32 channels, 8 groups)
+    om::GroupNorm2d gn(32, 8);
+    // 20260402 ZJH 创建 [1, 32, 4, 4] 随机输入
+    auto input = om::Tensor::randn({1, 32, 4, 4});
+    auto output = gn.forward(input);
+
+    // 20260402 ZJH 验证输出形状
+    ASSERT_EQ(output.ndim(), 4);
+    EXPECT_EQ(output.shape(0), 1);   // 20260402 ZJH 批次大小
+    EXPECT_EQ(output.shape(1), 32);  // 20260402 ZJH 通道数不变
+    EXPECT_EQ(output.shape(2), 4);   // 20260402 ZJH 空间维度不变
+    EXPECT_EQ(output.shape(3), 4);
+
+    // 20260402 ZJH 验证输出非全零、无 NaN
+    auto tCpu = output.cpu().contiguous();
+    const float* pOut = tCpu.floatDataPtr();
+    bool bNonZero = false;
+    for (int i = 0; i < tCpu.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(pOut[i]));  // 20260402 ZJH 无 NaN
+        if (std::abs(pOut[i]) > 1e-6f) bNonZero = true;
+    }
+    EXPECT_TRUE(bNonZero);  // 20260402 ZJH 输出不全为零
+
+    // 20260402 ZJH 验证每组内均值≈0, 方差≈1（gamma=1, beta=0 初始化时）
+    int nChannelsPerGroup = 32 / 8;  // 20260402 ZJH 每组 4 通道
+    int nHW = 4 * 4;                 // 20260402 ZJH 空间维度 16
+    for (int g = 0; g < 8; ++g) {
+        float fSum = 0.0f, fSumSq = 0.0f;
+        int nStart = g * nChannelsPerGroup * nHW;  // 20260402 ZJH 该组起始偏移
+        int nCount = nChannelsPerGroup * nHW;       // 20260402 ZJH 该组元素总数
+        for (int i = 0; i < nCount; ++i) {
+            fSum += pOut[nStart + i];
+            fSumSq += pOut[nStart + i] * pOut[nStart + i];
+        }
+        float fMean = fSum / static_cast<float>(nCount);
+        float fVar = fSumSq / static_cast<float>(nCount) - fMean * fMean;
+        EXPECT_NEAR(fMean, 0.0f, 0.15f);   // 20260402 ZJH 均值接近 0
+        EXPECT_NEAR(fVar, 1.0f, 0.3f);     // 20260402 ZJH 方差接近 1
+    }
+}
+
+// 20260402 ZJH 测试 GroupNorm2d 自动分组调整
+TEST(ConvTest, GroupNormAutoGroups) {
+    // 20260402 ZJH channels=17（质数），groups=32 无法整除 → 自动降
+    om::GroupNorm2d gn(17, 32);
+    EXPECT_EQ(17 % gn.groups(), 0);  // 20260402 ZJH 自动调整后能整除
+
+    // 20260402 ZJH channels=64, groups=32 → 正常不变
+    om::GroupNorm2d gn2(64, 32);
+    EXPECT_EQ(gn2.groups(), 32);
+
+    // 20260402 ZJH channels=3（RGB），groups=32 → 降到 3 或 1
+    om::GroupNorm2d gn3(3, 32);
+    EXPECT_EQ(3 % gn3.groups(), 0);  // 20260402 ZJH 能整除即可
+}
+
+// 20260402 ZJH 测试 GroupNorm2d 参数和 buffer 收集
+TEST(ConvTest, GroupNormParameters) {
+    om::GroupNorm2d gn(64, 32);
+
+    // 20260402 ZJH 验证参数: gamma [64] + beta [64] = 2 个参数
+    auto params = gn.parameters();
+    EXPECT_EQ(params.size(), 2u);
+    EXPECT_EQ(params[0]->numel(), 64);  // 20260402 ZJH gamma
+    EXPECT_EQ(params[1]->numel(), 64);  // 20260402 ZJH beta
+
+    // 20260402 ZJH GroupNorm 没有 running stats → buffers 为空
+    auto bufs = gn.buffers();
+    EXPECT_TRUE(bufs.empty());
 }

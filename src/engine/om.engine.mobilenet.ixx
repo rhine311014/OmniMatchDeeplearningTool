@@ -40,17 +40,14 @@ public:
 
 // 20260322 ZJH ConvBnReLU6 — Conv2d + BatchNorm2d + ReLU6 组合模块
 // MobileNet 中最基础的构建单元，几乎所有卷积层后都跟 BN + ReLU6
+// 20260330 ZJH 新增 nGroups 参数支持深度可分离卷积
 class ConvBnReLU6 : public Module {
 public:
-    // 20260322 ZJH 构造函数
-    // nInChannels: 输入通道数
-    // nOutChannels: 输出通道数
-    // nKernelSize: 卷积核大小
-    // nStride: 步幅，默认 1
-    // nPadding: 填充，默认 0
+    // 20260330 ZJH 构造函数增加 nGroups 参数
+    // nGroups: 分组数（1=标准卷积, nInChannels=深度可分离卷积）
     ConvBnReLU6(int nInChannels, int nOutChannels, int nKernelSize,
-                int nStride = 1, int nPadding = 0)
-        : m_conv(nInChannels, nOutChannels, nKernelSize, nStride, nPadding, false),  // 20260322 ZJH 无偏置（BN 会补偿）
+                int nStride = 1, int nPadding = 0, int nGroups = 1)
+        : m_conv(nInChannels, nOutChannels, nKernelSize, nStride, nPadding, false, nGroups),  // 20260330 ZJH 传入 groups
           m_bn(nOutChannels)  // 20260322 ZJH 批归一化
     {}
 
@@ -113,15 +110,10 @@ private:
 // 用于 InvertedResidual 的 project 阶段，线性瓶颈不加激活
 class ConvBnLinear : public Module {
 public:
-    // 20260322 ZJH 构造函数
-    // nInChannels: 输入通道数
-    // nOutChannels: 输出通道数
-    // nKernelSize: 卷积核大小
-    // nStride: 步幅，默认 1
-    // nPadding: 填充，默认 0
+    // 20260330 ZJH 构造函数增加 nGroups（保持接口一致）
     ConvBnLinear(int nInChannels, int nOutChannels, int nKernelSize,
-                 int nStride = 1, int nPadding = 0)
-        : m_conv(nInChannels, nOutChannels, nKernelSize, nStride, nPadding, false),
+                 int nStride = 1, int nPadding = 0, int nGroups = 1)
+        : m_conv(nInChannels, nOutChannels, nKernelSize, nStride, nPadding, false, nGroups),
           m_bn(nOutChannels)
     {}
 
@@ -203,9 +195,9 @@ public:
             m_pExpand = std::make_unique<ConvBnReLU6>(nInChannels, nHiddenChannels, 1, 1, 0);
         }
 
-        // 20260322 ZJH depthwise 阶段: 3x3 卷积（使用普通 Conv2d 近似 depthwise）
-        // 理论上应为 groups=nHiddenChannels，但 tensor_ops 未暴露 depthwise 接口
-        m_pDepthwise = std::make_unique<ConvBnReLU6>(nHiddenChannels, nHiddenChannels, 3, nStride, 1);
+        // 20260330 ZJH depthwise 阶段: 3x3 深度可分离卷积（groups=nHiddenChannels）
+        // 每个通道独立卷积，参数量 = nHiddenChannels × 1 × 3 × 3（而非 nHidden² × 3 × 3）
+        m_pDepthwise = std::make_unique<ConvBnReLU6>(nHiddenChannels, nHiddenChannels, 3, nStride, 1, nHiddenChannels);
 
         // 20260322 ZJH project 阶段: 1x1 卷积降维（线性瓶颈，无激活函数）
         m_pProject = std::make_unique<ConvBnLinear>(nHiddenChannels, nOutChannels, 1, 1, 0);

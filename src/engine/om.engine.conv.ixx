@@ -14,6 +14,8 @@ import om.engine.tensor;
 import om.engine.tensor_ops;
 import om.engine.module;
 import om.hal.cpu_backend;
+import om.hal.cuda_backend;
+import om.engine.autograd;
 
 export namespace om {
 
@@ -29,15 +31,19 @@ public:
     // nStride: 步幅，默认 1
     // nPadding: 填充，默认 0
     // bBias: 是否使用偏置，默认 true
+    // 20260330 ZJH 构造函数增加 nGroups 参数，支持分组/深度可分离卷积
+    // nGroups: 分组数（1=标准卷积, nInChannels=深度可分离卷积）
     Conv2d(int nInChannels, int nOutChannels, int nKernelSize,
-           int nStride = 1, int nPadding = 0, bool bBias = true)
+           int nStride = 1, int nPadding = 0, bool bBias = true, int nGroups = 1)
         : m_nInChannels(nInChannels), m_nOutChannels(nOutChannels),
           m_nKernelSize(nKernelSize), m_nStride(nStride), m_nPadding(nPadding),
-          m_bUseBias(bBias)
+          m_bUseBias(bBias), m_nGroups(nGroups)
     {
-        // 20260319 ZJH Kaiming 初始化：W ~ N(0, sqrt(2 / (Cin * KH * KW)))
-        m_weight = Tensor::randn({nOutChannels, nInChannels, nKernelSize, nKernelSize});
-        float fFanIn = static_cast<float>(nInChannels * nKernelSize * nKernelSize);
+        // 20260330 ZJH 分组卷积权重形状: [Cout, Cin/Groups, KH, KW]
+        int nCinPerGroup = nInChannels / nGroups;  // 20260330 ZJH 每组输入通道数
+        m_weight = Tensor::randn({nOutChannels, nCinPerGroup, nKernelSize, nKernelSize});
+        // 20260330 ZJH Kaiming 初始化基于每组输入通道数（非总通道数）
+        float fFanIn = static_cast<float>(nCinPerGroup * nKernelSize * nKernelSize);
         float fScale = std::sqrt(2.0f / fFanIn);  // 20260319 ZJH Kaiming 缩放因子
         float* pW = m_weight.mutableFloatDataPtr();
         for (int i = 0; i < m_weight.numel(); ++i) {
@@ -55,7 +61,8 @@ public:
     // input: [N, Cin, H, W]
     // 返回: [N, Cout, Hout, Wout]
     Tensor forward(const Tensor& input) override {
-        return tensorConv2d(input, m_weight, m_bias, m_nStride, m_nPadding);
+        // 20260330 ZJH 传入 groups 参数支持分组卷积
+        return tensorConv2d(input, m_weight, m_bias, m_nStride, m_nPadding, m_nGroups);
     }
 
 private:
@@ -65,7 +72,8 @@ private:
     int m_nStride;       // 20260319 ZJH 步幅
     int m_nPadding;      // 20260319 ZJH 填充
     bool m_bUseBias;     // 20260319 ZJH 是否使用偏置
-    Tensor m_weight;     // 20260319 ZJH 卷积核 [Cout, Cin, KH, KW]
+    int m_nGroups;       // 20260330 ZJH 分组数（1=标准, Cin=深度可分离）
+    Tensor m_weight;     // 20260330 ZJH 卷积核 [Cout, Cin/Groups, KH, KW]
     Tensor m_bias;       // 20260319 ZJH 偏置 [Cout]
 };
 
@@ -112,6 +120,51 @@ private:
     Tensor m_beta;         // 20260319 ZJH 偏移参数 [C]
     Tensor m_runMean;      // 20260319 ZJH 运行均值 [C]（非训练参数）
     Tensor m_runVar;       // 20260319 ZJH 运行方差 [C]（非训练参数）
+};
+
+// 20260402 ZJH GroupNorm2d — 2D 组归一化层
+// 将 channels 分成 nGroups 组，每组内独立归一化
+// 与 BatchNorm2d 的关键区别:
+//   BN: 沿 (N, H, W) 维度归一化，依赖 batch 统计量，batch < 8 时不稳定
+//   GN: 沿 (C/G, H, W) 维度归一化，不依赖 batch 维度，batch=1 也稳定
+// Halcon/ViDi 在 batch < 8 时自动切换到 GN
+class GroupNorm2d : public Module {
+public:
+    // 20260402 ZJH 构造函数
+    // nNumChannels: 输入通道数
+    // nGroups: 分组数（默认 32，nNumChannels 必须被 nGroups 整除）
+    // fEps: 数值稳定性常数
+    GroupNorm2d(int nNumChannels, int nGroups = 32, float fEps = 1e-5f)
+        : m_nNumChannels(nNumChannels), m_nGroups(nGroups), m_fEps(fEps)
+    {
+        // 20260402 ZJH 自动调整 groups: 确保 channels 能被 groups 整除
+        while (m_nGroups > 1 && nNumChannels % m_nGroups != 0) --m_nGroups;
+
+        m_gamma = Tensor::ones({nNumChannels});   // 20260402 ZJH gamma 初始化为 1
+        m_beta = Tensor::zeros({nNumChannels});   // 20260402 ZJH beta 初始化为 0
+        registerParameter("gamma", m_gamma);
+        registerParameter("beta", m_beta);
+        // 20260402 ZJH GroupNorm 没有 running stats（不需要 train/eval 切换）
+    }
+
+    // 20260402 ZJH forward — 前向传播
+    // input: [N, C, H, W]
+    Tensor forward(const Tensor& input) override {
+        return tensorGroupNorm2d(input, m_gamma, m_beta, m_nGroups, m_fEps);
+    }
+
+    // 20260402 ZJH GroupNorm 没有 buffers（无 running stats）
+    std::vector<Tensor*> buffers() override { return {}; }
+    std::vector<std::pair<std::string, Tensor*>> namedBuffers(const std::string& = "") override { return {}; }
+
+    int groups() const { return m_nGroups; }  // 20260402 ZJH 返回实际分组数
+
+private:
+    int m_nNumChannels;  // 20260402 ZJH 通道数
+    int m_nGroups;       // 20260402 ZJH 分组数
+    float m_fEps;        // 20260402 ZJH 数值稳定性常数
+    Tensor m_gamma;      // 20260402 ZJH 缩放参数 [C]
+    Tensor m_beta;       // 20260402 ZJH 偏移参数 [C]
 };
 
 // 20260319 ZJH MaxPool2d — 2D 最大池化层
@@ -206,11 +259,12 @@ public:
             float fMax = pRow[0];
             for (int j = 1; j < nClasses; ++j)
                 if (pRow[j] > fMax) fMax = pRow[j];
-            float fSum = 0.0f;
+            float fSum = 0.0f;  // 20260330 ZJH softmax 分母累加器
             for (int j = 0; j < nClasses; ++j) {
                 pOutRow[j] = std::exp(pRow[j] - fMax);
                 fSum += pOutRow[j];
             }
+            if (fSum < 1e-30f) fSum = 1e-30f;  // 20260330 ZJH 防止除零（全 -inf 输入时 fSum 可能为 0）
             for (int j = 0; j < nClasses; ++j)
                 pOutRow[j] /= fSum;
         }
@@ -325,6 +379,40 @@ public:
         int nHout = (nH + 2 * m_nPadding - nEffKH) / m_nStride + 1;
         int nWout = (nW + 2 * m_nPadding - nEffKW) / m_nStride + 1;
 
+        // 20260331 ZJH GPU 路径: 原生 CUDA 膨胀 im2col+GEMM + autograd（零 D2H）
+        if (isCudaTensor(input)) {
+            auto result = Tensor::zeros({nBatch, m_nOutChannels, nHout, nWout}, DeviceType::CUDA);
+            bool bHasBias = (m_bias.numel() > 0);
+            const float* pBias = bHasBias ? m_bias.contiguous().floatDataPtr() : nullptr;
+            CUDABackend::dilatedConv2d(cInput.floatDataPtr(), cWeight.floatDataPtr(), pBias,
+                                        result.mutableFloatDataPtr(),
+                                        nBatch, m_nInChannels, nH, nW,
+                                        m_nOutChannels, m_nKernelSize, m_nKernelSize,
+                                        m_nStride, m_nPadding, m_nDilation, m_nGroups);
+            // 20260331 ZJH 注册 autograd backward（让 ASPP 膨胀卷积权重可被优化器更新）
+            if (input.requiresGrad() || m_weight.requiresGrad()) {
+                auto pBackward = std::make_shared<DilatedConv2dBackward>();
+                pBackward->m_savedInput = cInput;
+                pBackward->m_savedWeight = cWeight;
+                pBackward->m_nBatch = nBatch;
+                pBackward->m_nCin = m_nInChannels;
+                pBackward->m_nH = nH;   pBackward->m_nW = nW;
+                pBackward->m_nCout = m_nOutChannels;
+                pBackward->m_nKH = m_nKernelSize;  pBackward->m_nKW = m_nKernelSize;
+                pBackward->m_nStride = m_nStride;
+                pBackward->m_nPad = m_nPadding;
+                pBackward->m_nDilation = m_nDilation;
+                pBackward->m_bHasBias = bHasBias;
+                Tensor tInputRef = input;  // 20260331 ZJH 非 const 拷贝
+                pBackward->m_vecInputEdges.push_back(makeEdge(tInputRef, 0));
+                pBackward->m_vecInputEdges.push_back(makeEdge(m_weight, 0));
+                if (bHasBias) pBackward->m_vecInputEdges.push_back(makeEdge(m_bias, 0));
+                result.setGradFnRaw(pBackward);
+                result.setRequiresGrad(true);
+            }
+            return result;
+        }
+        // 20260331 ZJH CPU 路径: CPUBackend 膨胀卷积
         auto result = Tensor::zeros({nBatch, m_nOutChannels, nHout, nWout});
         bool bHasBias = (m_bias.numel() > 0);
         const float* pBias = bHasBias ? m_bias.contiguous().floatDataPtr() : nullptr;
@@ -335,6 +423,14 @@ public:
                                    m_nOutChannels, m_nKernelSize, m_nKernelSize,
                                    m_nStride, m_nPadding, m_nDilation, m_nGroups);
         return result;
+    }
+
+    // 20260330 ZJH 显式重写 parameters() 避免 Module 基类默认实现在 C++23 模块边界下的指针失效问题
+    std::vector<Tensor*> parameters() override {
+        std::vector<Tensor*> v;
+        v.push_back(&m_weight);
+        if (m_bUseBias && m_bias.numel() > 0) v.push_back(&m_bias);
+        return v;
     }
 
 private:
@@ -350,41 +446,40 @@ class Dropout2d : public Module {
 public:
     Dropout2d(float fProb = 0.5f) : m_fProb(fProb) {}
 
-    // 20260325 ZJH GPU 安全修复：评估模式使用 tensorReshape 零拷贝（替代 fromData 解引用指针）
-    //              训练模式先迁移到 CPU 生成 dropout mask，再迁回 GPU
+    // 20260329 ZJH Dropout2d forward — 用 tensorMul 保持 autograd 链
+    // 旧实现: Tensor::zeros + 手动拷贝 → 返回的 tensor 无 gradFn → 梯度断链
+    // 新实现: 生成 mask → tensorMul(input, mask) → MulBackward 自动注册 → 梯度正常回传
     Tensor forward(const Tensor& input) override {
         if (!m_bTraining || m_fProb <= 0.0f) {
-            // 20260325 ZJH 使用 tensorReshape 零拷贝视图，兼容 CPU 和 GPU
+            // 20260325 ZJH 评估模式直接透传（零拷贝视图）
             return tensorReshape(input.contiguous(), input.shapeVec());
         }
-        // 20260325 ZJH Dropout2d 需要 CPU 随机数生成器，GPU 张量先迁移到 CPU
-        auto cInput = (input.isCuda() ? input.cpu() : input).contiguous();
-        bool bWasCuda = input.isCuda();  // 20260325 ZJH 记录原始设备
-        int nBatch = cInput.shape(0);
-        int nChannels = cInput.shape(1);
-        int nSpatial = cInput.numel() / (nBatch * nChannels);
-        auto result = Tensor::zeros(cInput.shapeVec());
-        float* pOut = result.mutableFloatDataPtr();
-        const float* pIn = cInput.floatDataPtr();
+        // 20260329 ZJH 生成通道级 mask [B, C, H, W]（CPU 上生成，GPU 时上传）
+        int nBatch = input.shape(0);
+        int nChannels = input.shape(1);
+        int nSpatial = input.numel() / (nBatch * nChannels);
+        float fScale = 1.0f / (1.0f - m_fProb);  // 20260329 ZJH 逆概率缩放
+
+        auto tMask = Tensor::zeros(input.shapeVec());  // 20260329 ZJH CPU 上构建 mask
+        float* pMask = tMask.mutableFloatDataPtr();
 
         static thread_local std::mt19937 gen(std::random_device{}());
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-        float fScale = 1.0f / (1.0f - m_fProb);
 
-        for (int n = 0; n < nBatch; ++n)
-        for (int c = 0; c < nChannels; ++c) {
-            bool bKeep = (dist(gen) >= m_fProb);
-            int nOffset = (n * nChannels + c) * nSpatial;
-            if (bKeep) {
-                for (int s = 0; s < nSpatial; ++s) pOut[nOffset + s] = pIn[nOffset + s] * fScale;
+        for (int n = 0; n < nBatch; ++n) {
+            for (int c = 0; c < nChannels; ++c) {
+                // 20260329 ZJH 每通道随机: 保留→fScale, 丢弃→0
+                float fVal = (dist(gen) >= m_fProb) ? fScale : 0.0f;
+                int nOffset = (n * nChannels + c) * nSpatial;
+                for (int s = 0; s < nSpatial; ++s) pMask[nOffset + s] = fVal;
             }
-            // 20260320 ZJH bKeep=false 时已经初始化为 0
         }
-        // 20260325 ZJH 若原始输入在 GPU 上，将结果迁回 GPU
-        if (bWasCuda) {
-            return result.cuda();
-        }
-        return result;
+
+        // 20260329 ZJH GPU 时上传 mask
+        if (input.isCuda()) tMask = tMask.cuda();
+
+        // 20260329 ZJH tensorMul 自带 autograd: backward 时 gradInput = gradOutput * mask
+        return tensorMul(input, tMask);
     }
 
 private:

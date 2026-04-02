@@ -32,8 +32,8 @@ public:
     // vecParams: 需要优化的参数指针向量（由 Module::parameters() 获取）
     // fLr: 学习率
     // fMomentum: 动量系数，0.0 表示不使用动量
-    SGD(std::vector<Tensor*> vecParams, float fLr, float fMomentum = 0.0f)
-        : m_vecParams(vecParams), m_fLr(fLr), m_fMomentum(fMomentum)
+    SGD(std::vector<Tensor*> vecParams, float fLr, float fMomentum = 0.0f, float fWeightDecay = 0.0f)
+        : m_vecParams(vecParams), m_fLr(fLr), m_fMomentum(fMomentum), m_fWeightDecay(fWeightDecay)
     {
         // 20260325 ZJH Phase 3: 速度缓冲区在参数所在设备上创建
         if (fMomentum > 0.0f) {
@@ -45,14 +45,37 @@ public:
         }
     }
 
+    // 20260331 ZJH addParams — 动态添加新参数到优化器（用于骨干解冻后加入低 LR 参数组）
+    // fLrMultiplier: 该组参数的学习率倍率（实际 LR = baseLR × multiplier）
+    void addParams(std::vector<Tensor*> vecNewParams, float fLrMultiplier = 1.0f) {
+        for (auto* pParam : vecNewParams) {
+            m_vecParams.push_back(pParam);  // 20260331 ZJH 追加到参数列表
+            m_vecLrMultipliers.push_back(fLrMultiplier);  // 20260331 ZJH 记录对应倍率
+            if (m_fMomentum > 0.0f) {
+                // 20260331 ZJH 为新参数分配速度缓冲区（在参数所在设备上）
+                m_vecVelocities.push_back(Tensor::zeros(pParam->shapeVec(), pParam->device()));
+            }
+        }
+    }
+
+    // 20260331 ZJH setParamLrMultipliers — 设置每个参数的学习率倍率向量
+    // 用于分层学习率：骨干参数倍率 0.1，head 参数倍率 1.0
+    void setParamLrMultipliers(const std::vector<float>& vecMultipliers) {
+        m_vecLrMultipliers = vecMultipliers;  // 20260331 ZJH 直接覆盖
+    }
+
     // 20260319 ZJH step — 执行一步参数更新
     // 遍历所有参数，根据梯度和学习率更新参数值
     // 20260325 ZJH Phase 3: GPU 参数使用 CUDABackend::sgdStep
+    // 20260331 ZJH 支持分层学习率: 每个参数实际 LR = m_fLr × m_vecLrMultipliers[i]
     void step() {
         for (size_t i = 0; i < m_vecParams.size(); ++i) {
             auto grad = tensorGetGrad(*m_vecParams[i]);  // 20260319 ZJH 获取当前参数的梯度
             if (grad.numel() == 0) continue;  // 20260319 ZJH 无梯度则跳过该参数
             auto cGrad = grad.contiguous();  // 20260319 ZJH 确保梯度连续
+
+            // 20260331 ZJH 计算此参数的实际学习率（baseLR × 倍率）
+            float fEffectiveLr = m_fLr * getLrMultiplier(i);
 
             // 20260325 ZJH Phase 3: 检查参数是否在 CUDA 上
             if (m_vecParams[i]->isCuda()) {
@@ -68,8 +91,17 @@ public:
                     cGrad.floatDataPtr(),                    // 20260325 ZJH GPU 梯度指针
                     pVel,                                     // 20260325 ZJH GPU 速度指针（无动量时为 nullptr）
                     m_vecParams[i]->numel(),                 // 20260325 ZJH 元素总数
-                    m_fLr,                                    // 20260325 ZJH 学习率
+                    fEffectiveLr,                             // 20260331 ZJH 分层学习率
                     m_fMomentum);                             // 20260325 ZJH 动量系数
+                // 20260402 ZJH Weight Decay (L2 正则化): param *= (1 - lr * wd)
+                // 解耦式权重衰减，与 AdamW 风格一致，SGD 更新后缩放参数
+                if (m_fWeightDecay > 0.0f) {
+                    float fDecayFactor = 1.0f - fEffectiveLr * m_fWeightDecay;  // 20260402 ZJH 衰减因子
+                    CUDABackend::mulScalar(
+                        m_vecParams[i]->floatDataPtr(), fDecayFactor,
+                        m_vecParams[i]->mutableFloatDataPtr(),
+                        static_cast<size_t>(m_vecParams[i]->numel()));
+                }
 #endif
             } else {
                 // 20260319 ZJH CPU 路径：原有逻辑不变
@@ -82,12 +114,21 @@ public:
                     float* pVel = m_vecVelocities[i].mutableFloatDataPtr();  // 20260319 ZJH 速度可写指针
                     for (int j = 0; j < n; ++j) {
                         pVel[j] = m_fMomentum * pVel[j] + pGrad[j];  // 20260319 ZJH 更新速度：v = mu*v + grad
-                        pParam[j] -= m_fLr * pVel[j];  // 20260319 ZJH 更新参数：param -= lr * v
+                        pParam[j] -= fEffectiveLr * pVel[j];  // 20260331 ZJH 使用分层 LR
                     }
                 } else {
                     // 20260319 ZJH 普通 SGD 更新（无动量）
                     for (int j = 0; j < n; ++j) {
-                        pParam[j] -= m_fLr * pGrad[j];  // 20260319 ZJH param -= lr * grad
+                        pParam[j] -= fEffectiveLr * pGrad[j];  // 20260331 ZJH 使用分层 LR
+                    }
+                }
+
+                // 20260402 ZJH Weight Decay (L2 正则化): param *= (1 - lr * wd)
+                // 解耦式权重衰减，SGD 更新后对参数施加衰减，防止权重过大导致过拟合
+                if (m_fWeightDecay > 0.0f) {
+                    float fDecayFactor = 1.0f - fEffectiveLr * m_fWeightDecay;  // 20260402 ZJH 衰减因子
+                    for (int j = 0; j < n; ++j) {
+                        pParam[j] *= fDecayFactor;  // 20260402 ZJH 缩放参数实现 L2 正则化
                     }
                 }
             }
@@ -111,10 +152,17 @@ public:
     void setLearningRate(float fNewLr) { m_fLr = fNewLr; }
 
 private:
+    // 20260331 ZJH 获取第 i 个参数的学习率倍率（无倍率向量时默认 1.0）
+    float getLrMultiplier(size_t i) const {
+        return (i < m_vecLrMultipliers.size()) ? m_vecLrMultipliers[i] : 1.0f;
+    }
+
     std::vector<Tensor*> m_vecParams;      // 20260319 ZJH 参数指针列表
     float m_fLr;                            // 20260319 ZJH 学习率
     float m_fMomentum;                      // 20260319 ZJH 动量系数
+    float m_fWeightDecay;                   // 20260402 ZJH L2 正则化系数（darknet 默认 5e-4）
     std::vector<Tensor> m_vecVelocities;   // 20260319 ZJH 速度缓冲区（动量模式下使用）
+    std::vector<float> m_vecLrMultipliers; // 20260331 ZJH 每参数学习率倍率（分层学习率）
 };
 
 // 20260319 ZJH Adam — 自适应矩估计优化器
@@ -148,8 +196,25 @@ public:
         }
     }
 
+    // 20260331 ZJH addParams — 动态添加新参数到优化器（用于骨干解冻后加入低 LR 参数组）
+    void addParams(std::vector<Tensor*> vecNewParams, float fLrMultiplier = 1.0f) {
+        for (auto* pParam : vecNewParams) {
+            m_vecParams.push_back(pParam);  // 20260331 ZJH 追加到参数列表
+            m_vecLrMultipliers.push_back(fLrMultiplier);  // 20260331 ZJH 记录对应倍率
+            // 20260331 ZJH 为新参数分配 m/v 缓冲区
+            m_vecM.push_back(Tensor::zeros(pParam->shapeVec(), pParam->device()));
+            m_vecV.push_back(Tensor::zeros(pParam->shapeVec(), pParam->device()));
+        }
+    }
+
+    // 20260331 ZJH setParamLrMultipliers — 设置每个参数的学习率倍率向量
+    void setParamLrMultipliers(const std::vector<float>& vecMultipliers) {
+        m_vecLrMultipliers = vecMultipliers;
+    }
+
     // 20260319 ZJH step — 执行一步 Adam 参数更新
     // 20260325 ZJH Phase 3: GPU 参数使用 CUDABackend::adamStep
+    // 20260331 ZJH 支持分层学习率: 每个参数实际 LR = m_fLr × m_vecLrMultipliers[i]
     void step() {
         m_nStep++;  // 20260319 ZJH 递增步数计数器（用于偏差校正）
 
@@ -157,6 +222,9 @@ public:
             auto grad = tensorGetGrad(*m_vecParams[i]);  // 20260319 ZJH 获取当前参数的梯度
             if (grad.numel() == 0) continue;  // 20260319 ZJH 无梯度则跳过
             auto cGrad = grad.contiguous();  // 20260319 ZJH 确保梯度连续
+
+            // 20260331 ZJH 计算此参数的实际学习率（baseLR × 倍率）
+            float fEffectiveLr = m_fLr * getLrMultiplier(i);
 
             // 20260325 ZJH Phase 3: 检查参数是否在 CUDA 上
             if (m_vecParams[i]->isCuda()) {
@@ -173,7 +241,7 @@ public:
                     m_vecM[i].mutableFloatDataPtr(),          // 20260325 ZJH GPU 一阶矩指针
                     m_vecV[i].mutableFloatDataPtr(),          // 20260325 ZJH GPU 二阶矩指针
                     m_vecParams[i]->numel(),                 // 20260325 ZJH 元素总数
-                    m_fLr,                                    // 20260325 ZJH 学习率
+                    fEffectiveLr,                             // 20260331 ZJH 分层学习率
                     m_fBeta1,                                 // 20260325 ZJH 一阶矩衰减率
                     m_fBeta2,                                 // 20260325 ZJH 二阶矩衰减率
                     m_fEps,                                   // 20260325 ZJH 数值稳定性常数
@@ -200,7 +268,7 @@ public:
                     float fMhat = pM[j] / (1.0f - fBeta1Pow);  // 20260319 ZJH 校正一阶矩
                     float fVhat = pV[j] / (1.0f - fBeta2Pow);  // 20260319 ZJH 校正二阶矩
                     // 20260319 ZJH 参数更新：param -= lr * m_hat / (sqrt(v_hat) + eps)
-                    pParam[j] -= m_fLr * fMhat / (std::sqrt(fVhat) + m_fEps);
+                    pParam[j] -= fEffectiveLr * fMhat / (std::sqrt(fVhat) + m_fEps);
                 }
             }
         }
@@ -223,6 +291,11 @@ public:
     void setLearningRate(float fNewLr) { m_fLr = fNewLr; }
 
 private:
+    // 20260331 ZJH 获取第 i 个参数的学习率倍率（无倍率向量时默认 1.0）
+    float getLrMultiplier(size_t i) const {
+        return (i < m_vecLrMultipliers.size()) ? m_vecLrMultipliers[i] : 1.0f;
+    }
+
     std::vector<Tensor*> m_vecParams;  // 20260319 ZJH 参数指针列表
     float m_fLr;      // 20260319 ZJH 学习率
     float m_fBeta1;   // 20260319 ZJH 一阶矩衰减率
@@ -231,6 +304,7 @@ private:
     int m_nStep;      // 20260319 ZJH 当前步数计数器（从 0 开始，每次 step 递增）
     std::vector<Tensor> m_vecM;  // 20260319 ZJH 一阶矩（均值）缓冲区
     std::vector<Tensor> m_vecV;  // 20260319 ZJH 二阶矩（方差）缓冲区
+    std::vector<float> m_vecLrMultipliers; // 20260331 ZJH 每参数学习率倍率（分层学习率）
 };
 
 // 20260320 ZJH AdamW — 带解耦权重衰减的 Adam 优化器
@@ -253,7 +327,23 @@ public:
         }
     }
 
+    // 20260331 ZJH addParams — 动态添加新参数到 AdamW（用于骨干解冻后加入低 LR 参数组）
+    void addParams(std::vector<Tensor*> vecNewParams, float fLrMultiplier = 1.0f) {
+        for (auto* pParam : vecNewParams) {
+            m_vecParams.push_back(pParam);
+            m_vecLrMultipliers.push_back(fLrMultiplier);
+            m_vecM.push_back(Tensor::zeros(pParam->shapeVec(), pParam->device()));
+            m_vecV.push_back(Tensor::zeros(pParam->shapeVec(), pParam->device()));
+        }
+    }
+
+    // 20260331 ZJH setParamLrMultipliers — 设置每个参数的学习率倍率向量
+    void setParamLrMultipliers(const std::vector<float>& vecMultipliers) {
+        m_vecLrMultipliers = vecMultipliers;
+    }
+
     // 20260325 ZJH Phase 3: AdamW step 添加 GPU 路径
+    // 20260331 ZJH 支持分层学习率
     void step() {
         m_nStep++;
 
@@ -261,6 +351,9 @@ public:
             auto grad = tensorGetGrad(*m_vecParams[i]);
             if (grad.numel() == 0) continue;
             auto cGrad = grad.contiguous();
+
+            // 20260331 ZJH 计算此参数的实际学习率（baseLR × 倍率）
+            float fEffectiveLr = m_fLr * getLrMultiplier(i);
 
             // 20260325 ZJH Phase 3: 检查参数是否在 CUDA 上
             if (m_vecParams[i]->isCuda()) {
@@ -277,10 +370,9 @@ public:
                     m_vecM[i].mutableFloatDataPtr(),
                     m_vecV[i].mutableFloatDataPtr(),
                     m_vecParams[i]->numel(),
-                    m_fLr, m_fBeta1, m_fBeta2, m_fEps, m_nStep);
+                    fEffectiveLr, m_fBeta1, m_fBeta2, m_fEps, m_nStep);
                 // 20260325 ZJH AdamW 额外步骤：解耦权重衰减 param *= (1 - lr * weight_decay)
-                // 通过 mulScalar 实现
-                float fDecayFactor = 1.0f - m_fLr * m_fWeightDecay;
+                float fDecayFactor = 1.0f - fEffectiveLr * m_fWeightDecay;
                 CUDABackend::mulScalar(
                     m_vecParams[i]->floatDataPtr(), fDecayFactor,
                     m_vecParams[i]->mutableFloatDataPtr(),
@@ -303,8 +395,8 @@ public:
                     pV[j] = m_fBeta2 * pV[j] + (1.0f - m_fBeta2) * pGrad[j] * pGrad[j];
                     float fMhat = pM[j] / (1.0f - fBeta1Pow);
                     float fVhat = pV[j] / (1.0f - fBeta2Pow);
-                    // 20260320 ZJH AdamW 解耦权重衰减：先衰减再更新
-                    pParam[j] -= m_fLr * (fMhat / (std::sqrt(fVhat) + m_fEps) + m_fWeightDecay * pParam[j]);
+                    // 20260320 ZJH AdamW 解耦权重衰减：使用分层 LR
+                    pParam[j] -= fEffectiveLr * (fMhat / (std::sqrt(fVhat) + m_fEps) + m_fWeightDecay * pParam[j]);
                 }
             }
         }
@@ -316,12 +408,20 @@ public:
 
     void setLR(float fLr) { m_fLr = fLr; }
     float getLR() const { return m_fLr; }
+    // 20260331 ZJH 动态设置学习率（供调度器调用）
+    void setLearningRate(float fNewLr) { m_fLr = fNewLr; }
 
 private:
+    // 20260331 ZJH 获取第 i 个参数的学习率倍率
+    float getLrMultiplier(size_t i) const {
+        return (i < m_vecLrMultipliers.size()) ? m_vecLrMultipliers[i] : 1.0f;
+    }
+
     std::vector<Tensor*> m_vecParams;
     float m_fLr, m_fBeta1, m_fBeta2, m_fEps, m_fWeightDecay;
     int m_nStep;
     std::vector<Tensor> m_vecM, m_vecV;
+    std::vector<float> m_vecLrMultipliers; // 20260331 ZJH 每参数学习率倍率
 };
 
 }  // namespace om

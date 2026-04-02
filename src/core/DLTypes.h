@@ -44,6 +44,15 @@ enum class DeviceType : uint8_t {
     CUDA = 1   // 20260322 ZJH NVIDIA CUDA GPU 推理/训练
 };
 
+// 20260402 ZJH 归一化层类型枚举
+// 控制模型中 Conv 后接的归一化方式
+// BatchNorm 在 batch < 8 时统计量不稳定，GroupNorm 不依赖 batch 维度
+enum class NormLayerType : uint8_t {
+    BatchNorm  = 0,  // 20260402 ZJH 批归一化（默认，batch ≥ 8 时效果最佳）
+    GroupNorm  = 1,  // 20260402 ZJH 组归一化（batch < 8 时替代 BN，channels 分组独立归一化）
+    Auto       = 2   // 20260402 ZJH 自动选择（batch < 8 → GroupNorm，否则 → BatchNorm）
+};
+
 // 20260322 ZJH 计算精度类型枚举
 // 控制推理时的数值精度（影响速度和准确性的权衡）
 enum class PrecisionType : uint8_t {
@@ -100,6 +109,7 @@ enum class ModelArchitecture : uint8_t {
     DeepLabV3Plus= 31,  // 20260322 ZJH DeepLabV3+ 空洞卷积分割
     PSPNet       = 32,  // 20260322 ZJH PSPNet 金字塔池化分割
     SegFormer    = 33,  // 20260322 ZJH SegFormer Transformer 分割
+    MobileSegNet = 34,  // 20260401 ZJH MobileSegNet 轻量级工业分割（~1.75M参数）
 
     // 20260322 ZJH 实例分割模型（编号 40-44）
     YOLOv8InstanceSeg = 40,  // 20260322 ZJH YOLOv8 实例分割
@@ -116,6 +126,42 @@ enum class ModelArchitecture : uint8_t {
     // 20260322 ZJH 零样本目标检测模型（编号 70-74）
     GroundingDINO = 70,  // 20260322 ZJH Grounding DINO 零样本目标检测
     YOLOWorld     = 71   // 20260322 ZJH YOLO-World 零样本目标检测
+};
+
+// 20260330 ZJH 模型能力等级枚举（借鉴海康 VisionTrain "模型能力" 概念）
+// 将底层模型架构抽象为用户可理解的能力等级，简化选型决策
+enum class ModelCapability : uint8_t {
+    Lightweight  = 0,  // 20260330 ZJH 轻量化（推理速度优先，适合边缘/嵌入式部署）
+    Normal       = 1,  // 20260330 ZJH 普通（速度与精度均衡，推荐默认选择）
+    HighAccuracy = 2   // 20260330 ZJH 高精度（精度优先，适合复杂场景、类别多的任务）
+};
+
+// 20260330 ZJH 输入分辨率预设枚举（借鉴海康 VisionTrain 分辨率下拉预设）
+// 提供经验验证的分辨率档位，避免用户选择无效尺寸
+enum class InputResolutionPreset : uint8_t {
+    Res224  = 0,   // 20260330 ZJH 224×224（分类默认，轻量场景）
+    Res256  = 8,   // 20260331 ZJH 256×256（分割轻量，16GB 显存 DeepLabV3+ 推荐）
+    Res320  = 1,   // 20260330 ZJH 320×320（小目标基础分辨率）
+    Res416  = 2,   // 20260330 ZJH 416×416（检测经典分辨率）
+    Res512  = 3,   // 20260330 ZJH 512×512（中等分辨率，精度与速度均衡）
+    Res640  = 4,   // 20260330 ZJH 640×640（检测/分割高精度）
+    Res800  = 5,   // 20260330 ZJH 800×800（大目标高精度场景）
+    Res1024 = 6,   // 20260330 ZJH 1024×1024（超高精度，显存需求大）
+    Custom  = 7    // 20260330 ZJH 自定义（用户手动输入任意尺寸）
+};
+
+// 20260330 ZJH 数据增强预设枚举（借鉴海康 VisionTrain "数据增强策略"）
+// 默认配置使用经验最优参数，手动配置允许用户精细调节
+enum class AugmentationPreset : uint8_t {
+    Default = 0,  // 20260330 ZJH 默认配置（使用任务类型对应的最优增强策略）
+    Manual  = 1   // 20260330 ZJH 手动配置（用户自定义全部增强参数）
+};
+
+// 20260330 ZJH 异常检测训练模式枚举（借鉴海康 VisionTrain 103 类型 "极速/高精度"）
+// 仅在异常检测任务下可见，控制训练策略和模型复杂度
+enum class AnomalyTrainingMode : uint8_t {
+    Fast         = 0,  // 20260330 ZJH 极速模式（PaDiM/PatchCore，训练快，需样本对齐）
+    HighAccuracy = 1   // 20260330 ZJH 高精度模式（EfficientAD/FastFlow，训练慢，检出小缺陷）
 };
 
 // 20260322 ZJH 优化器类型枚举
@@ -193,5 +239,42 @@ bool isZeroShotTask(TaskType eType);
 // 参数: eType - 任务类型枚举值
 // 返回: true 表示需要训练，false 表示不需要
 bool taskRequiresTraining(TaskType eType);
+
+// 20260330 ZJH 根据任务类型和模型能力等级返回推荐的模型架构列表
+// 将"模型能力"抽象映射到具体架构，隐藏底层复杂度
+// 参数: eType - 任务类型; eCapability - 模型能力等级
+// 返回: 该组合下推荐的模型架构列表（有序，第一个为默认推荐）
+QVector<ModelArchitecture> architecturesForCapability(TaskType eType, ModelCapability eCapability);
+
+// 20260330 ZJH 获取指定任务类型适用的分辨率预设列表
+// 不同任务有不同的合理分辨率范围（如分类偏小，分割偏大）
+// 参数: eType - 任务类型
+// 返回: 该任务适用的分辨率预设列表
+QVector<InputResolutionPreset> resolutionPresetsForTask(TaskType eType);
+
+// 20260330 ZJH 分辨率预设转换为实际像素值
+// 参数: ePreset - 分辨率预设枚举值
+// 返回: 对应的像素尺寸（正方形边长），Custom 返回 0 表示需用户输入
+int resolutionPresetToPixels(InputResolutionPreset ePreset);
+
+// 20260330 ZJH 分辨率预设转换为显示字符串（如 "512×512"）
+// 参数: ePreset - 分辨率预设枚举值
+// 返回: 用户可读的分辨率描述
+QString resolutionPresetToString(InputResolutionPreset ePreset);
+
+// 20260330 ZJH 模型能力等级转换为中文显示名称
+// 参数: eCapability - 模型能力枚举值
+// 返回: 对应的中文名称（如 "轻量化"、"普通"、"高精度"）
+QString modelCapabilityToString(ModelCapability eCapability);
+
+// 20260330 ZJH 根据数据集大小智能推荐训练轮次（借鉴海康 VisionTrain 经验规则）
+// 参数: nImageCount - 训练集图片数量; eType - 任务类型
+// 返回: 推荐的 epoch 数
+int recommendEpochs(int nImageCount, TaskType eType);
+
+// 20260330 ZJH 根据数据集大小智能推荐学习率
+// 参数: nImageCount - 训练集图片数量; eType - 任务类型
+// 返回: 推荐的初始学习率
+double recommendLearningRate(int nImageCount, TaskType eType);
 
 }  // namespace om

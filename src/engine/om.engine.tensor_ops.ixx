@@ -648,7 +648,10 @@ std::vector<int> tensorArgmax(const Tensor& t) {
 // input: [N, Cin, H, W]  weight: [Cout, Cin, KH, KW]  bias: [Cout]（可为空张量）
 // 返回: [N, Cout, Hout, Wout]
 // 20260325 ZJH Phase 3: 添加设备调度
-Tensor tensorConv2d(Tensor input, Tensor weight, Tensor bias, int nStride, int nPad) {
+// 20260330 ZJH 增加 nGroups 参数支持分组/深度可分离卷积
+// groups=1: 标准卷积; groups=Cin: 深度可分离卷积
+// 权重形状: [Cout, Cin/Groups, KH, KW]
+Tensor tensorConv2d(Tensor input, Tensor weight, Tensor bias, int nStride, int nPad, int nGroups = 1) {
     checkSameDevice(input, weight);  // 20260325 ZJH 确保输入和权重在同一设备上
     auto cInput = input.contiguous();   // 20260319 ZJH 确保输入连续
     auto cWeight = weight.contiguous(); // 20260319 ZJH 确保权重连续
@@ -668,20 +671,53 @@ Tensor tensorConv2d(Tensor input, Tensor weight, Tensor bias, int nStride, int n
     bool bHasBias = (bias.numel() > 0);
     const float* pBias = bHasBias ? bias.contiguous().floatDataPtr() : nullptr;
 
+    // 20260330 ZJH 分组卷积参数
+    int nCinPerGroup = nCin / nGroups;    // 20260330 ZJH 每组输入通道数
+    int nCoutPerGroup = nCout / nGroups;  // 20260330 ZJH 每组输出通道数
+
     // 20260325 ZJH 根据设备类型选择后端
     if (isCudaTensor(input)) {
 #ifdef OM_HAS_CUDA
-        // 20260325 ZJH CUDA 路径：CUDABackend::conv2d 参数顺序为 (padH, padW, strH, strW)
-        CUDABackend::conv2d(cInput.floatDataPtr(), cWeight.floatDataPtr(), pBias,
-                            result.mutableFloatDataPtr(),
-                            nBatch, nCin, nH, nW, nCout, nKH, nKW,
-                            nPad, nPad, nStride, nStride);
+        if (nGroups == 1) {
+            // 20260325 ZJH 标准卷积：直接调用优化后端
+            CUDABackend::conv2d(cInput.floatDataPtr(), cWeight.floatDataPtr(), pBias,
+                                result.mutableFloatDataPtr(),
+                                nBatch, nCin, nH, nW, nCout, nKH, nKW,
+                                nPad, nPad, nStride, nStride);
+        } else {
+            // 20260330 ZJH 分组卷积 CUDA 路径：逐组调用现有 conv2d kernel
+            // 每组独立：input[N, CinG, H, W] * weight[CoutG, CinG, KH, KW] → output[N, CoutG, Hout, Wout]
+            int nInputGroupStride = nCinPerGroup * nH * nW;       // 20260330 ZJH 每组输入空间大小
+            int nOutputGroupStride = nCoutPerGroup * nHout * nWout;  // 20260330 ZJH 每组输出空间大小
+            int nWeightGroupStride = nCoutPerGroup * nCinPerGroup * nKH * nKW;  // 20260330 ZJH 每组权重大小
+            for (int g = 0; g < nGroups; ++g) {
+                const float* pWeightG = cWeight.floatDataPtr() + g * nWeightGroupStride;
+                const float* pBiasG = pBias ? pBias + g * nCoutPerGroup : nullptr;
+                for (int n = 0; n < nBatch; ++n) {
+                    const float* pInputG = cInput.floatDataPtr() + n * nCin * nH * nW + g * nInputGroupStride;
+                    float* pOutputG = result.mutableFloatDataPtr() + n * nCout * nHout * nWout + g * nOutputGroupStride;
+                    // 20260330 ZJH 单 batch 单组 conv2d: nBatch=1，每次都传偏置
+                    CUDABackend::conv2d(pInputG, pWeightG, pBiasG,
+                                        pOutputG,
+                                        1, nCinPerGroup, nH, nW, nCoutPerGroup, nKH, nKW,
+                                        nPad, nPad, nStride, nStride);
+                }
+            }
+        }
 #endif
     } else {
-        // 20260319 ZJH CPU 路径
-        CPUBackend::conv2d(cInput.floatDataPtr(), cWeight.floatDataPtr(), pBias,
-                           result.mutableFloatDataPtr(),
-                           nBatch, nCin, nH, nW, nCout, nKH, nKW, nStride, nPad);
+        if (nGroups == 1) {
+            // 20260319 ZJH CPU 标准卷积路径
+            CPUBackend::conv2d(cInput.floatDataPtr(), cWeight.floatDataPtr(), pBias,
+                               result.mutableFloatDataPtr(),
+                               nBatch, nCin, nH, nW, nCout, nKH, nKW, nStride, nPad);
+        } else {
+            // 20260330 ZJH CPU 分组卷积：利用已有 dilatedConv2d（支持 groups 参数，dilation=1）
+            CPUBackend::dilatedConv2d(cInput.floatDataPtr(), cWeight.floatDataPtr(), pBias,
+                                       result.mutableFloatDataPtr(),
+                                       nBatch, nCin, nH, nW, nCout, nKH, nKW,
+                                       nStride, nPad, 1, nGroups);
+        }
     }
 
     // 20260319 ZJH AutoGrad: 如果任一输入需要梯度，创建 Conv2dBackward
@@ -698,6 +734,7 @@ Tensor tensorConv2d(Tensor input, Tensor weight, Tensor bias, int nStride, int n
         pBackward->m_nKW = nKW;
         pBackward->m_nStride = nStride;
         pBackward->m_nPad = nPad;
+        pBackward->m_nGroups = nGroups;  // 20260330 ZJH 保存分组数用于反向传播
         pBackward->m_bHasBias = bHasBias;
         pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));   // 20260319 ZJH 输入边
         pBackward->m_vecInputEdges.push_back(makeEdge(weight, 0));  // 20260319 ZJH 权重边
@@ -774,6 +811,110 @@ Tensor tensorBatchNorm2d(Tensor input, Tensor gamma, Tensor beta,
     }
 
     return result;
+}
+
+// 20260402 ZJH tensorGroupNorm2d — GroupNorm 前向，支持 autograd
+// input: [N,C,H,W], gamma: [C], beta: [C]
+// nGroups: 组数（C 必须被 nGroups 整除）
+// 返回: [N,C,H,W] 归一化+仿射变换后的张量
+inline Tensor tensorGroupNorm2d(Tensor input, Tensor gamma, Tensor beta,
+                                 int nGroups, float fEps = 1e-5f) {
+    auto cInput = input.contiguous();   // 20260402 ZJH 确保输入连续
+    auto cGamma = gamma.contiguous();   // 20260402 ZJH 确保 gamma 连续
+    auto cBeta = beta.contiguous();     // 20260402 ZJH 确保 beta 连续
+    auto shape = cInput.shapeVec();     // 20260402 ZJH 获取输入形状
+    int nBatch = shape[0];              // 20260402 ZJH 批次大小
+    int nChannels = shape[1];           // 20260402 ZJH 通道数
+    int nH = shape[2];                  // 20260402 ZJH 高度
+    int nW = shape[3];                  // 20260402 ZJH 宽度
+
+    // 20260402 ZJH 安全检查: channels 必须被 groups 整除，否则自动调整
+    if (nChannels % nGroups != 0) {
+        while (nGroups > 1 && nChannels % nGroups != 0) --nGroups;
+    }
+
+    int nNumGroups = nBatch * nGroups;  // 20260402 ZJH 统计量总数 = N * G
+    auto output = Tensor::zeros(shape, input.device());                // 20260402 ZJH 输出张量
+    auto savedMean = Tensor::zeros({nNumGroups}, input.device());      // 20260402 ZJH 保存均值 [N*G]
+    auto savedInvStd = Tensor::zeros({nNumGroups}, input.device());    // 20260402 ZJH 保存逆标准差 [N*G]
+
+    if (isCudaTensor(input)) {
+#ifdef OM_HAS_CUDA
+        // 20260402 ZJH GPU 路径：调用 CUDABackend::groupNorm2d
+        auto cudaGamma = cGamma.isCpu() ? cGamma.cuda() : cGamma;   // 20260402 ZJH 确保 gamma 在 GPU
+        auto cudaBeta = cBeta.isCpu() ? cBeta.cuda() : cBeta;       // 20260402 ZJH 确保 beta 在 GPU
+
+        CUDABackend::groupNorm2d(
+            cInput.floatDataPtr(), output.mutableFloatDataPtr(),
+            cudaGamma.floatDataPtr(), cudaBeta.floatDataPtr(),
+            savedMean.mutableFloatDataPtr(), savedInvStd.mutableFloatDataPtr(),
+            nBatch, nChannels, nH, nW, nGroups, fEps);
+#endif
+    } else {
+        // 20260402 ZJH CPU fallback: 手写 GroupNorm 前向
+        const float* pIn = cInput.floatDataPtr();
+        float* pOut = output.mutableFloatDataPtr();
+        const float* pGamma = cGamma.floatDataPtr();
+        const float* pBeta = cBeta.floatDataPtr();
+        float* pMean = savedMean.mutableFloatDataPtr();
+        float* pInvStd = savedInvStd.mutableFloatDataPtr();
+
+        int nChannelsPerGroup = nChannels / nGroups;  // 20260402 ZJH 每组通道数
+        int nHW = nH * nW;                            // 20260402 ZJH 空间维度大小
+        int nGroupSize = nChannelsPerGroup * nHW;      // 20260402 ZJH 每组元素总数
+
+        for (int n = 0; n < nBatch; ++n) {
+            for (int g = 0; g < nGroups; ++g) {
+                int nStatIdx = n * nGroups + g;         // 20260402 ZJH 统计量索引
+                // 20260402 ZJH 计算组内均值
+                float fSum = 0.0f;
+                int nBase = n * nChannels * nHW + g * nChannelsPerGroup * nHW;  // 20260402 ZJH 组起始偏移
+                for (int i = 0; i < nGroupSize; ++i) fSum += pIn[nBase + i];
+                float fMean = fSum / static_cast<float>(nGroupSize);
+                // 20260402 ZJH 计算组内方差
+                float fVarSum = 0.0f;
+                for (int i = 0; i < nGroupSize; ++i) {
+                    float fDiff = pIn[nBase + i] - fMean;  // 20260402 ZJH 与均值的差
+                    fVarSum += fDiff * fDiff;
+                }
+                float fVar = fVarSum / static_cast<float>(nGroupSize);
+                float fInvStdVal = 1.0f / std::sqrtf(fVar + fEps);  // 20260402 ZJH 逆标准差
+                pMean[nStatIdx] = fMean;          // 20260402 ZJH 保存均值
+                pInvStd[nStatIdx] = fInvStdVal;   // 20260402 ZJH 保存逆标准差
+
+                // 20260402 ZJH 归一化 + 仿射变换: y = gamma * (x - mean) * invStd + beta
+                for (int ci = 0; ci < nChannelsPerGroup; ++ci) {
+                    int c = g * nChannelsPerGroup + ci;  // 20260402 ZJH 全局通道索引
+                    int nOff = n * nChannels * nHW + c * nHW;  // 20260402 ZJH 当前通道起始偏移
+                    for (int i = 0; i < nHW; ++i) {
+                        pOut[nOff + i] = pGamma[c] * ((pIn[nOff + i] - fMean) * fInvStdVal) + pBeta[c];
+                    }
+                }
+            }
+        }
+    }
+
+    // 20260402 ZJH 注册 autograd 节点
+    if (input.requiresGrad() || gamma.requiresGrad()) {
+        auto pBackward = std::make_shared<GroupNorm2dBackward>();
+        pBackward->m_savedInput = cInput;
+        pBackward->m_savedMean = savedMean;
+        pBackward->m_savedInvStd = savedInvStd;
+        pBackward->m_savedGamma = cGamma;
+        pBackward->m_nBatch = nBatch;
+        pBackward->m_nChannels = nChannels;
+        pBackward->m_nH = nH;
+        pBackward->m_nW = nW;
+        pBackward->m_nGroups = nGroups;
+        pBackward->m_fEps = fEps;
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));  // 20260402 ZJH 输入边
+        pBackward->m_vecInputEdges.push_back(makeEdge(gamma, 0));  // 20260402 ZJH gamma 边
+        pBackward->m_vecInputEdges.push_back(makeEdge(beta, 0));   // 20260402 ZJH beta 边
+        output.setGradFnRaw(pBackward);
+        output.setRequiresGrad(true);
+    }
+
+    return output;
 }
 
 // 20260319 ZJH tensorMaxPool2d — 最大池化前向，支持自动微分

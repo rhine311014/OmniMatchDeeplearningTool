@@ -31,11 +31,15 @@ public:
     // nIn: 输入通道数
     // nOut: 输出通道数
     // 20260320 ZJH fDropout: 空间 Dropout 概率（深层使用更高值）
-    UNetEncoderBlock(int nIn, int nOut, float fDropout = 0.0f)
+    // 20260402 ZJH bUseGroupNorm: 是否使用 GroupNorm 替代 BatchNorm
+    UNetEncoderBlock(int nIn, int nOut, float fDropout = 0.0f, bool bUseGroupNorm = false)
         : m_conv1(nIn, nOut, 3, 1, 1, true),
           m_conv2(nOut, nOut, 3, 1, 1, true),
           m_bn1(nOut), m_bn2(nOut),
-          m_fDropout(fDropout)
+          m_gn1(nOut), m_gn2(nOut),  // 20260402 ZJH GroupNorm 实例（nGroups 自动调整）
+          m_dropout(fDropout),  // 20260329 ZJH 传入正确概率（旧代码用 0.0 初始化，dropout 永远不生效）
+          m_fDropout(fDropout),
+          m_bUseGroupNorm(bUseGroupNorm)  // 20260402 ZJH 记录归一化模式
     {}
 
     // 20260320 ZJH forward — 编码器块前向传播
@@ -43,10 +47,10 @@ public:
     // 返回: [N, nOut, H, W]（空间维度不变）
     Tensor forward(const Tensor& input) override {
         auto x = m_conv1.forward(input);
-        x = m_bn1.forward(x);
+        x = m_bUseGroupNorm ? m_gn1.forward(x) : m_bn1.forward(x);  // 20260402 ZJH 根据标志选择归一化层
         x = m_relu.forward(x);
         x = m_conv2.forward(x);
-        x = m_bn2.forward(x);
+        x = m_bUseGroupNorm ? m_gn2.forward(x) : m_bn2.forward(x);  // 20260402 ZJH 根据标志选择归一化层
         x = m_relu.forward(x);
         // 20260320 ZJH Dropout2d 正则化（仅训练模式生效）
         if (m_bTraining && m_fDropout > 0.01f) x = m_dropout.forward(x);
@@ -54,20 +58,23 @@ public:
     }
 
     // 20260320 ZJH 重写 parameters() 手动收集子层参数
+    // 20260402 ZJH 根据 m_bUseGroupNorm 收集 GN 或 BN 的参数
     std::vector<Tensor*> parameters() override {
         std::vector<Tensor*> vecResult;
         auto append = [&](std::vector<Tensor*> v) {
             vecResult.insert(vecResult.end(), v.begin(), v.end());
         };
         append(m_conv1.parameters());
-        append(m_bn1.parameters());
+        append(m_bUseGroupNorm ? m_gn1.parameters() : m_bn1.parameters());  // 20260402 ZJH 选择归一化层参数
         append(m_conv2.parameters());
-        append(m_bn2.parameters());
+        append(m_bUseGroupNorm ? m_gn2.parameters() : m_bn2.parameters());  // 20260402 ZJH 选择归一化层参数
         return vecResult;
     }
 
     // 20260326 ZJH 重写 buffers() 收集 BN running stats
+    // 20260402 ZJH GroupNorm 无 running stats，返回空
     std::vector<Tensor*> buffers() override {
+        if (m_bUseGroupNorm) return {};  // 20260402 ZJH GN 没有 running stats
         std::vector<Tensor*> vecResult;
         auto append = [&](std::vector<Tensor*> v) {
             vecResult.insert(vecResult.end(), v.begin(), v.end());
@@ -78,21 +85,29 @@ public:
     }
 
     // 20260320 ZJH 重写 train() 递归设置训练模式
+    // 20260402 ZJH 传播到 GN 或 BN
     void train(bool bMode = true) override {
         m_bTraining = bMode;
-        m_conv1.train(bMode); m_bn1.train(bMode);
-        m_conv2.train(bMode); m_bn2.train(bMode);
+        m_conv1.train(bMode);
+        if (m_bUseGroupNorm) {  // 20260402 ZJH 训练模式传播到当前使用的归一化层
+            m_gn1.train(bMode); m_gn2.train(bMode);
+        } else {
+            m_bn1.train(bMode); m_bn2.train(bMode);
+        }
         m_dropout.train(bMode);
     }
 
 private:
     Conv2d m_conv1;
     Conv2d m_conv2;
-    BatchNorm2d m_bn1;
-    BatchNorm2d m_bn2;
+    BatchNorm2d m_bn1;      // 20260320 ZJH 第一层 BatchNorm
+    BatchNorm2d m_bn2;      // 20260320 ZJH 第二层 BatchNorm
+    GroupNorm2d m_gn1;      // 20260402 ZJH 第一层 GroupNorm（bUseGroupNorm=true 时使用）
+    GroupNorm2d m_gn2;      // 20260402 ZJH 第二层 GroupNorm（bUseGroupNorm=true 时使用）
     ReLU m_relu;
-    Dropout2d m_dropout{0.0f};
+    Dropout2d m_dropout;  // 20260329 ZJH 构造函数初始化列表中由 fDropout 初始化
     float m_fDropout = 0.0f;
+    bool m_bUseGroupNorm = false;  // 20260402 ZJH 归一化模式标志
 };
 
 // 20260320 ZJH UNetDecoderBlock — U-Net 解码器块
@@ -103,12 +118,16 @@ public:
     // 20260320 ZJH 构造函数
     // nIn: 来自上一层的通道数（上采样后与 skip 拼接前的通道数）
     // nOut: 输出通道数
-    UNetDecoderBlock(int nIn, int nOut)
+    // 20260402 ZJH bUseGroupNorm: 是否使用 GroupNorm 替代 BatchNorm
+    UNetDecoderBlock(int nIn, int nOut, bool bUseGroupNorm = false)
         : m_upsample(2),                            // 20260320 ZJH 2 倍双线性上采样
           m_conv1(nIn, nOut, 3, 1, 1, true),        // 20260320 ZJH 第一层卷积：拼接后的通道数 -> nOut
           m_conv2(nOut, nOut, 3, 1, 1, true),       // 20260320 ZJH 第二层卷积
           m_bn1(nOut),                               // 20260320 ZJH 第一层 BN
-          m_bn2(nOut)                                // 20260320 ZJH 第二层 BN
+          m_bn2(nOut),                               // 20260320 ZJH 第二层 BN
+          m_gn1(nOut),                               // 20260402 ZJH 第一层 GN（bUseGroupNorm=true 时使用）
+          m_gn2(nOut),                               // 20260402 ZJH 第二层 GN（bUseGroupNorm=true 时使用）
+          m_bUseGroupNorm(bUseGroupNorm)             // 20260402 ZJH 记录归一化模式
     {}
 
     // 20260320 ZJH forwardWithSkip — 带 skip 连接的解码器前向
@@ -119,10 +138,10 @@ public:
         auto x = m_upsample.forward(input);  // 20260320 ZJH 上采样: [N,C,H,W] -> [N,C,2H,2W]
         x = tensorConcatChannels(x, skip);   // 20260320 ZJH 拼接 skip 连接: [N,C+Cskip,2H,2W]
         x = m_conv1.forward(x);              // 20260320 ZJH 第一层卷积
-        x = m_bn1.forward(x);                // 20260320 ZJH 第一层 BN
+        x = m_bUseGroupNorm ? m_gn1.forward(x) : m_bn1.forward(x);  // 20260402 ZJH 根据标志选择归一化层
         x = m_relu.forward(x);               // 20260320 ZJH ReLU 激活
         x = m_conv2.forward(x);              // 20260320 ZJH 第二层卷积
-        x = m_bn2.forward(x);                // 20260320 ZJH 第二层 BN
+        x = m_bUseGroupNorm ? m_gn2.forward(x) : m_bn2.forward(x);  // 20260402 ZJH 根据标志选择归一化层
         x = m_relu.forward(x);               // 20260320 ZJH ReLU 激活
         return x;
     }
@@ -131,29 +150,32 @@ public:
     Tensor forward(const Tensor& input) override {
         auto x = m_upsample.forward(input);
         x = m_conv1.forward(x);
-        x = m_bn1.forward(x);
+        x = m_bUseGroupNorm ? m_gn1.forward(x) : m_bn1.forward(x);  // 20260402 ZJH 根据标志选择归一化层
         x = m_relu.forward(x);
         x = m_conv2.forward(x);
-        x = m_bn2.forward(x);
+        x = m_bUseGroupNorm ? m_gn2.forward(x) : m_bn2.forward(x);  // 20260402 ZJH 根据标志选择归一化层
         x = m_relu.forward(x);
         return x;
     }
 
     // 20260320 ZJH 重写 parameters()
+    // 20260402 ZJH 根据 m_bUseGroupNorm 收集 GN 或 BN 的参数
     std::vector<Tensor*> parameters() override {
         std::vector<Tensor*> vecResult;
         auto append = [&](std::vector<Tensor*> v) {
             vecResult.insert(vecResult.end(), v.begin(), v.end());
         };
         append(m_conv1.parameters());
-        append(m_bn1.parameters());
+        append(m_bUseGroupNorm ? m_gn1.parameters() : m_bn1.parameters());  // 20260402 ZJH 选择归一化层参数
         append(m_conv2.parameters());
-        append(m_bn2.parameters());
+        append(m_bUseGroupNorm ? m_gn2.parameters() : m_bn2.parameters());  // 20260402 ZJH 选择归一化层参数
         return vecResult;
     }
 
     // 20260326 ZJH 重写 buffers() 收集 BN running stats
+    // 20260402 ZJH GroupNorm 无 running stats，返回空
     std::vector<Tensor*> buffers() override {
+        if (m_bUseGroupNorm) return {};  // 20260402 ZJH GN 没有 running stats
         std::vector<Tensor*> vecResult;
         auto append = [&](std::vector<Tensor*> v) {
             vecResult.insert(vecResult.end(), v.begin(), v.end());
@@ -164,21 +186,27 @@ public:
     }
 
     // 20260320 ZJH 重写 train()
+    // 20260402 ZJH 传播到 GN 或 BN
     void train(bool bMode = true) override {
         m_bTraining = bMode;
         m_conv1.train(bMode);
-        m_bn1.train(bMode);
-        m_conv2.train(bMode);
-        m_bn2.train(bMode);
+        if (m_bUseGroupNorm) {  // 20260402 ZJH 训练模式传播到当前使用的归一化层
+            m_gn1.train(bMode); m_gn2.train(bMode);
+        } else {
+            m_bn1.train(bMode); m_bn2.train(bMode);
+        }
     }
 
 private:
-    Upsample m_upsample;  // 20260320 ZJH 2 倍双线性上采样
-    Conv2d m_conv1;        // 20260320 ZJH 第一层卷积
-    Conv2d m_conv2;        // 20260320 ZJH 第二层卷积
-    BatchNorm2d m_bn1;     // 20260320 ZJH 第一层 BN
-    BatchNorm2d m_bn2;     // 20260320 ZJH 第二层 BN
-    ReLU m_relu;           // 20260320 ZJH ReLU 激活
+    Upsample m_upsample;   // 20260320 ZJH 2 倍双线性上采样
+    Conv2d m_conv1;         // 20260320 ZJH 第一层卷积
+    Conv2d m_conv2;         // 20260320 ZJH 第二层卷积
+    BatchNorm2d m_bn1;      // 20260320 ZJH 第一层 BN
+    BatchNorm2d m_bn2;      // 20260320 ZJH 第二层 BN
+    GroupNorm2d m_gn1;      // 20260402 ZJH 第一层 GroupNorm（bUseGroupNorm=true 时使用）
+    GroupNorm2d m_gn2;      // 20260402 ZJH 第二层 GroupNorm（bUseGroupNorm=true 时使用）
+    ReLU m_relu;            // 20260320 ZJH ReLU 激活
+    bool m_bUseGroupNorm = false;  // 20260402 ZJH 归一化模式标志
 };
 
 // 20260320 ZJH UNet — U-Net 语义分割网络
@@ -192,18 +220,24 @@ public:
     // 20260320 ZJH 构造函数
     // nInChannels: 输入通道数，默认 1（灰度图）
     // nNumClasses: 输出类别数，默认 2
-    UNet(int nInChannels = 1, int nNumClasses = 2)
-        : m_enc1(nInChannels, 64, 0.0f),  // 20260320 ZJH 浅层不 Dropout
-          m_enc2(64, 128, 0.0f),
-          m_enc3(128, 256, 0.1f),          // 20260320 ZJH 深层渐增 Dropout
-          m_enc4(256, 512, 0.2f),
-          m_bottleneck(512, 1024, 0.3f),   // 20260320 ZJH 瓶颈层最高 Dropout
-          m_dec4(1024 + 512, 512),    // 20260320 ZJH 解码器第 4 层: 1024+512->512
-          m_dec3(512 + 256, 256),     // 20260320 ZJH 解码器第 3 层: 512+256->256
-          m_dec2(256 + 128, 128),     // 20260320 ZJH 解码器第 2 层: 256+128->128
-          m_dec1(128 + 64, 64),       // 20260320 ZJH 解码器第 1 层: 128+64->64
-          m_finalConv(64, nNumClasses, 1, 1, 0, true),  // 20260320 ZJH 1x1 卷积: 64->nClasses
-          m_pool(2)                   // 20260320 ZJH 2x2 最大池化，stride=2
+    // 20260329 ZJH nBaseChannels: 基础通道数，控制模型大小
+    //   64（默认）= 标准 UNet（28M params），适合大数据集
+    //   32 = 轻量 UNet（7M params），适合 <100 张图，速度 ~4x
+    //   16 = 极轻量 UNet（1.8M params），适合 <30 张图，速度 ~16x
+    // 20260402 ZJH bUseGroupNorm: 是否在所有编码器/解码器/瓶颈层使用 GroupNorm 替代 BatchNorm
+    UNet(int nInChannels = 1, int nNumClasses = 2, int nBaseChannels = 64, bool bUseGroupNorm = false)
+        : m_enc1(nInChannels, nBaseChannels, 0.0f, bUseGroupNorm),  // 20260320 ZJH 浅层不 Dropout
+          m_enc2(nBaseChannels, nBaseChannels * 2, 0.0f, bUseGroupNorm),
+          m_enc3(nBaseChannels * 2, nBaseChannels * 4, 0.1f, bUseGroupNorm),          // 20260320 ZJH 深层渐增 Dropout
+          m_enc4(nBaseChannels * 4, nBaseChannels * 8, 0.2f, bUseGroupNorm),
+          m_bottleneck(nBaseChannels * 8, nBaseChannels * 16, 0.3f, bUseGroupNorm),   // 20260320 ZJH 瓶颈层最高 Dropout
+          m_dec4(nBaseChannels * 16 + nBaseChannels * 8, nBaseChannels * 8, bUseGroupNorm),
+          m_dec3(nBaseChannels * 8 + nBaseChannels * 4, nBaseChannels * 4, bUseGroupNorm),
+          m_dec2(nBaseChannels * 4 + nBaseChannels * 2, nBaseChannels * 2, bUseGroupNorm),
+          m_dec1(nBaseChannels * 2 + nBaseChannels, nBaseChannels, bUseGroupNorm),
+          m_finalConv(nBaseChannels, nNumClasses, 1, 1, 0, true),  // 20260320 ZJH 1x1 卷积
+          m_pool(2),                   // 20260320 ZJH 2x2 最大池化，stride=2
+          m_bUseGroupNorm(bUseGroupNorm)  // 20260402 ZJH 记录归一化模式
     {}
 
     // 20260320 ZJH forward — U-Net 前向传播
@@ -296,6 +330,7 @@ private:
     UNetDecoderBlock m_dec4, m_dec3, m_dec2, m_dec1;   // 20260320 ZJH 解码器
     Conv2d m_finalConv;                                 // 20260320 ZJH 1x1 分类卷积
     MaxPool2d m_pool;                                   // 20260320 ZJH 最大池化
+    bool m_bUseGroupNorm = false;                       // 20260402 ZJH 归一化模式标志
 };
 
 }  // namespace om

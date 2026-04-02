@@ -65,6 +65,18 @@ extern "C" {
                      float* pOutput,
                      int nBatch, int nCin, int nH, int nW,
                      int nCout, int nKH, int nKW, int nStride, int nPad);
+    // 20260331 ZJH 膨胀卷积 GPU 前向（im2col+GEMM，支持 dilation 和 groups）
+    int omCudaDilatedConv2d(const float* pInput, const float* pWeight, const float* pBias,
+                             float* pOutput,
+                             int nBatch, int nCin, int nH, int nW,
+                             int nCout, int nKH, int nKW,
+                             int nStride, int nPad, int nDilation, int nGroups);
+    // 20260331 ZJH 膨胀卷积反向权重梯度
+    int omCudaDilatedConv2dBackwardWeight(const float* pInput, const float* pGradOutput,
+                                           float* pGradWeight, float* pGradBias,
+                                           int nBatch, int nCin, int nH, int nW,
+                                           int nCout, int nKH, int nKW,
+                                           int nStride, int nPad, int nDilation);
     // 20260325 ZJH Conv2d 反向对输入求梯度（col2im + GEMM）
     int omCudaConv2dBackwardInput(const float* pGradOutput, const float* pWeight,
                                    float* pGradInput,
@@ -75,12 +87,28 @@ extern "C" {
                                     float* pGradWeight, float* pGradBias,
                                     int nBatch, int nCin, int nH, int nW,
                                     int nCout, int nKH, int nKW, int nStride, int nPad);
-    // 20260325 ZJH BatchNorm2d 反向（GPU 两遍 kernel）
+    // 20260330 ZJH BatchNorm2d 反向（GPU 两遍 kernel），新增 fEps 参数
     int omCudaBatchNorm2dBackward(const float* pGradOutput, const float* pInput,
                                    const float* pMean, const float* pInvStd,
                                    const float* pGamma,
                                    float* pGradInput, float* pGradGamma, float* pGradBeta,
-                                   int nBatch, int nChannels, int nH, int nW);
+                                   int nBatch, int nChannels, int nH, int nW,
+                                   float fEps = 1e-5f);
+
+    // 20260402 ZJH GroupNorm2d 前向声明
+    int omCudaGroupNorm2d(const float* pInput, float* pOutput,
+                          const float* pGamma, const float* pBeta,
+                          float* pSavedMean, float* pSavedInvStd,
+                          int nBatch, int nChannels, int nH, int nW,
+                          int nGroups, float fEps);
+
+    // 20260402 ZJH GroupNorm2d 反向声明
+    int omCudaGroupNorm2dBackward(const float* pGradOutput, const float* pInput,
+                                   const float* pMean, const float* pInvStd,
+                                   const float* pGamma,
+                                   float* pGradInput, float* pGradGamma, float* pGradBeta,
+                                   int nBatch, int nChannels, int nH, int nW,
+                                   int nGroups, float fEps);
 
     // ===== 池化 =====
     // 20260325 ZJH MaxPool2d 前向
@@ -222,6 +250,26 @@ extern "C" {
     // 20260328 ZJH Fused Dice Loss 反向：逐元素 logit 梯度
     int omCudaDiceLossBackward(const float* pSigmoidOut, const float* pTarget,
         const float* pStats, const float* pGradOutput, float* pGradLogits, int nCount);
+    // 20260329 ZJH Weighted PixelCE 前向：逐像素 softmax + 加权 CE（NCHW 原生）
+    int omCudaWeightedPixelCEForward(
+        const float* pLogits, const float* pTarget, const float* pClassWeights,
+        float* pSoftmax, float* pLoss, float* pStats,
+        int nPixels, int nClasses, int nSpatial);
+    // 20260329 ZJH Weighted PixelCE 反向：逐像素 logit 梯度
+    int omCudaWeightedPixelCEBackward(
+        const float* pSoftmax, const float* pTarget, const float* pClassWeights,
+        const float* pGradOutput, const float* pStats,
+        float* pGradLogits,
+        int nPixels, int nClasses, int nSpatial);
+
+    // ===== ViT Attention Kernels =====
+    // 20260330 ZJH QKV split + head rearrange + Q scaling
+    int omCudaQkvSplitHeads(const float* pQkv, float* pQ, float* pK, float* pV,
+                             int nBatch, int nSeqLen, int nHeads, int nHeadDim,
+                             float fScale);
+    // 20260330 ZJH Merge heads 反向重排
+    int omCudaMergeHeads(const float* pIn, float* pOut,
+                          int nBatch, int nSeqLen, int nHeads, int nHeadDim);
 }
 #endif
 
@@ -399,6 +447,32 @@ public:
 #endif
     }
 
+    // 20260331 ZJH 膨胀卷积 GPU 前向（im2col+GEMM，支持 dilation 和 groups）
+    static void dilatedConv2d(const float* pInput, const float* pWeight, const float* pBias,
+                               float* pOutput,
+                               int nBatch, int nCin, int nH, int nW,
+                               int nCout, int nKH, int nKW,
+                               int nStride, int nPad, int nDilation, int nGroups) {
+#ifdef OM_HAS_CUDA
+        omCudaDilatedConv2d(pInput, pWeight, pBias, pOutput,
+                            nBatch, nCin, nH, nW, nCout, nKH, nKW,
+                            nStride, nPad, nDilation, nGroups);
+#endif
+    }
+
+    // 20260331 ZJH 膨胀卷积反向权重梯度
+    static void dilatedConv2dBackwardWeight(const float* pInput, const float* pGradOutput,
+                                             float* pGradWeight, float* pGradBias,
+                                             int nBatch, int nCin, int nH, int nW,
+                                             int nCout, int nKH, int nKW,
+                                             int nStride, int nPad, int nDilation) {
+#ifdef OM_HAS_CUDA
+        omCudaDilatedConv2dBackwardWeight(pInput, pGradOutput, pGradWeight, pGradBias,
+                                           nBatch, nCin, nH, nW, nCout, nKH, nKW,
+                                           nStride, nPad, nDilation);
+#endif
+    }
+
     // 20260325 ZJH Conv2d 反向（对输入求梯度）— col2im + GEMM 完整实现
     static void conv2dBackwardInput(const float* pGradOutput, const float* pWeight,
                                     float* pGradInput,
@@ -507,17 +581,42 @@ public:
 #endif
     }
 
-    // 20260325 ZJH BatchNorm2d 反向：在 GPU 上计算 gradInput/gradGamma/gradBeta
+    // 20260330 ZJH BatchNorm2d 反向：在 GPU 上计算 gradInput/gradGamma/gradBeta
+    // 新增 fEps 参数，传递给 cuDNN 路径使用
     static void batchNorm2dBackward(const float* pGradOutput, const float* pInput,
                                     const float* pMean, const float* pInvStd,
                                     const float* pGamma,
                                     float* pGradInput, float* pGradGamma, float* pGradBeta,
-                                    int nBatch, int nChannels, int nH, int nW) {
+                                    int nBatch, int nChannels, int nH, int nW,
+                                    float fEps = 1e-5f) {
 #ifdef OM_HAS_CUDA
         omCudaBatchNorm2dBackward(pGradOutput, pInput, pMean, pInvStd, pGamma,
                                   pGradInput, pGradGamma, pGradBeta,
-                                  nBatch, nChannels, nH, nW);
+                                  nBatch, nChannels, nH, nW, fEps);
 #endif
+    }
+
+    // 20260402 ZJH GroupNorm2d 前向 — 调用 CUDA kernel
+    static void groupNorm2d(const float* pInput, float* pOutput,
+                            const float* pGamma, const float* pBeta,
+                            float* pSavedMean, float* pSavedInvStd,
+                            int nBatch, int nChannels, int nH, int nW,
+                            int nGroups, float fEps) {
+        omCudaGroupNorm2d(pInput, pOutput, pGamma, pBeta,
+                          pSavedMean, pSavedInvStd,
+                          nBatch, nChannels, nH, nW, nGroups, fEps);
+    }
+
+    // 20260402 ZJH GroupNorm2d 反向 — 调用 CUDA kernel
+    static void groupNorm2dBackward(const float* pGradOutput, const float* pInput,
+                                     const float* pMean, const float* pInvStd,
+                                     const float* pGamma,
+                                     float* pGradInput, float* pGradGamma, float* pGradBeta,
+                                     int nBatch, int nChannels, int nH, int nW,
+                                     int nGroups, float fEps) {
+        omCudaGroupNorm2dBackward(pGradOutput, pInput, pMean, pInvStd, pGamma,
+                                   pGradInput, pGradGamma, pGradBeta,
+                                   nBatch, nChannels, nH, nW, nGroups, fEps);
     }
 
     // 20260325 ZJH LayerNorm 前向
@@ -803,6 +902,54 @@ public:
         const float* pStats, const float* pGradOutput, float* pGradLogits, int nCount) {
 #ifdef OM_HAS_CUDA
         omCudaDiceLossBackward(pSigmoidOut, pTarget, pStats, pGradOutput, pGradLogits, nCount);  // 20260328 ZJH 调用 fused 反向 kernel
+#endif
+    }
+
+    // 20260329 ZJH Weighted Pixel-wise CE 前向：分割模型 GPU 全驻留损失
+    // pLogits [B,C,H,W] 模型输出, pTarget [N] int 类别 ID (N=B*H*W)
+    // pClassWeights [C] 反频率权重, pSoftmax [B,C,H,W] 输出（反向需要）
+    // pLoss [1] 归一化损失, pStats [2] 临时缓冲 {lossSum, weightSum}（反向需要）
+    static void weightedPixelCEForward(
+        const float* pLogits, const float* pTarget, const float* pClassWeights,
+        float* pSoftmax, float* pLoss, float* pStats,
+        int nPixels, int nClasses, int nSpatial) {
+#ifdef OM_HAS_CUDA
+        omCudaWeightedPixelCEForward(pLogits, pTarget, pClassWeights,
+            pSoftmax, pLoss, pStats, nPixels, nClasses, nSpatial);  // 20260329 ZJH 调用 fused 前向 kernel
+#endif
+    }
+
+    // 20260329 ZJH Weighted Pixel-wise CE 反向：逐像素 logit 梯度
+    // pSoftmax [B,C,H,W] 前向保存, pTarget [N] 类别 ID, pClassWeights [C]
+    // pGradOutput [1] 上游梯度, pStats [2] 前向统计, pGradLogits [B,C,H,W] 输出
+    static void weightedPixelCEBackward(
+        const float* pSoftmax, const float* pTarget, const float* pClassWeights,
+        const float* pGradOutput, const float* pStats,
+        float* pGradLogits,
+        int nPixels, int nClasses, int nSpatial) {
+#ifdef OM_HAS_CUDA
+        omCudaWeightedPixelCEBackward(pSoftmax, pTarget, pClassWeights,
+            pGradOutput, pStats, pGradLogits, nPixels, nClasses, nSpatial);  // 20260329 ZJH 调用 fused 反向 kernel
+#endif
+    }
+
+    // ===== ViT Attention Kernels =====
+
+    // 20260330 ZJH QKV split + head rearrange: [B*S, 3D] → Q[BH,S,d] K[BH,S,d] V[BH,S,d]
+    // Q 自动乘以 fScale 消除后续缩放步骤，全 GPU 操作无 D2H
+    static void qkvSplitHeads(const float* pQkv, float* pQ, float* pK, float* pV,
+                               int nBatch, int nSeqLen, int nHeads, int nHeadDim,
+                               float fScale) {
+#ifdef OM_HAS_CUDA
+        omCudaQkvSplitHeads(pQkv, pQ, pK, pV, nBatch, nSeqLen, nHeads, nHeadDim, fScale);
+#endif
+    }
+
+    // 20260330 ZJH Merge heads: [BH, S, d] → [B*S, D]
+    static void mergeHeads(const float* pIn, float* pOut,
+                            int nBatch, int nSeqLen, int nHeads, int nHeadDim) {
+#ifdef OM_HAS_CUDA
+        omCudaMergeHeads(pIn, pOut, nBatch, nSeqLen, nHeads, nHeadDim);
 #endif
     }
 };

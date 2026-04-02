@@ -17,7 +17,9 @@ import om.engine.module;
 import om.engine.conv;
 import om.engine.activations;
 import om.engine.linear;
+import om.engine.mobilenet;
 import om.hal.cpu_backend;
+import om.hal.cuda_backend;
 
 export namespace om {
 
@@ -29,41 +31,78 @@ export namespace om {
 // Conv3x3 → BN → ReLU → Conv3x3 → BN → + shortcut → ReLU
 class ResBlock : public Module {
 public:
-    ResBlock(int nIn, int nOut, int nStride = 1, float fDropout = 0.0f)
+    // 20260331 ZJH 修复: m_convDs/m_bnDs 必须在初始化列表中构造正确尺寸
+    // 不能在构造函数体中 operator= 覆盖，因为 registerParameter 存的是 &m_weight
+    // move assignment 不更新内部自指针 → 导致 parameters() 返回悬空指针（BAD PARAM）
+    // 20260402 ZJH 新增 bUseGroupNorm 参数，支持 GN/BN 双模式切换
+    ResBlock(int nIn, int nOut, int nStride = 1, float fDropout = 0.0f, bool bUseGroupNorm = false)
         : m_conv1(nIn, nOut, 3, nStride, 1, true), m_bn1(nOut),
           m_conv2(nOut, nOut, 3, 1, 1, true), m_bn2(nOut),
-          m_dropout(fDropout), m_bDownsample(nStride != 1 || nIn != nOut)
+          m_dropout(fDropout), m_fDrop(fDropout),
+          m_bDownsample(nStride != 1 || nIn != nOut),
+          m_convDs(nIn, nOut, 1, nStride, 0, false), m_bnDs(nOut),
+          m_gn1(nOut), m_gn2(nOut), m_gnDs(nOut),  // 20260402 ZJH GroupNorm 实例（nGroups 自动调整）
+          m_bUseGroupNorm(bUseGroupNorm)            // 20260402 ZJH 记录归一化模式
     {
-        if (m_bDownsample) {
-            m_convDs = Conv2d(nIn, nOut, 1, nStride, 0, false);
-            m_bnDs = BatchNorm2d(nOut);
-        }
     }
 
     Tensor forward(const Tensor& input) override {
-        auto out = m_relu.forward(m_bn1.forward(m_conv1.forward(input)));
+        // 20260402 ZJH 根据 m_bUseGroupNorm 选择归一化层（GN 或 BN）
+        auto out = m_relu.forward((m_bUseGroupNorm ? m_gn1 : m_bn1).forward(m_conv1.forward(input)));
         if (m_dropout.isTraining() && m_fDrop > 0.01f) out = m_dropout.forward(out);
-        out = m_bn2.forward(m_conv2.forward(out));
-        auto shortcut = m_bDownsample ? m_bnDs.forward(m_convDs.forward(input)) : input;
+        out = (m_bUseGroupNorm ? m_gn2 : m_bn2).forward(m_conv2.forward(out));
+        auto shortcut = m_bDownsample
+            ? (m_bUseGroupNorm ? m_gnDs : m_bnDs).forward(m_convDs.forward(input))
+            : input;
         out = tensorAdd(out, shortcut);
         return m_relu.forward(out);
     }
 
+    // 20260402 ZJH 根据 m_bUseGroupNorm 收集 GN 或 BN 的参数
     std::vector<Tensor*> parameters() override {
         std::vector<Tensor*> v;
-        for (auto* p : m_conv1.parameters()) v.push_back(p);
-        for (auto* p : m_bn1.parameters()) v.push_back(p);
-        for (auto* p : m_conv2.parameters()) v.push_back(p);
-        for (auto* p : m_bn2.parameters()) v.push_back(p);
+        // 20260402 ZJH 辅助 lambda: 追加子模块参数
+        auto append = [&](std::vector<Tensor*> ps) { for (auto* p : ps) v.push_back(p); };
+        append(m_conv1.parameters());
+        append(m_bUseGroupNorm ? m_gn1.parameters() : m_bn1.parameters());  // 20260402 ZJH 选择归一化层参数
+        append(m_conv2.parameters());
+        append(m_bUseGroupNorm ? m_gn2.parameters() : m_bn2.parameters());  // 20260402 ZJH 选择归一化层参数
         if (m_bDownsample) {
-            for (auto* p : m_convDs.parameters()) v.push_back(p);
-            for (auto* p : m_bnDs.parameters()) v.push_back(p);
+            append(m_convDs.parameters());
+            append(m_bUseGroupNorm ? m_gnDs.parameters() : m_bnDs.parameters());  // 20260402 ZJH 下采样归一化
         }
         return v;
     }
 
+    // 20260331 ZJH 重写 namedParameters() 收集所有子层命名参数
+    // 20260402 ZJH 支持 GN/BN 双模式（命名使用 gn1/gn2/gnDs 或 bn1/bn2/bnDs）
+    std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") override {
+        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        // 20260331 ZJH 辅助 lambda：为子层参数添加前缀
+        auto appendParams = [&](const std::string& strSubPrefix, Module& mod) {
+            std::string strFullPrefix = strPrefix.empty() ? strSubPrefix : strPrefix + "." + strSubPrefix;
+            auto vecParams = mod.namedParameters(strFullPrefix);
+            vecResult.insert(vecResult.end(), vecParams.begin(), vecParams.end());
+        };
+        appendParams("conv1", m_conv1);  // 20260331 ZJH 第一层 3x3 卷积参数
+        // 20260402 ZJH 根据归一化模式选择 GN 或 BN 命名参数
+        if (m_bUseGroupNorm) appendParams("gn1", m_gn1);
+        else                 appendParams("bn1", m_bn1);
+        appendParams("conv2", m_conv2);  // 20260331 ZJH 第二层 3x3 卷积参数
+        if (m_bUseGroupNorm) appendParams("gn2", m_gn2);
+        else                 appendParams("bn2", m_bn2);
+        if (m_bDownsample) {
+            appendParams("convDs", m_convDs);  // 20260331 ZJH 下采样 1x1 卷积参数
+            if (m_bUseGroupNorm) appendParams("gnDs", m_gnDs);
+            else                 appendParams("bnDs", m_bnDs);
+        }
+        return vecResult;
+    }
+
     // 20260328 ZJH 重写 buffers() 收集 BN running stats
+    // 20260402 ZJH GN 没有 running stats，直接返回空
     std::vector<Tensor*> buffers() override {
+        if (m_bUseGroupNorm) return {};  // 20260402 ZJH GN 没有 running stats
         std::vector<Tensor*> v;
         for (auto* p : m_bn1.buffers()) v.push_back(p);  // 20260328 ZJH bn1 缓冲区
         for (auto* p : m_bn2.buffers()) v.push_back(p);  // 20260328 ZJH bn2 缓冲区
@@ -74,7 +113,9 @@ public:
     }
 
     // 20260328 ZJH 重写 namedBuffers() 收集 BN 命名缓冲区
+    // 20260402 ZJH GN 模式下返回空（GN 无 running stats）
     std::vector<std::pair<std::string, Tensor*>> namedBuffers(const std::string& strPrefix = "") override {
+        if (m_bUseGroupNorm) return {};  // 20260402 ZJH GN 没有 running stats
         std::vector<std::pair<std::string, Tensor*>> vecResult;
         auto appendBufs = [&](const std::string& strSubPrefix, Module& mod) {
             std::string strFullPrefix = strPrefix.empty() ? strSubPrefix : strPrefix + "." + strSubPrefix;
@@ -91,9 +132,16 @@ public:
 
     void train(bool b = true) override {
         m_bTraining = b;
-        m_conv1.train(b); m_bn1.train(b); m_conv2.train(b); m_bn2.train(b);
+        m_conv1.train(b); m_conv2.train(b);
         m_dropout.train(b);
-        if (m_bDownsample) { m_convDs.train(b); m_bnDs.train(b); }
+        // 20260402 ZJH 训练模式传播到当前使用的归一化层
+        if (m_bUseGroupNorm) {
+            m_gn1.train(b); m_gn2.train(b);
+            if (m_bDownsample) m_gnDs.train(b);
+        } else {
+            m_bn1.train(b); m_bn2.train(b);
+            if (m_bDownsample) m_bnDs.train(b);
+        }
     }
 
 private:
@@ -102,8 +150,12 @@ private:
     Dropout2d m_dropout;
     float m_fDrop = 0.0f;
     bool m_bDownsample;
-    Conv2d m_convDs{1,1,1};
-    BatchNorm2d m_bnDs{1};
+    Conv2d m_convDs;       // 20260331 ZJH 在初始化列表中构造（不再使用默认初始化器）
+    BatchNorm2d m_bnDs;    // 20260331 ZJH 在初始化列表中构造
+    GroupNorm2d m_gn1;     // 20260402 ZJH 第一层 GroupNorm（bUseGroupNorm=true 时使用）
+    GroupNorm2d m_gn2;     // 20260402 ZJH 第二层 GroupNorm（bUseGroupNorm=true 时使用）
+    GroupNorm2d m_gnDs;    // 20260402 ZJH 下采样 GroupNorm（bUseGroupNorm=true 时使用）
+    bool m_bUseGroupNorm = false;  // 20260402 ZJH 归一化模式标志
     ReLU m_relu;
 };
 
@@ -117,7 +169,8 @@ private:
 // 所有分支输出拼接后经 1x1 conv + BN + Dropout 降维
 class ASPPModule : public Module {
 public:
-    ASPPModule(int nInChannels, int nOutChannels = 256)
+    // 20260402 ZJH 新增 bUseGroupNorm 参数，支持 GN/BN 双模式切换
+    ASPPModule(int nInChannels, int nOutChannels = 256, bool bUseGroupNorm = false)
         : m_nIn(nInChannels), m_nOut(nOutChannels),
           // 20260320 ZJH 分支 1：1x1 卷积
           m_conv1x1(nInChannels, nOutChannels, 1, 1, 0, true), m_bn1(nOutChannels),
@@ -129,7 +182,11 @@ public:
           m_convPool(nInChannels, nOutChannels, 1, 1, 0, true), m_bnPool(nOutChannels),
           // 20260320 ZJH 合并后 1x1 降维
           m_convMerge(nOutChannels * 5, nOutChannels, 1, 1, 0, true), m_bnMerge(nOutChannels),
-          m_dropout(0.5f)
+          m_dropout(0.5f),
+          // 20260402 ZJH GroupNorm 实例（nGroups 自动调整）
+          m_gn1(nOutChannels), m_gn6(nOutChannels), m_gn12(nOutChannels), m_gn18(nOutChannels),
+          m_gnPool(nOutChannels), m_gnMerge(nOutChannels),
+          m_bUseGroupNorm(bUseGroupNorm)  // 20260402 ZJH 记录归一化模式
     {}
 
     Tensor forward(const Tensor& input) override {
@@ -138,81 +195,109 @@ public:
         int nH = ci.shape(2);
         int nW = ci.shape(3);
 
+        // 20260402 ZJH 辅助 lambda: 选择 GN 或 BN 归一化层
+        auto norm = [&](auto& gn, auto& bn) -> Module& { return m_bUseGroupNorm ? static_cast<Module&>(gn) : static_cast<Module&>(bn); };
+
         // 20260320 ZJH 分支 1：1x1 conv
-        auto b1 = m_relu.forward(m_bn1.forward(m_conv1x1.forward(ci)));
+        auto b1 = m_relu.forward(norm(m_gn1, m_bn1).forward(m_conv1x1.forward(ci)));
 
         // 20260320 ZJH 分支 2-4：膨胀卷积（自动 padding 保持尺寸）
-        auto b2 = m_relu.forward(m_bn6.forward(m_atrous6.forward(ci)));
-        auto b3 = m_relu.forward(m_bn12.forward(m_atrous12.forward(ci)));
-        auto b4 = m_relu.forward(m_bn18.forward(m_atrous18.forward(ci)));
+        auto b2 = m_relu.forward(norm(m_gn6, m_bn6).forward(m_atrous6.forward(ci)));
+        auto b3 = m_relu.forward(norm(m_gn12, m_bn12).forward(m_atrous12.forward(ci)));
+        auto b4 = m_relu.forward(norm(m_gn18, m_bn18).forward(m_atrous18.forward(ci)));
 
-        // 20260320 ZJH 分支 5：全局平均池化 → 1x1 conv → 上采样到原始尺寸
-        auto pooled = Tensor::zeros({nBatch, m_nIn, 1, 1});
-        CPUBackend::globalAvgPool2d(ci.floatDataPtr(), pooled.mutableFloatDataPtr(),
-                                     nBatch, m_nIn, nH, nW);
-        auto b5Conv = m_relu.forward(m_bnPool.forward(m_convPool.forward(pooled)));
-        // 20260320 ZJH 最近邻上采样到输入尺寸
-        auto b5 = Tensor::zeros({nBatch, m_nOut, nH, nW});
-        {
-            const float* pSrc = b5Conv.contiguous().floatDataPtr();
-            float* pDst = b5.mutableFloatDataPtr();
-            for (int n = 0; n < nBatch; ++n)
-            for (int c = 0; c < m_nOut; ++c) {
-                float fVal = pSrc[n * m_nOut + c];
-                for (int s = 0; s < nH * nW; ++s) pDst[(n * m_nOut + c) * nH * nW + s] = fVal;
-            }
+        // 20260331 ZJH 分支 5：全局平均池化 → 1x1 conv → 双线性上采样到原始尺寸
+        // GPU: avgPool2d(kernel=H, stride=H) → [B,C,1,1]，零 D2H
+        // CPU: CPUBackend::globalAvgPool2d
+        Tensor pooled;
+        if (isCudaTensor(ci)) {
+            pooled = Tensor::zeros({nBatch, m_nIn, 1, 1}, DeviceType::CUDA);
+            CUDABackend::avgPool2d(ci.floatDataPtr(), pooled.mutableFloatDataPtr(),
+                                    nBatch, m_nIn, nH, nW, nH, nW, nH, 0);
+        } else {
+            pooled = Tensor::zeros({nBatch, m_nIn, 1, 1});
+            CPUBackend::globalAvgPool2d(ci.floatDataPtr(), pooled.mutableFloatDataPtr(),
+                                         nBatch, m_nIn, nH, nW);
         }
+        auto b5Conv = m_relu.forward(norm(m_gnPool, m_bnPool).forward(m_convPool.forward(pooled)));
+        // 20260331 ZJH 双线性上采样 [B,C,1,1] → [B,C,nH,nW]（设备无关）
+        auto b5 = tensorUpsampleBilinear(b5Conv, nH);
 
-        // 20260320 ZJH 裁剪所有分支到最小 HW（膨胀卷积可能导致尺寸不同）
-        int nMinH = std::min({b1.shape(2), b2.shape(2), b3.shape(2), b4.shape(2), nH});
-        int nMinW = std::min({b1.shape(3), b2.shape(3), b3.shape(3), b4.shape(3), nW});
+        // 20260331 ZJH 裁剪所有分支到最小 HW（膨胀卷积可能导致尺寸不同）
+        int nMinH = std::min({b1.shape(2), b2.shape(2), b3.shape(2), b4.shape(2), b5.shape(2)});
+        int nMinW = std::min({b1.shape(3), b2.shape(3), b3.shape(3), b4.shape(3), b5.shape(3)});
 
-        // 20260320 ZJH 5 通道拼接
-        auto concat = Tensor::zeros({nBatch, m_nOut * 5, nMinH, nMinW});
-        {
-            float* pOut = concat.mutableFloatDataPtr();
-            auto copyBranch = [&](const Tensor& src, int nChannelOffset) {
-                auto cs = src.contiguous();
-                const float* pS = cs.floatDataPtr();
-                int nSrcH = src.shape(2), nSrcW = src.shape(3);
-                for (int n = 0; n < nBatch; ++n)
-                for (int c = 0; c < m_nOut; ++c)
-                for (int h = 0; h < nMinH; ++h)
-                for (int w = 0; w < nMinW; ++w)
-                    pOut[((n * m_nOut * 5 + nChannelOffset + c) * nMinH + h) * nMinW + w] =
-                        pS[((n * m_nOut + c) * nSrcH + h) * nSrcW + w];
-            };
-            copyBranch(b1, 0);
-            copyBranch(b2, m_nOut);
-            copyBranch(b3, m_nOut * 2);
-            copyBranch(b4, m_nOut * 3);
-            copyBranch(b5, m_nOut * 4);
-        }
+        // 20260331 ZJH 裁剪辅助 lambda: 若 HW 不等于 nMinH×nMinW 则 slice 到目标尺寸
+        auto cropToMin = [&](Tensor t) -> Tensor {
+            if (t.shape(2) != nMinH) t = tensorSlice(t, 2, 0, nMinH);
+            if (t.shape(3) != nMinW) t = tensorSlice(t, 3, 0, nMinW);
+            return t;
+        };
 
-        // 20260320 ZJH 合并 1x1 + BN + ReLU + Dropout
-        auto merged = m_relu.forward(m_bnMerge.forward(m_convMerge.forward(concat)));
+        // 20260331 ZJH 5 分支通道拼接（设备无关，支持 autograd）
+        auto concat = tensorConcatChannels(cropToMin(b1), cropToMin(b2));
+        concat = tensorConcatChannels(concat, cropToMin(b3));
+        concat = tensorConcatChannels(concat, cropToMin(b4));
+        concat = tensorConcatChannels(concat, cropToMin(b5));
+
+        // 20260320 ZJH 合并 1x1 + BN/GN + ReLU + Dropout
+        auto merged = m_relu.forward(norm(m_gnMerge, m_bnMerge).forward(m_convMerge.forward(concat)));
         return m_dropout.forward(merged);
     }
 
+    // 20260402 ZJH 根据 m_bUseGroupNorm 收集 GN 或 BN 的参数
     std::vector<Tensor*> parameters() override {
         std::vector<Tensor*> v;
-        for (auto* p : m_conv1x1.parameters()) v.push_back(p);
-        for (auto* p : m_bn1.parameters()) v.push_back(p);
-        for (auto* p : m_atrous6.parameters()) v.push_back(p);
-        for (auto* p : m_bn6.parameters()) v.push_back(p);
-        for (auto* p : m_atrous12.parameters()) v.push_back(p);
-        for (auto* p : m_bn12.parameters()) v.push_back(p);
-        for (auto* p : m_atrous18.parameters()) v.push_back(p);
-        for (auto* p : m_bn18.parameters()) v.push_back(p);
-        for (auto* p : m_convPool.parameters()) v.push_back(p);
-        for (auto* p : m_bnPool.parameters()) v.push_back(p);
-        for (auto* p : m_convMerge.parameters()) v.push_back(p);
-        for (auto* p : m_bnMerge.parameters()) v.push_back(p);
+        auto append = [&](std::vector<Tensor*> ps) { for (auto* p : ps) v.push_back(p); };
+        append(m_conv1x1.parameters());
+        append(m_bUseGroupNorm ? m_gn1.parameters() : m_bn1.parameters());
+        append(m_atrous6.parameters());
+        append(m_bUseGroupNorm ? m_gn6.parameters() : m_bn6.parameters());
+        append(m_atrous12.parameters());
+        append(m_bUseGroupNorm ? m_gn12.parameters() : m_bn12.parameters());
+        append(m_atrous18.parameters());
+        append(m_bUseGroupNorm ? m_gn18.parameters() : m_bn18.parameters());
+        append(m_convPool.parameters());
+        append(m_bUseGroupNorm ? m_gnPool.parameters() : m_bnPool.parameters());
+        append(m_convMerge.parameters());
+        append(m_bUseGroupNorm ? m_gnMerge.parameters() : m_bnMerge.parameters());
         return v;
     }
 
+    // 20260331 ZJH 重写 namedParameters() 收集所有子层命名参数
+    // 20260402 ZJH 支持 GN/BN 双模式
+    std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") override {
+        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        auto appendParams = [&](const std::string& strSubPrefix, Module& mod) {
+            std::string strFullPrefix = strPrefix.empty() ? strSubPrefix : strPrefix + "." + strSubPrefix;
+            auto vecParams = mod.namedParameters(strFullPrefix);
+            vecResult.insert(vecResult.end(), vecParams.begin(), vecParams.end());
+        };
+        appendParams("conv1x1", m_conv1x1);    // 20260331 ZJH 1x1 分支
+        if (m_bUseGroupNorm) appendParams("gn1", m_gn1);
+        else                 appendParams("bn1", m_bn1);
+        appendParams("atrous6", m_atrous6);     // 20260331 ZJH 膨胀率 6 分支
+        if (m_bUseGroupNorm) appendParams("gn6", m_gn6);
+        else                 appendParams("bn6", m_bn6);
+        appendParams("atrous12", m_atrous12);   // 20260331 ZJH 膨胀率 12 分支
+        if (m_bUseGroupNorm) appendParams("gn12", m_gn12);
+        else                 appendParams("bn12", m_bn12);
+        appendParams("atrous18", m_atrous18);   // 20260331 ZJH 膨胀率 18 分支
+        if (m_bUseGroupNorm) appendParams("gn18", m_gn18);
+        else                 appendParams("bn18", m_bn18);
+        appendParams("convPool", m_convPool);   // 20260331 ZJH 全局池化分支
+        if (m_bUseGroupNorm) appendParams("gnPool", m_gnPool);
+        else                 appendParams("bnPool", m_bnPool);
+        appendParams("convMerge", m_convMerge); // 20260331 ZJH 合并 1x1
+        if (m_bUseGroupNorm) appendParams("gnMerge", m_gnMerge);
+        else                 appendParams("bnMerge", m_bnMerge);
+        return vecResult;
+    }
+
     // 20260328 ZJH 重写 buffers() 收集 BN running stats
+    // 20260402 ZJH GN 没有 running stats，直接返回空
     std::vector<Tensor*> buffers() override {
+        if (m_bUseGroupNorm) return {};  // 20260402 ZJH GN 没有 running stats
         std::vector<Tensor*> v;
         for (auto* p : m_bn1.buffers()) v.push_back(p);      // 20260328 ZJH bn1 缓冲区
         for (auto* p : m_bn6.buffers()) v.push_back(p);      // 20260328 ZJH bn6 缓冲区
@@ -224,7 +309,9 @@ public:
     }
 
     // 20260328 ZJH 重写 namedBuffers() 收集 BN 命名缓冲区
+    // 20260402 ZJH GN 模式下返回空
     std::vector<std::pair<std::string, Tensor*>> namedBuffers(const std::string& strPrefix = "") override {
+        if (m_bUseGroupNorm) return {};  // 20260402 ZJH GN 没有 running stats
         std::vector<std::pair<std::string, Tensor*>> vecResult;
         auto appendBufs = [&](const std::string& strSubPrefix, Module& mod) {
             std::string strFullPrefix = strPrefix.empty() ? strSubPrefix : strPrefix + "." + strSubPrefix;
@@ -239,8 +326,15 @@ public:
 
     void train(bool b = true) override {
         m_bTraining = b;
-        m_bn1.train(b); m_bn6.train(b); m_bn12.train(b); m_bn18.train(b);
-        m_bnPool.train(b); m_bnMerge.train(b); m_dropout.train(b);
+        m_dropout.train(b);
+        // 20260402 ZJH 训练模式传播到当前使用的归一化层
+        if (m_bUseGroupNorm) {
+            m_gn1.train(b); m_gn6.train(b); m_gn12.train(b); m_gn18.train(b);
+            m_gnPool.train(b); m_gnMerge.train(b);
+        } else {
+            m_bn1.train(b); m_bn6.train(b); m_bn12.train(b); m_bn18.train(b);
+            m_bnPool.train(b); m_bnMerge.train(b);
+        }
     }
 
 private:
@@ -254,6 +348,10 @@ private:
     Conv2d m_convMerge;
     BatchNorm2d m_bnMerge;
     Dropout2d m_dropout;
+    // 20260402 ZJH GroupNorm 实例（bUseGroupNorm=true 时使用）
+    GroupNorm2d m_gn1, m_gn6, m_gn12, m_gn18;
+    GroupNorm2d m_gnPool, m_gnMerge;
+    bool m_bUseGroupNorm = false;  // 20260402 ZJH 归一化模式标志
     ReLU m_relu;
 };
 
@@ -261,31 +359,33 @@ private:
 // ResNet 风格编码器（4 组残差块 + stride 16）→ ASPP → 解码器（低级特征融合 + 上采样）
 class DeepLabV3 : public Module {
 public:
-    DeepLabV3(int nInChannels = 1, int nNumClasses = 2)
+    // 20260402 ZJH 新增 bUseGroupNorm 参数，支持 GN/BN 双模式切换
+    DeepLabV3(int nInChannels = 1, int nNumClasses = 2, bool bUseGroupNorm = false)
         : m_nNumClasses(nNumClasses),
           // 20260320 ZJH ResNet 风格编码器
           m_stem(nInChannels, 64, 3, 1, 1, true), m_bnStem(64),
-          m_layer1_0(64, 64, 1, 0.1f), m_layer1_1(64, 64, 1, 0.1f),
-          m_layer2_0(64, 128, 2, 0.1f), m_layer2_1(128, 128, 1, 0.1f),
-          m_layer3_0(128, 256, 2, 0.1f), m_layer3_1(256, 256, 1, 0.1f),
-          m_layer4_0(256, 512, 1, 0.2f), m_layer4_1(512, 512, 1, 0.2f),  // stride=1 保持分辨率
-          // 20260320 ZJH ASPP
-          m_aspp(512, 256),
-          // 20260320 ZJH 解码器：低级特征（layer1 输出 64ch）融合
-          m_lowConv(64, 48, 1, 1, 0, true), m_bnLow(48),
+          // 20260402 ZJH 传递 bUseGroupNorm 给 ResBlock
+          m_layer1_0(64, 64, 1, 0.1f, bUseGroupNorm), m_layer1_1(64, 64, 1, 0.1f, bUseGroupNorm),
+          m_layer2_0(64, 128, 2, 0.1f, bUseGroupNorm), m_layer2_1(128, 128, 1, 0.1f, bUseGroupNorm),
+          m_layer3_0(128, 256, 2, 0.1f, bUseGroupNorm), m_layer3_1(256, 256, 1, 0.1f, bUseGroupNorm),
+          m_layer4_0(256, 512, 1, 0.2f, bUseGroupNorm), m_layer4_1(512, 512, 1, 0.2f, bUseGroupNorm),
+          // 20260320 ZJH ASPP（20260402 ZJH 传递 bUseGroupNorm）
+          m_aspp(512, 256, bUseGroupNorm),
+          // 20260331 ZJH 解码器：低级特征改用 layer2 输出（128ch, H/2 分辨率）
+          m_lowConv(128, 48, 1, 1, 0, true), m_bnLow(48),
           m_decConv1(256 + 48, 256, 3, 1, 1, true), m_bnDec1(256),
           m_decConv2(256, 256, 3, 1, 1, true), m_bnDec2(256),
           m_decDropout(0.5f),
-          m_classifier(256, nNumClasses, 1, 1, 0, true)
+          m_classifier(256, nNumClasses, 1, 1, 0, true),
+          // 20260402 ZJH GroupNorm 实例（解码器直属 BN 的对应 GN）
+          m_gnStem(64), m_gnLow(48), m_gnDec1(256), m_gnDec2(256),
+          m_bUseGroupNorm(bUseGroupNorm)  // 20260402 ZJH 记录归一化模式
     {}
 
     Tensor forward(const Tensor& input) override {
-        int nBatch = input.shape(0);
-        int nH = input.shape(2);
-        int nW = input.shape(3);
-
         // 20260320 ZJH 编码器
-        auto stem = m_relu.forward(m_bnStem.forward(m_stem.forward(input)));  // [N,64,H,W]
+        // 20260402 ZJH stem 归一化根据 m_bUseGroupNorm 选择 GN 或 BN
+        auto stem = m_relu.forward((m_bUseGroupNorm ? m_gnStem : m_bnStem).forward(m_stem.forward(input)));  // [N,64,H,W]
         auto l1 = m_layer1_1.forward(m_layer1_0.forward(stem));  // [N,64,H,W] 低级特征
         auto l2 = m_layer2_1.forward(m_layer2_0.forward(l1));    // [N,128,H/2,W/2]
         auto l3 = m_layer3_1.forward(m_layer3_0.forward(l2));    // [N,256,H/4,W/4]
@@ -293,101 +393,128 @@ public:
 
         // 20260320 ZJH ASPP
         auto asppOut = m_aspp.forward(l4);  // [N,256,H',W']
-        int nAH = asppOut.shape(2), nAW = asppOut.shape(3);
+        int nAH = asppOut.shape(2);  // 20260331 ZJH ASPP 输出空间高度
 
-        // 20260320 ZJH 上采样 ASPP 输出到低级特征尺寸
-        int nLowH = l1.shape(2), nLowW = l1.shape(3);
+        // 20260331 ZJH 上采样 ASPP 输出到低级特征尺寸（使用 l2 而非 l1）
+        // l2 在 H/2 分辨率，decoder im2col 缓冲减少 4 倍（684MB→171MB）
+        int nLowH = l2.shape(2);  // 20260331 ZJH 低级特征空间高度（H/2）
 
-        // 20260320 ZJH 低级特征 1x1 降维
-        auto lowFeat = m_relu.forward(m_bnLow.forward(m_lowConv.forward(l1)));  // [N,48,H,W]
+        // 20260331 ZJH 低级特征 1x1 降维（l2: 128ch → 48ch）
+        // 20260402 ZJH 根据 m_bUseGroupNorm 选择 GN 或 BN
+        auto lowFeat = m_relu.forward((m_bUseGroupNorm ? m_gnLow : m_bnLow).forward(m_lowConv.forward(l2)));  // [N,48,H/2,W/2]
 
-        // 20260320 ZJH 上采样 ASPP 到低级特征尺寸（最近邻）
-        auto asppUp = Tensor::zeros({nBatch, 256, nLowH, nLowW});
-        {
-            auto cA = asppOut.contiguous();
-            const float* pA = cA.floatDataPtr();
-            float* pU = asppUp.mutableFloatDataPtr();
-            for (int n = 0; n < nBatch; ++n)
-            for (int c = 0; c < 256; ++c)
-            for (int h = 0; h < nLowH; ++h)
-            for (int w = 0; w < nLowW; ++w) {
-                int nSrcH = h * nAH / nLowH;
-                int nSrcW = w * nAW / nLowW;
-                pU[((n * 256 + c) * nLowH + h) * nLowW + w] = pA[((n * 256 + c) * nAH + nSrcH) * nAW + nSrcW];
-            }
-        }
+        // 20260331 ZJH 双线性上采样 ASPP 到低级特征尺寸（设备无关，支持 autograd）
+        // ASPP 输出 [B,256,H/4,W/4]，低级特征 [B,48,H,W]，倍率 = nLowH / nAH
+        int nUpsampleScale = std::max(1, nLowH / std::max(1, nAH));  // 20260331 ZJH 安全除法
+        auto asppUp = tensorUpsampleBilinear(asppOut, nUpsampleScale);
 
-        // 20260320 ZJH 拼接 ASPP + 低级特征
-        auto concat = Tensor::zeros({nBatch, 256 + 48, nLowH, nLowW});
-        {
-            auto cUp = asppUp.contiguous();
-            auto cLow = lowFeat.contiguous();
-            float* pC = concat.mutableFloatDataPtr();
-            const float* pUp = cUp.floatDataPtr();
-            const float* pLow = cLow.floatDataPtr();
-            int nSp = nLowH * nLowW;
-            for (int n = 0; n < nBatch; ++n) {
-                for (int c = 0; c < 256; ++c)
-                for (int s = 0; s < nSp; ++s)
-                    pC[(n * 304 + c) * nSp + s] = pUp[(n * 256 + c) * nSp + s];
-                for (int c = 0; c < 48; ++c)
-                for (int s = 0; s < nSp; ++s)
-                    pC[(n * 304 + 256 + c) * nSp + s] = pLow[(n * 48 + c) * nSp + s];
-            }
-        }
+        // 20260331 ZJH 拼接 ASPP + 低级特征（设备无关，支持 autograd）
+        auto concat = tensorConcatChannels(asppUp, lowFeat);
 
         // 20260320 ZJH 解码器 3x3 conv x2 + Dropout
-        auto dec = m_relu.forward(m_bnDec1.forward(m_decConv1.forward(concat)));
-        dec = m_relu.forward(m_bnDec2.forward(m_decConv2.forward(dec)));
+        // 20260402 ZJH 解码器归一化根据 m_bUseGroupNorm 选择 GN 或 BN
+        auto dec = m_relu.forward((m_bUseGroupNorm ? m_gnDec1 : m_bnDec1).forward(m_decConv1.forward(concat)));
+        dec = m_relu.forward((m_bUseGroupNorm ? m_gnDec2 : m_bnDec2).forward(m_decConv2.forward(dec)));
         dec = m_decDropout.forward(dec);
 
         // 20260320 ZJH 分类头 1x1 conv
-        return m_classifier.forward(dec);
+        auto logits = m_classifier.forward(dec);  // [N, nClasses, H/2, W/2]
+
+        // 20260331 ZJH 上采样到输入分辨率（低级特征在 H/2，需要 2x 上采样恢复）
+        int nInH = input.shape(2);
+        int nOutH = logits.shape(2);
+        if (nOutH < nInH) {
+            int nScale = nInH / nOutH;  // 20260331 ZJH 通常为 2
+            logits = tensorUpsampleBilinear(logits, nScale);
+        }
+        return logits;
     }
 
+    // 20260402 ZJH 根据 m_bUseGroupNorm 收集 GN 或 BN 的参数
     std::vector<Tensor*> parameters() override {
         std::vector<Tensor*> v;
-        for (auto* p : m_stem.parameters()) v.push_back(p);
-        for (auto* p : m_bnStem.parameters()) v.push_back(p);
-        for (auto* p : m_layer1_0.parameters()) v.push_back(p);
-        for (auto* p : m_layer1_1.parameters()) v.push_back(p);
-        for (auto* p : m_layer2_0.parameters()) v.push_back(p);
-        for (auto* p : m_layer2_1.parameters()) v.push_back(p);
-        for (auto* p : m_layer3_0.parameters()) v.push_back(p);
-        for (auto* p : m_layer3_1.parameters()) v.push_back(p);
-        for (auto* p : m_layer4_0.parameters()) v.push_back(p);
-        for (auto* p : m_layer4_1.parameters()) v.push_back(p);
-        for (auto* p : m_aspp.parameters()) v.push_back(p);
-        for (auto* p : m_lowConv.parameters()) v.push_back(p);
-        for (auto* p : m_bnLow.parameters()) v.push_back(p);
-        for (auto* p : m_decConv1.parameters()) v.push_back(p);
-        for (auto* p : m_bnDec1.parameters()) v.push_back(p);
-        for (auto* p : m_decConv2.parameters()) v.push_back(p);
-        for (auto* p : m_bnDec2.parameters()) v.push_back(p);
-        for (auto* p : m_classifier.parameters()) v.push_back(p);
+        auto append = [&](std::vector<Tensor*> ps) { for (auto* p : ps) v.push_back(p); };
+        append(m_stem.parameters());
+        append(m_bUseGroupNorm ? m_gnStem.parameters() : m_bnStem.parameters());  // 20260402 ZJH stem 归一化
+        // 20260402 ZJH ResBlock 内部已处理 GN/BN 切换
+        append(m_layer1_0.parameters()); append(m_layer1_1.parameters());
+        append(m_layer2_0.parameters()); append(m_layer2_1.parameters());
+        append(m_layer3_0.parameters()); append(m_layer3_1.parameters());
+        append(m_layer4_0.parameters()); append(m_layer4_1.parameters());
+        append(m_aspp.parameters());  // 20260402 ZJH ASPP 内部已处理 GN/BN 切换
+        append(m_lowConv.parameters());
+        append(m_bUseGroupNorm ? m_gnLow.parameters() : m_bnLow.parameters());    // 20260402 ZJH 低级特征归一化
+        append(m_decConv1.parameters());
+        append(m_bUseGroupNorm ? m_gnDec1.parameters() : m_bnDec1.parameters());  // 20260402 ZJH 解码器1归一化
+        append(m_decConv2.parameters());
+        append(m_bUseGroupNorm ? m_gnDec2.parameters() : m_bnDec2.parameters());  // 20260402 ZJH 解码器2归一化
+        append(m_classifier.parameters());
         return v;
     }
 
+    // 20260331 ZJH 重写 namedParameters() — 完整层级命名
+    // 20260402 ZJH 支持 GN/BN 双模式
+    std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") override {
+        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        auto appendParams = [&](const std::string& strSubPrefix, Module& mod) {
+            std::string strFullPrefix = strPrefix.empty() ? strSubPrefix : strPrefix + "." + strSubPrefix;
+            auto vecParams = mod.namedParameters(strFullPrefix);
+            vecResult.insert(vecResult.end(), vecParams.begin(), vecParams.end());
+        };
+        // 20260331 ZJH 编码器 stem
+        appendParams("stem", m_stem);
+        // 20260402 ZJH stem 归一化命名
+        if (m_bUseGroupNorm) appendParams("gnStem", m_gnStem);
+        else                 appendParams("bnStem", m_bnStem);
+        // 20260331 ZJH 编码器 layer1-4（ResBlock 内部已处理 GN/BN 命名）
+        appendParams("layer1_0", m_layer1_0);  appendParams("layer1_1", m_layer1_1);
+        appendParams("layer2_0", m_layer2_0);  appendParams("layer2_1", m_layer2_1);
+        appendParams("layer3_0", m_layer3_0);  appendParams("layer3_1", m_layer3_1);
+        appendParams("layer4_0", m_layer4_0);  appendParams("layer4_1", m_layer4_1);
+        // 20260331 ZJH ASPP 模块（内部已处理 GN/BN 命名）
+        appendParams("aspp", m_aspp);
+        // 20260331 ZJH 解码器
+        appendParams("lowConv", m_lowConv);
+        if (m_bUseGroupNorm) appendParams("gnLow", m_gnLow);
+        else                 appendParams("bnLow", m_bnLow);
+        appendParams("decConv1", m_decConv1);
+        if (m_bUseGroupNorm) appendParams("gnDec1", m_gnDec1);
+        else                 appendParams("bnDec1", m_bnDec1);
+        appendParams("decConv2", m_decConv2);
+        if (m_bUseGroupNorm) appendParams("gnDec2", m_gnDec2);
+        else                 appendParams("bnDec2", m_bnDec2);
+        appendParams("classifier", m_classifier);  // 20260331 ZJH 分类头
+        return vecResult;
+    }
+
     // 20260328 ZJH 重写 buffers() 收集所有 BN running stats
+    // 20260402 ZJH GN 模式下直属 BN 无缓冲区，但 ResBlock/ASPP 子模块内部处理
     std::vector<Tensor*> buffers() override {
         std::vector<Tensor*> v;
-        for (auto* p : m_bnStem.buffers()) v.push_back(p);    // 20260328 ZJH stem BN
-        for (auto* p : m_layer1_0.buffers()) v.push_back(p);  // 20260328 ZJH layer1 内部 BN
+        // 20260402 ZJH 直属归一化层的缓冲区（GN 模式下无缓冲区）
+        if (!m_bUseGroupNorm) {
+            for (auto* p : m_bnStem.buffers()) v.push_back(p);
+        }
+        // 20260402 ZJH ResBlock/ASPP 子模块内部已处理 GN/BN 缓冲区
+        for (auto* p : m_layer1_0.buffers()) v.push_back(p);
         for (auto* p : m_layer1_1.buffers()) v.push_back(p);
-        for (auto* p : m_layer2_0.buffers()) v.push_back(p);  // 20260328 ZJH layer2 内部 BN
+        for (auto* p : m_layer2_0.buffers()) v.push_back(p);
         for (auto* p : m_layer2_1.buffers()) v.push_back(p);
-        for (auto* p : m_layer3_0.buffers()) v.push_back(p);  // 20260328 ZJH layer3 内部 BN
+        for (auto* p : m_layer3_0.buffers()) v.push_back(p);
         for (auto* p : m_layer3_1.buffers()) v.push_back(p);
-        for (auto* p : m_layer4_0.buffers()) v.push_back(p);  // 20260328 ZJH layer4 内部 BN
+        for (auto* p : m_layer4_0.buffers()) v.push_back(p);
         for (auto* p : m_layer4_1.buffers()) v.push_back(p);
-        for (auto* p : m_aspp.buffers()) v.push_back(p);      // 20260328 ZJH ASPP 内部 BN
-        for (auto* p : m_bnLow.buffers()) v.push_back(p);     // 20260328 ZJH bnLow 缓冲区
-        for (auto* p : m_bnDec1.buffers()) v.push_back(p);    // 20260328 ZJH bnDec1 缓冲区
-        for (auto* p : m_bnDec2.buffers()) v.push_back(p);    // 20260328 ZJH bnDec2 缓冲区
+        for (auto* p : m_aspp.buffers()) v.push_back(p);
+        if (!m_bUseGroupNorm) {
+            for (auto* p : m_bnLow.buffers()) v.push_back(p);
+            for (auto* p : m_bnDec1.buffers()) v.push_back(p);
+            for (auto* p : m_bnDec2.buffers()) v.push_back(p);
+        }
         return v;
     }
 
     // 20260328 ZJH 重写 namedBuffers() 收集所有 BN 命名缓冲区
+    // 20260402 ZJH 支持 GN/BN 双模式
     std::vector<std::pair<std::string, Tensor*>> namedBuffers(const std::string& strPrefix = "") override {
         std::vector<std::pair<std::string, Tensor*>> vecResult;
         auto appendBufs = [&](const std::string& strSubPrefix, Module& mod) {
@@ -395,26 +522,35 @@ public:
             auto vecBufs = mod.namedBuffers(strFullPrefix);
             vecResult.insert(vecResult.end(), vecBufs.begin(), vecBufs.end());
         };
-        appendBufs("bnStem", m_bnStem);
+        if (!m_bUseGroupNorm) appendBufs("bnStem", m_bnStem);
         appendBufs("layer1_0", m_layer1_0);  appendBufs("layer1_1", m_layer1_1);
         appendBufs("layer2_0", m_layer2_0);  appendBufs("layer2_1", m_layer2_1);
         appendBufs("layer3_0", m_layer3_0);  appendBufs("layer3_1", m_layer3_1);
         appendBufs("layer4_0", m_layer4_0);  appendBufs("layer4_1", m_layer4_1);
         appendBufs("aspp", m_aspp);
-        appendBufs("bnLow", m_bnLow);
-        appendBufs("bnDec1", m_bnDec1);  appendBufs("bnDec2", m_bnDec2);
+        if (!m_bUseGroupNorm) {
+            appendBufs("bnLow", m_bnLow);
+            appendBufs("bnDec1", m_bnDec1);  appendBufs("bnDec2", m_bnDec2);
+        }
         return vecResult;
     }
 
     void train(bool b = true) override {
         m_bTraining = b;
-        m_bnStem.train(b);
+        // 20260402 ZJH 训练模式传播到当前使用的归一化层
+        if (m_bUseGroupNorm) m_gnStem.train(b);
+        else                 m_bnStem.train(b);
         m_layer1_0.train(b); m_layer1_1.train(b);
         m_layer2_0.train(b); m_layer2_1.train(b);
         m_layer3_0.train(b); m_layer3_1.train(b);
         m_layer4_0.train(b); m_layer4_1.train(b);
-        m_aspp.train(b); m_bnLow.train(b);
-        m_bnDec1.train(b); m_bnDec2.train(b); m_decDropout.train(b);
+        m_aspp.train(b);
+        if (m_bUseGroupNorm) {
+            m_gnLow.train(b); m_gnDec1.train(b); m_gnDec2.train(b);
+        } else {
+            m_bnLow.train(b); m_bnDec1.train(b); m_bnDec2.train(b);
+        }
+        m_decDropout.train(b);
     }
 
 private:
@@ -430,6 +566,12 @@ private:
     Conv2d m_decConv2; BatchNorm2d m_bnDec2;
     Dropout2d m_decDropout;
     Conv2d m_classifier;
+    // 20260402 ZJH GroupNorm 实例（bUseGroupNorm=true 时使用）
+    GroupNorm2d m_gnStem;   // 20260402 ZJH stem GN (64ch)
+    GroupNorm2d m_gnLow;    // 20260402 ZJH 低级特征 GN (48ch)
+    GroupNorm2d m_gnDec1;   // 20260402 ZJH 解码器1 GN (256ch)
+    GroupNorm2d m_gnDec2;   // 20260402 ZJH 解码器2 GN (256ch)
+    bool m_bUseGroupNorm = false;  // 20260402 ZJH 归一化模式标志
     ReLU m_relu;
 };
 
@@ -754,6 +896,547 @@ private:
     Conv2d m_score7, m_score4, m_score3;
     ConvTranspose2d m_up7, m_up4, m_up3;
     Dropout2d m_drop6, m_drop7;
+    ReLU m_relu;
+};
+
+// =========================================================
+// MobileSegNet — 轻量级工业分割网络（对标海康 ASI_SEG 4.7MB）
+// MobileNetV4-Small 编码器 + ASPP-Lite(3分支) + 轻量解码器
+// 总参数量 ~1.75M ≈ 7MB FP32 / 1.75MB INT8
+// =========================================================
+
+// 20260401 ZJH ASPPLite — 3 分支轻量 ASPP 模块
+// 比标准 ASPPModule(5分支) 少 40% 参数量，适合轻量骨干网络
+// 分支1: 1x1 conv, 分支2: 3x3 dilation=6, 分支3: 全局平均池化
+class ASPPLite : public Module {
+public:
+    // 20260401 ZJH 构造函数
+    // nInChannels: 输入通道数（来自编码器最后一层）
+    // nMidChannels: 每分支输出通道数（3分支拼接后 = nMidChannels * 3）
+    // nOutChannels: 合并后输出通道数
+    // 20260402 ZJH 新增 bUseGroupNorm 参数，支持 GN/BN 双模式切换
+    ASPPLite(int nInChannels, int nMidChannels = 48, int nOutChannels = 96, bool bUseGroupNorm = false)
+        : m_nIn(nInChannels), m_nMid(nMidChannels), m_nOut(nOutChannels),
+          // 20260401 ZJH 分支1: 1x1 标准卷积（降维）
+          m_conv1x1(nInChannels, nMidChannels, 1, 1, 0, true), m_bn1(nMidChannels),
+          // 20260401 ZJH 分支2: 3x3 膨胀卷积 dilation=6（中等感受野）
+          m_atrous6(nInChannels, nMidChannels, 3, 1, 6, 6, 1, true), m_bn6(nMidChannels),
+          // 20260401 ZJH 分支3: 全局平均池化 → 1x1 conv（全局上下文）
+          m_convPool(nInChannels, nMidChannels, 1, 1, 0, true), m_bnPool(nMidChannels),
+          // 20260401 ZJH 合并: 3分支拼接后 1x1 降维
+          m_convMerge(nMidChannels * 3, nOutChannels, 1, 1, 0, true), m_bnMerge(nOutChannels),
+          m_dropout(0.3f),  // 20260401 ZJH 轻量网络用较低 dropout
+          // 20260402 ZJH GroupNorm 实例（nGroups 自动调整）
+          m_gn1(nMidChannels), m_gn6(nMidChannels),
+          m_gnPool(nMidChannels), m_gnMerge(nOutChannels),
+          m_bUseGroupNorm(bUseGroupNorm)  // 20260402 ZJH 记录归一化模式
+    {}
+
+    Tensor forward(const Tensor& input) override {
+        auto ci = input.contiguous();
+        int nBatch = ci.shape(0);  // 20260401 ZJH 批大小
+        int nH = ci.shape(2);      // 20260401 ZJH 空间高度
+        int nW = ci.shape(3);      // 20260401 ZJH 空间宽度
+
+        // 20260402 ZJH 辅助 lambda: 选择 GN 或 BN 归一化层
+        auto norm = [&](auto& gn, auto& bn) -> Module& { return m_bUseGroupNorm ? static_cast<Module&>(gn) : static_cast<Module&>(bn); };
+
+        // 20260401 ZJH 分支1: 1x1 conv + BN/GN + ReLU（局部特征）
+        auto b1 = m_relu.forward(norm(m_gn1, m_bn1).forward(m_conv1x1.forward(ci)));
+
+        // 20260401 ZJH 分支2: 3x3 dilation=6 + BN/GN + ReLU（中等感受野）
+        auto b2 = m_relu.forward(norm(m_gn6, m_bn6).forward(m_atrous6.forward(ci)));
+
+        // 20260401 ZJH 分支3: 全局平均池化 → 1x1 conv → 上采样到输入尺寸
+        Tensor pooled;
+        if (isCudaTensor(ci)) {
+            pooled = Tensor::zeros({nBatch, m_nIn, 1, 1}, DeviceType::CUDA);
+            CUDABackend::avgPool2d(ci.floatDataPtr(), pooled.mutableFloatDataPtr(),
+                                    nBatch, m_nIn, nH, nW, nH, nW, nH, 0);
+        } else {
+            pooled = Tensor::zeros({nBatch, m_nIn, 1, 1});
+            CPUBackend::globalAvgPool2d(ci.floatDataPtr(), pooled.mutableFloatDataPtr(),
+                                         nBatch, m_nIn, nH, nW);
+        }
+        auto b3Conv = m_relu.forward(norm(m_gnPool, m_bnPool).forward(m_convPool.forward(pooled)));
+        auto b3 = tensorUpsampleBilinear(b3Conv, nH);  // 20260401 ZJH [B,C,1,1] → [B,C,H,W]
+
+        // 20260401 ZJH 裁剪到最小 HW（膨胀卷积可能导致尺寸略有差异）
+        int nMinH = std::min({b1.shape(2), b2.shape(2), b3.shape(2)});
+        int nMinW = std::min({b1.shape(3), b2.shape(3), b3.shape(3)});
+        auto cropToMin = [&](Tensor t) -> Tensor {
+            if (t.shape(2) != nMinH) t = tensorSlice(t, 2, 0, nMinH);
+            if (t.shape(3) != nMinW) t = tensorSlice(t, 3, 0, nMinW);
+            return t;
+        };
+
+        // 20260401 ZJH 3 分支通道拼接 [B, nMid*3, H, W]
+        auto concat = tensorConcatChannels(cropToMin(b1), cropToMin(b2));
+        concat = tensorConcatChannels(concat, cropToMin(b3));
+
+        // 20260401 ZJH 合并 1x1 + BN/GN + ReLU + Dropout
+        auto merged = m_relu.forward(norm(m_gnMerge, m_bnMerge).forward(m_convMerge.forward(concat)));
+        return m_dropout.forward(merged);
+    }
+
+    // 20260402 ZJH 根据 m_bUseGroupNorm 收集 GN 或 BN 的参数
+    std::vector<Tensor*> parameters() override {
+        std::vector<Tensor*> v;
+        auto append = [&](std::vector<Tensor*> ps) { for (auto* p : ps) v.push_back(p); };
+        append(m_conv1x1.parameters());
+        append(m_bUseGroupNorm ? m_gn1.parameters() : m_bn1.parameters());
+        append(m_atrous6.parameters());
+        append(m_bUseGroupNorm ? m_gn6.parameters() : m_bn6.parameters());
+        append(m_convPool.parameters());
+        append(m_bUseGroupNorm ? m_gnPool.parameters() : m_bnPool.parameters());
+        append(m_convMerge.parameters());
+        append(m_bUseGroupNorm ? m_gnMerge.parameters() : m_bnMerge.parameters());
+        return v;
+    }
+
+    // 20260401 ZJH 重写 namedParameters()
+    // 20260402 ZJH 支持 GN/BN 双模式
+    std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") override {
+        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        auto appendParams = [&](const std::string& strSubPrefix, Module& mod) {
+            std::string strFullPrefix = strPrefix.empty() ? strSubPrefix : strPrefix + "." + strSubPrefix;
+            auto vecParams = mod.namedParameters(strFullPrefix);
+            vecResult.insert(vecResult.end(), vecParams.begin(), vecParams.end());
+        };
+        appendParams("conv1x1", m_conv1x1);    // 20260401 ZJH 1x1 分支
+        if (m_bUseGroupNorm) appendParams("gn1", m_gn1);
+        else                 appendParams("bn1", m_bn1);
+        appendParams("atrous6", m_atrous6);     // 20260401 ZJH 膨胀率 6 分支
+        if (m_bUseGroupNorm) appendParams("gn6", m_gn6);
+        else                 appendParams("bn6", m_bn6);
+        appendParams("convPool", m_convPool);   // 20260401 ZJH 全局池化分支
+        if (m_bUseGroupNorm) appendParams("gnPool", m_gnPool);
+        else                 appendParams("bnPool", m_bnPool);
+        appendParams("convMerge", m_convMerge); // 20260401 ZJH 合并 1x1
+        if (m_bUseGroupNorm) appendParams("gnMerge", m_gnMerge);
+        else                 appendParams("bnMerge", m_bnMerge);
+        return vecResult;
+    }
+
+    // 20260401 ZJH 收集 BN running stats
+    // 20260402 ZJH GN 没有 running stats，直接返回空
+    std::vector<Tensor*> buffers() override {
+        if (m_bUseGroupNorm) return {};  // 20260402 ZJH GN 没有 running stats
+        std::vector<Tensor*> v;
+        for (auto* p : m_bn1.buffers()) v.push_back(p);
+        for (auto* p : m_bn6.buffers()) v.push_back(p);
+        for (auto* p : m_bnPool.buffers()) v.push_back(p);
+        for (auto* p : m_bnMerge.buffers()) v.push_back(p);
+        return v;
+    }
+
+    // 20260401 ZJH 收集 BN 命名缓冲区
+    // 20260402 ZJH GN 模式下返回空
+    std::vector<std::pair<std::string, Tensor*>> namedBuffers(const std::string& strPrefix = "") override {
+        if (m_bUseGroupNorm) return {};  // 20260402 ZJH GN 没有 running stats
+        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        auto appendBufs = [&](const std::string& strSubPrefix, Module& mod) {
+            std::string strFullPrefix = strPrefix.empty() ? strSubPrefix : strPrefix + "." + strSubPrefix;
+            auto vecBufs = mod.namedBuffers(strFullPrefix);
+            vecResult.insert(vecResult.end(), vecBufs.begin(), vecBufs.end());
+        };
+        appendBufs("bn1", m_bn1);
+        appendBufs("bn6", m_bn6);
+        appendBufs("bnPool", m_bnPool);
+        appendBufs("bnMerge", m_bnMerge);
+        return vecResult;
+    }
+
+    void train(bool b = true) override {
+        m_bTraining = b;
+        m_dropout.train(b);
+        // 20260402 ZJH 训练模式传播到当前使用的归一化层
+        if (m_bUseGroupNorm) {
+            m_gn1.train(b); m_gn6.train(b);
+            m_gnPool.train(b); m_gnMerge.train(b);
+        } else {
+            m_bn1.train(b); m_bn6.train(b);
+            m_bnPool.train(b); m_bnMerge.train(b);
+        }
+    }
+
+private:
+    int m_nIn, m_nMid, m_nOut;
+    Conv2d m_conv1x1;  BatchNorm2d m_bn1;              // 20260401 ZJH 分支1: 1x1
+    DilatedConv2d m_atrous6;  BatchNorm2d m_bn6;       // 20260401 ZJH 分支2: dilation=6
+    Conv2d m_convPool;  BatchNorm2d m_bnPool;           // 20260401 ZJH 分支3: GAP
+    Conv2d m_convMerge;  BatchNorm2d m_bnMerge;         // 20260401 ZJH 合并层
+    Dropout2d m_dropout;
+    // 20260402 ZJH GroupNorm 实例（bUseGroupNorm=true 时使用）
+    GroupNorm2d m_gn1, m_gn6;        // 20260402 ZJH 分支1/2 GN
+    GroupNorm2d m_gnPool, m_gnMerge; // 20260402 ZJH 池化分支/合并层 GN
+    bool m_bUseGroupNorm = false;    // 20260402 ZJH 归一化模式标志
+    ReLU m_relu;
+};
+
+// =========================================================
+// SEBlock — Squeeze-and-Excitation 通道注意力（超越海康 ASI_SEG 的独有模块）
+// 海康 ASI_SEG 是纯 CNN 无注意力机制
+// SE 让网络学会"关注哪些通道更重要"，对缺陷检测尤其有效
+// 参数开销 < 5%，精度提升 2~3%
+// =========================================================
+
+// 20260401 ZJH SEBlock — Squeeze-and-Excitation 通道注意力模块
+// 结构: GlobalAvgPool → FC(C→C/r) → ReLU → FC(C/r→C) → Sigmoid → 通道加权
+// 参数量: 2 × C × C/r（reduction=4 时仅增加 ~3% 参数）
+class SEBlock : public Module {
+public:
+    // 20260401 ZJH 构造函数
+    // nChannels: 输入/输出通道数
+    // nReduction: 压缩比（默认 4，即中间层通道数 = C/4）
+    SEBlock(int nChannels, int nReduction = 4)
+        : m_nChannels(nChannels),
+          m_nMid(std::max(1, nChannels / nReduction)),
+          // 20260401 ZJH FC1: 压缩（C → C/r），用 1x1 Conv 实现（等效于逐像素 FC）
+          m_fc1(nChannels, std::max(1, nChannels / nReduction), 1, 1, 0, true),
+          // 20260401 ZJH FC2: 恢复（C/r → C）
+          m_fc2(std::max(1, nChannels / nReduction), nChannels, 1, 1, 0, true)
+    {}
+
+    // 20260401 ZJH 前向传播: input × sigmoid(FC2(ReLU(FC1(GAP(input)))))
+    Tensor forward(const Tensor& input) override {
+        int nB = input.shape(0);    // 20260401 ZJH 批大小
+        int nC = input.shape(1);    // 20260401 ZJH 通道数
+        int nH = input.shape(2);    // 20260401 ZJH 空间高度
+        int nW = input.shape(3);    // 20260401 ZJH 空间宽度
+
+        // 20260401 ZJH Squeeze: 全局平均池化 [B,C,H,W] → [B,C,1,1]
+        auto pooled = tensorAdaptiveAvgPool2d(input, 1, 1);  // 20260401 ZJH 自适应平均池化到 1x1
+
+        // 20260401 ZJH Excitation: FC1 → ReLU → FC2 → Sigmoid
+        auto se = m_relu.forward(m_fc1.forward(pooled));    // 20260401 ZJH [B, C/r, 1, 1]
+        se = tensorSigmoid(m_fc2.forward(se));              // 20260401 ZJH [B, C, 1, 1] 通道权重
+
+        // 20260401 ZJH Scale: 通道加权 input × se（广播乘法 [B,C,H,W] × [B,C,1,1]）
+        // 使用 tensorUpsampleBilinear 将 [B,C,1,1] 扩展到 [B,C,H,W] 再逐元素乘
+        auto seExpanded = tensorUpsampleBilinear(se, nH);   // 20260401 ZJH [B,C,1,1] → [B,C,H,H]
+        return tensorMul(input, seExpanded);                 // 20260401 ZJH 通道重标定
+    }
+
+    std::vector<Tensor*> parameters() override {
+        std::vector<Tensor*> v;
+        for (auto* p : m_fc1.parameters()) v.push_back(p);
+        for (auto* p : m_fc2.parameters()) v.push_back(p);
+        return v;
+    }
+
+    std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") override {
+        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        auto appendParams = [&](const std::string& strSubPrefix, Module& mod) {
+            std::string strFullPrefix = strPrefix.empty() ? strSubPrefix : strPrefix + "." + strSubPrefix;
+            auto vecParams = mod.namedParameters(strFullPrefix);
+            vecResult.insert(vecResult.end(), vecParams.begin(), vecParams.end());
+        };
+        appendParams("fc1", m_fc1);
+        appendParams("fc2", m_fc2);
+        return vecResult;
+    }
+
+    std::vector<Tensor*> buffers() override { return {}; }
+    std::vector<std::pair<std::string, Tensor*>> namedBuffers(const std::string& = "") override { return {}; }
+
+    void train(bool b = true) override { m_bTraining = b; }
+
+private:
+    int m_nChannels;     // 20260401 ZJH 输入通道数
+    int m_nMid;          // 20260401 ZJH 中间层通道数（C/reduction）
+    Conv2d m_fc1;        // 20260401 ZJH 压缩层（1x1 conv 等效 FC）
+    Conv2d m_fc2;        // 20260401 ZJH 恢复层（1x1 conv 等效 FC）
+    ReLU m_relu;
+};
+
+// 20260401 ZJH MobileSegNet — 轻量级分割网络主体
+// 编码器: MobileNetV4-Small 风格（InvertedResidual 块，到 Stage5 截止）
+// 中间层: ASPPLite（3 分支）
+// 解码器: 低级特征融合 + 双线性上采样到原图
+// 特点: 参数量 ~1.75M，推理速度约为 DeepLabV3 的 3-5 倍
+class MobileSegNet : public Module {
+public:
+    // 20260401 ZJH 构造函数
+    // nInChannels: 输入图像通道数（1=灰度, 3=RGB）
+    // nNumClasses: 分割类别数（含背景）
+    // 20260402 ZJH 新增 bUseGroupNorm 参数，支持 GN/BN 双模式切换
+    MobileSegNet(int nInChannels = 1, int nNumClasses = 2, bool bUseGroupNorm = false)
+        : m_nNumClasses(nNumClasses),
+          // ===== 编码器: MobileNet 风格倒残差块 =====
+          // 20260401 ZJH Stem: 标准 3x3 conv（非深度可分离）降维到 16ch
+          m_stem(nInChannels, 16, 3, 2, 1, true), m_bnStem(16),
+          // 20260401 ZJH Stage1: IR(16→16, stride=1, expand=1) x1 — 保持分辨率
+          m_stage1_0(16, 16, 1, 1),
+          // 20260401 ZJH Stage2: IR(16→24, stride=2, expand=6) + IR(24→24, stride=1, expand=6)
+          // ★ Stage2 输出 = 低级特征（24ch, H/4）
+          m_stage2_0(16, 24, 2, 6), m_stage2_1(24, 24, 1, 6),
+          // 20260401 ZJH Stage3: IR(24→32, stride=2, expand=6) x3
+          m_stage3_0(24, 32, 2, 6), m_stage3_1(32, 32, 1, 6), m_stage3_2(32, 32, 1, 6),
+          // 20260401 ZJH Stage4: IR(32→64, stride=2, expand=6) x4
+          m_stage4_0(32, 64, 2, 6), m_stage4_1(64, 64, 1, 6),
+          m_stage4_2(64, 64, 1, 6), m_stage4_3(64, 64, 1, 6),
+          // 20260401 ZJH Stage5: IR(64→96, stride=1, expand=6) x3
+          // ★ Stage5 输出 = 高级特征（96ch, H/16）
+          m_stage5_0(64, 96, 1, 6), m_stage5_1(96, 96, 1, 6), m_stage5_2(96, 96, 1, 6),
+          // ===== SE 通道注意力（超越海康 ASI_SEG 的独有模块）=====
+          // 20260401 ZJH 在 Stage3/4/5 末尾插入 SE 注意力，让网络聚焦缺陷相关通道
+          m_se3(32, 4), m_se4(64, 4), m_se5(96, 4),
+          // ===== ASPP-Lite: 3 分支轻量空洞空间金字塔 =====
+          // 20260402 ZJH 传递 bUseGroupNorm 给 ASPPLite
+          m_aspp(96, 48, 96, bUseGroupNorm),
+          // ===== 解码器: 低级特征融合 + 上采样 =====
+          // 20260401 ZJH 低级特征 1x1 降维（Stage2: 24ch → 16ch）
+          m_lowConv(24, 16, 1, 1, 0, true), m_bnLow(16),
+          // 20260401 ZJH 解码器 3x3 卷积（concat 后 96+16=112 → 64）
+          m_decConv1(96 + 16, 64, 3, 1, 1, true), m_bnDec1(64),
+          // 20260401 ZJH 解码器第二层 3x3 卷积（精炼特征）
+          m_decConv2(64, 64, 3, 1, 1, true), m_bnDec2(64),
+          m_decDropout(0.1f),  // 20260401 ZJH 轻量网络用低 dropout
+          // 20260401 ZJH 分类头 1x1 conv（64 → nClasses）
+          m_classifier(64, nNumClasses, 1, 1, 0, true),
+          // 20260402 ZJH GroupNorm 实例（解码器直属 BN 的对应 GN）
+          m_gnStem(16), m_gnLow(16), m_gnDec1(64), m_gnDec2(64),
+          m_bUseGroupNorm(bUseGroupNorm)  // 20260402 ZJH 记录归一化模式
+    {}
+
+    // 20260401 ZJH 前向传播
+    // 输入: [N, Cin, H, W]
+    // 输出: [N, nClasses, H, W] — 与输入同分辨率的逐像素分类 logits
+    Tensor forward(const Tensor& input) override {
+        // 20260401 ZJH ===== 编码器 =====
+        // Stem: Conv3x3(stride=2) + BN/GN + ReLU → [N, 16, H/2, W/2]
+        // 20260402 ZJH stem 归一化根据 m_bUseGroupNorm 选择 GN 或 BN
+        auto stem = m_relu.forward((m_bUseGroupNorm ? m_gnStem : m_bnStem).forward(m_stem.forward(input)));
+
+        // 20260401 ZJH Stage1: [N, 16, H/2, W/2]
+        auto s1 = m_stage1_0.forward(stem);
+
+        // 20260401 ZJH Stage2: [N, 24, H/4, W/4] ★ 低级特征
+        auto s2 = m_stage2_1.forward(m_stage2_0.forward(s1));
+
+        // 20260401 ZJH Stage3: [N, 32, H/8, W/8] + SE 通道注意力
+        auto s3 = m_se3.forward(m_stage3_2.forward(m_stage3_1.forward(m_stage3_0.forward(s2))));
+
+        // 20260401 ZJH Stage4: [N, 64, H/16, W/16] + SE 通道注意力
+        auto s4 = m_se4.forward(m_stage4_3.forward(m_stage4_2.forward(m_stage4_1.forward(m_stage4_0.forward(s3)))));
+
+        // 20260401 ZJH Stage5: [N, 96, H/16, W/16] ★ 高级特征 + SE 通道注意力
+        auto s5 = m_se5.forward(m_stage5_2.forward(m_stage5_1.forward(m_stage5_0.forward(s4))));
+
+        // 20260401 ZJH ===== ASPP-Lite =====
+        auto asppOut = m_aspp.forward(s5);  // 20260401 ZJH [N, 96, H/16, W/16]
+
+        // 20260401 ZJH ===== 解码器 =====
+        // 低级特征 1x1 降维: 24ch → 16ch
+        // 20260402 ZJH 根据 m_bUseGroupNorm 选择 GN 或 BN
+        auto lowFeat = m_relu.forward((m_bUseGroupNorm ? m_gnLow : m_bnLow).forward(m_lowConv.forward(s2)));  // [N, 16, H/4, W/4]
+
+        // 20260401 ZJH 上采样 ASPP 输出到低级特征尺寸（H/16 → H/4, 即 4x）
+        int nLowH = lowFeat.shape(2);  // 20260401 ZJH 低级特征高度
+        int nAsppH = asppOut.shape(2);  // 20260401 ZJH ASPP 输出高度
+        int nUpsampleScale = std::max(1, nLowH / std::max(1, nAsppH));
+        auto asppUp = tensorUpsampleBilinear(asppOut, nUpsampleScale);
+
+        // 20260401 ZJH 通道拼接: ASPP(96ch) + lowFeat(16ch) = 112ch
+        auto concat = tensorConcatChannels(asppUp, lowFeat);
+
+        // 20260401 ZJH 解码器 3x3 conv x2
+        // 20260402 ZJH 解码器归一化根据 m_bUseGroupNorm 选择 GN 或 BN
+        auto dec = m_relu.forward((m_bUseGroupNorm ? m_gnDec1 : m_bnDec1).forward(m_decConv1.forward(concat)));  // 112→64
+        dec = m_relu.forward((m_bUseGroupNorm ? m_gnDec2 : m_bnDec2).forward(m_decConv2.forward(dec)));           // 64→64
+        dec = m_decDropout.forward(dec);
+
+        // 20260401 ZJH 分类头 1x1
+        auto logits = m_classifier.forward(dec);  // [N, nClasses, H/4, W/4]
+
+        // 20260401 ZJH 上采样到输入分辨率（H/4 → H, 即 4x）
+        int nInH = input.shape(2);
+        int nOutH = logits.shape(2);
+        if (nOutH < nInH) {
+            int nScale = nInH / nOutH;
+            logits = tensorUpsampleBilinear(logits, nScale);
+        }
+        return logits;  // 20260401 ZJH [N, nClasses, H, W]
+    }
+
+    // 20260401 ZJH 收集所有可训练参数
+    // 20260402 ZJH 根据 m_bUseGroupNorm 收集 GN 或 BN 的参数
+    std::vector<Tensor*> parameters() override {
+        std::vector<Tensor*> v;
+        auto append = [&](std::vector<Tensor*> ps) { for (auto* p : ps) v.push_back(p); };
+        // 20260401 ZJH 编码器参数
+        append(m_stem.parameters());
+        append(m_bUseGroupNorm ? m_gnStem.parameters() : m_bnStem.parameters());  // 20260402 ZJH stem 归一化
+        append(m_stage1_0.parameters());
+        append(m_stage2_0.parameters()); append(m_stage2_1.parameters());
+        append(m_stage3_0.parameters()); append(m_stage3_1.parameters()); append(m_stage3_2.parameters());
+        append(m_stage4_0.parameters()); append(m_stage4_1.parameters());
+        append(m_stage4_2.parameters()); append(m_stage4_3.parameters());
+        append(m_stage5_0.parameters()); append(m_stage5_1.parameters()); append(m_stage5_2.parameters());
+        // 20260401 ZJH SE 注意力参数
+        append(m_se3.parameters()); append(m_se4.parameters()); append(m_se5.parameters());
+        // 20260401 ZJH ASPP-Lite 参数（内部已处理 GN/BN 切换）
+        append(m_aspp.parameters());
+        // 20260401 ZJH 解码器参数
+        append(m_lowConv.parameters());
+        append(m_bUseGroupNorm ? m_gnLow.parameters() : m_bnLow.parameters());    // 20260402 ZJH 低级特征归一化
+        append(m_decConv1.parameters());
+        append(m_bUseGroupNorm ? m_gnDec1.parameters() : m_bnDec1.parameters());  // 20260402 ZJH 解码器1归一化
+        append(m_decConv2.parameters());
+        append(m_bUseGroupNorm ? m_gnDec2.parameters() : m_bnDec2.parameters());  // 20260402 ZJH 解码器2归一化
+        append(m_classifier.parameters());
+        return v;
+    }
+
+    // 20260401 ZJH 命名参数收集（用于序列化和迁移学习）
+    // 20260402 ZJH 支持 GN/BN 双模式
+    std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") override {
+        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        auto appendParams = [&](const std::string& strSubPrefix, Module& mod) {
+            std::string strFullPrefix = strPrefix.empty() ? strSubPrefix : strPrefix + "." + strSubPrefix;
+            auto vecParams = mod.namedParameters(strFullPrefix);
+            vecResult.insert(vecResult.end(), vecParams.begin(), vecParams.end());
+        };
+        // 20260401 ZJH 编码器
+        appendParams("stem", m_stem);
+        // 20260402 ZJH stem 归一化命名
+        if (m_bUseGroupNorm) appendParams("gnStem", m_gnStem);
+        else                 appendParams("bnStem", m_bnStem);
+        appendParams("stage1_0", m_stage1_0);
+        appendParams("stage2_0", m_stage2_0);  appendParams("stage2_1", m_stage2_1);
+        appendParams("stage3_0", m_stage3_0);  appendParams("stage3_1", m_stage3_1);
+        appendParams("stage3_2", m_stage3_2);
+        appendParams("stage4_0", m_stage4_0);  appendParams("stage4_1", m_stage4_1);
+        appendParams("stage4_2", m_stage4_2);  appendParams("stage4_3", m_stage4_3);
+        appendParams("stage5_0", m_stage5_0);  appendParams("stage5_1", m_stage5_1);
+        appendParams("stage5_2", m_stage5_2);
+        // 20260401 ZJH SE 注意力
+        appendParams("se3", m_se3);  appendParams("se4", m_se4);  appendParams("se5", m_se5);
+        // 20260401 ZJH ASPP-Lite（内部已处理 GN/BN 命名）
+        appendParams("aspp", m_aspp);
+        // 20260401 ZJH 解码器
+        appendParams("lowConv", m_lowConv);
+        if (m_bUseGroupNorm) appendParams("gnLow", m_gnLow);
+        else                 appendParams("bnLow", m_bnLow);
+        appendParams("decConv1", m_decConv1);
+        if (m_bUseGroupNorm) appendParams("gnDec1", m_gnDec1);
+        else                 appendParams("bnDec1", m_bnDec1);
+        appendParams("decConv2", m_decConv2);
+        if (m_bUseGroupNorm) appendParams("gnDec2", m_gnDec2);
+        else                 appendParams("bnDec2", m_bnDec2);
+        appendParams("classifier", m_classifier);
+        return vecResult;
+    }
+
+    // 20260401 ZJH 收集所有 BN running stats（推理时需要）
+    // 20260402 ZJH GN 模式下直属 BN 无缓冲区，InvertedResidual 子模块内部不受影响
+    std::vector<Tensor*> buffers() override {
+        std::vector<Tensor*> v;
+        // 20260402 ZJH 直属归一化层的缓冲区（GN 模式下无缓冲区）
+        if (!m_bUseGroupNorm) {
+            for (auto* p : m_bnStem.buffers()) v.push_back(p);
+        }
+        // 20260402 ZJH InvertedResidual 子模块内部 BN（不受 bUseGroupNorm 控制）
+        for (auto* p : m_stage1_0.buffers()) v.push_back(p);
+        for (auto* p : m_stage2_0.buffers()) v.push_back(p);
+        for (auto* p : m_stage2_1.buffers()) v.push_back(p);
+        for (auto* p : m_stage3_0.buffers()) v.push_back(p);
+        for (auto* p : m_stage3_1.buffers()) v.push_back(p);
+        for (auto* p : m_stage3_2.buffers()) v.push_back(p);
+        for (auto* p : m_stage4_0.buffers()) v.push_back(p);
+        for (auto* p : m_stage4_1.buffers()) v.push_back(p);
+        for (auto* p : m_stage4_2.buffers()) v.push_back(p);
+        for (auto* p : m_stage4_3.buffers()) v.push_back(p);
+        for (auto* p : m_stage5_0.buffers()) v.push_back(p);
+        for (auto* p : m_stage5_1.buffers()) v.push_back(p);
+        for (auto* p : m_stage5_2.buffers()) v.push_back(p);
+        for (auto* p : m_aspp.buffers()) v.push_back(p);  // 20260402 ZJH ASPPLite 内部已处理 GN/BN
+        if (!m_bUseGroupNorm) {
+            for (auto* p : m_bnLow.buffers()) v.push_back(p);
+            for (auto* p : m_bnDec1.buffers()) v.push_back(p);
+            for (auto* p : m_bnDec2.buffers()) v.push_back(p);
+        }
+        return v;
+    }
+
+    // 20260401 ZJH 命名缓冲区收集（用于序列化）
+    // 20260402 ZJH 支持 GN/BN 双模式
+    std::vector<std::pair<std::string, Tensor*>> namedBuffers(const std::string& strPrefix = "") override {
+        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        auto appendBufs = [&](const std::string& strSubPrefix, Module& mod) {
+            std::string strFullPrefix = strPrefix.empty() ? strSubPrefix : strPrefix + "." + strSubPrefix;
+            auto vecBufs = mod.namedBuffers(strFullPrefix);
+            vecResult.insert(vecResult.end(), vecBufs.begin(), vecBufs.end());
+        };
+        if (!m_bUseGroupNorm) appendBufs("bnStem", m_bnStem);
+        appendBufs("stage1_0", m_stage1_0);
+        appendBufs("stage2_0", m_stage2_0);  appendBufs("stage2_1", m_stage2_1);
+        appendBufs("stage3_0", m_stage3_0);  appendBufs("stage3_1", m_stage3_1);
+        appendBufs("stage3_2", m_stage3_2);
+        appendBufs("stage4_0", m_stage4_0);  appendBufs("stage4_1", m_stage4_1);
+        appendBufs("stage4_2", m_stage4_2);  appendBufs("stage4_3", m_stage4_3);
+        appendBufs("stage5_0", m_stage5_0);  appendBufs("stage5_1", m_stage5_1);
+        appendBufs("stage5_2", m_stage5_2);
+        appendBufs("aspp", m_aspp);
+        if (!m_bUseGroupNorm) {
+            appendBufs("bnLow", m_bnLow);
+            appendBufs("bnDec1", m_bnDec1);  appendBufs("bnDec2", m_bnDec2);
+        }
+        return vecResult;
+    }
+
+    // 20260401 ZJH 递归设置训练/推理模式
+    void train(bool b = true) override {
+        m_bTraining = b;
+        // 20260402 ZJH 训练模式传播到当前使用的归一化层
+        if (m_bUseGroupNorm) m_gnStem.train(b);
+        else                 m_bnStem.train(b);
+        m_stage1_0.train(b);
+        m_stage2_0.train(b); m_stage2_1.train(b);
+        m_stage3_0.train(b); m_stage3_1.train(b); m_stage3_2.train(b);
+        m_stage4_0.train(b); m_stage4_1.train(b); m_stage4_2.train(b); m_stage4_3.train(b);
+        m_stage5_0.train(b); m_stage5_1.train(b); m_stage5_2.train(b);
+        m_aspp.train(b);
+        if (m_bUseGroupNorm) {
+            m_gnLow.train(b); m_gnDec1.train(b); m_gnDec2.train(b);
+        } else {
+            m_bnLow.train(b); m_bnDec1.train(b); m_bnDec2.train(b);
+        }
+        m_decDropout.train(b);
+    }
+
+private:
+    int m_nNumClasses;
+
+    // 20260401 ZJH ===== 编码器: MobileNet 风格 =====
+    Conv2d m_stem;  BatchNorm2d m_bnStem;                          // 20260401 ZJH Stem 3x3
+    InvertedResidual m_stage1_0;                                    // 20260401 ZJH Stage1 (16→16)
+    InvertedResidual m_stage2_0, m_stage2_1;                        // 20260401 ZJH Stage2 (16→24) ★low
+    InvertedResidual m_stage3_0, m_stage3_1, m_stage3_2;            // 20260401 ZJH Stage3 (24→32)
+    InvertedResidual m_stage4_0, m_stage4_1, m_stage4_2, m_stage4_3;  // 20260401 ZJH Stage4 (32→64)
+    InvertedResidual m_stage5_0, m_stage5_1, m_stage5_2;            // 20260401 ZJH Stage5 (64→96) ★high
+
+    // 20260401 ZJH ===== SE 通道注意力（超越海康）=====
+    SEBlock m_se3;  // 20260401 ZJH Stage3 后 SE (32ch, reduction=4)
+    SEBlock m_se4;  // 20260401 ZJH Stage4 后 SE (64ch, reduction=4)
+    SEBlock m_se5;  // 20260401 ZJH Stage5 后 SE (96ch, reduction=4)
+
+    // 20260401 ZJH ===== ASPP-Lite =====
+    ASPPLite m_aspp;
+
+    // 20260401 ZJH ===== 解码器 =====
+    Conv2d m_lowConv;  BatchNorm2d m_bnLow;            // 20260401 ZJH 低级特征降维 24→16
+    Conv2d m_decConv1;  BatchNorm2d m_bnDec1;          // 20260401 ZJH 解码器 conv1 (112→64)
+    Conv2d m_decConv2;  BatchNorm2d m_bnDec2;          // 20260401 ZJH 解码器 conv2 (64→64)
+    Dropout2d m_decDropout;
+    Conv2d m_classifier;                                // 20260401 ZJH 分类头 (64→nClasses)
+    // 20260402 ZJH GroupNorm 实例（bUseGroupNorm=true 时使用）
+    GroupNorm2d m_gnStem;   // 20260402 ZJH stem GN (16ch)
+    GroupNorm2d m_gnLow;    // 20260402 ZJH 低级特征 GN (16ch)
+    GroupNorm2d m_gnDec1;   // 20260402 ZJH 解码器1 GN (64ch)
+    GroupNorm2d m_gnDec2;   // 20260402 ZJH 解码器2 GN (64ch)
+    bool m_bUseGroupNorm = false;  // 20260402 ZJH 归一化模式标志
     ReLU m_relu;
 };
 

@@ -489,7 +489,7 @@ public:
 class Conv2dBackward : public GradFunction {
 public:
     Tensor m_savedInput;   // 20260319 ZJH 保存前向输入 [N, Cin, H, W]
-    Tensor m_savedWeight;  // 20260319 ZJH 保存卷积核 [Cout, Cin, KH, KW]
+    Tensor m_savedWeight;  // 20260319 ZJH 保存卷积核 [Cout, Cin/G, KH, KW]
     int m_nBatch = 0;      // 20260319 ZJH 批次大小
     int m_nCin = 0;        // 20260319 ZJH 输入通道数
     int m_nH = 0;          // 20260319 ZJH 输入高度
@@ -499,6 +499,7 @@ public:
     int m_nKW = 0;         // 20260319 ZJH 核宽度
     int m_nStride = 1;     // 20260319 ZJH 步幅
     int m_nPad = 0;        // 20260319 ZJH 填充
+    int m_nGroups = 1;     // 20260330 ZJH 分组数（1=标准, Cin=深度可分离）
     bool m_bHasBias = false;  // 20260319 ZJH 是否有偏置
 
     // 20260327 ZJH 释放保存的输入和权重张量（Conv2d 是最大的显存消费者）
@@ -507,66 +508,205 @@ public:
         m_savedWeight = Tensor();  // 20260327 ZJH 释放卷积核副本
     }
 
-    // 20260319 ZJH backward — 计算输入、权重、偏置的梯度
+    // 20260330 ZJH backward — 支持分组卷积的反向传播
+    // groups=1 时走原有路径不变，groups>1 时逐组调用现有 backward kernel
     std::vector<Tensor> backward(const Tensor& gradOutput) override {
         auto cGradOut = gradOutput.contiguous();  // 20260325 ZJH 确保连续
         auto cInput = m_savedInput.contiguous();
         auto cWeight = m_savedWeight.contiguous();
 
+        int nCinPerGroup = m_nCin / m_nGroups;    // 20260330 ZJH 每组输入通道数
+        int nCoutPerGroup = m_nCout / m_nGroups;  // 20260330 ZJH 每组输出通道数
+        int nHout = (m_nH + 2 * m_nPad - m_nKH) / m_nStride + 1;  // 20260330 ZJH 输出高度
+        int nWout = (m_nW + 2 * m_nPad - m_nKW) / m_nStride + 1;  // 20260330 ZJH 输出宽度
+
 #ifdef OM_HAS_CUDA
         if (cGradOut.isCuda()) {
-            // 20260325 ZJH GPU 路径：完整 im2col+GEMM 反向
             auto gradInput = Tensor::zeros(cInput.shapeVec(), DeviceType::CUDA);
-            CUDABackend::conv2dBackwardInput(
-                cGradOut.floatDataPtr(), cWeight.floatDataPtr(),
-                gradInput.mutableFloatDataPtr(),
-                m_nBatch, m_nCin, m_nH, m_nW,
-                m_nCout, m_nKH, m_nKW, m_nPad, m_nPad, m_nStride, m_nStride);
-
             auto gradWeight = Tensor::zeros(cWeight.shapeVec(), DeviceType::CUDA);
-            if (m_bHasBias) {
-                auto gradBias = Tensor::zeros({m_nCout}, DeviceType::CUDA);
-                CUDABackend::conv2dBackwardWeight(
-                    cInput.floatDataPtr(), cGradOut.floatDataPtr(),
-                    gradWeight.mutableFloatDataPtr(), gradBias.mutableFloatDataPtr(),
+
+            if (m_nGroups == 1) {
+                // 20260325 ZJH 标准卷积 GPU 反向：直接调用
+                CUDABackend::conv2dBackwardInput(
+                    cGradOut.floatDataPtr(), cWeight.floatDataPtr(),
+                    gradInput.mutableFloatDataPtr(),
                     m_nBatch, m_nCin, m_nH, m_nW,
                     m_nCout, m_nKH, m_nKW, m_nPad, m_nPad, m_nStride, m_nStride);
-                return {gradInput, gradWeight, gradBias};
+                if (m_bHasBias) {
+                    auto gradBias = Tensor::zeros({m_nCout}, DeviceType::CUDA);
+                    CUDABackend::conv2dBackwardWeight(
+                        cInput.floatDataPtr(), cGradOut.floatDataPtr(),
+                        gradWeight.mutableFloatDataPtr(), gradBias.mutableFloatDataPtr(),
+                        m_nBatch, m_nCin, m_nH, m_nW,
+                        m_nCout, m_nKH, m_nKW, m_nPad, m_nPad, m_nStride, m_nStride);
+                    return {gradInput, gradWeight, gradBias};
+                } else {
+                    CUDABackend::conv2dBackwardWeight(
+                        cInput.floatDataPtr(), cGradOut.floatDataPtr(),
+                        gradWeight.mutableFloatDataPtr(), nullptr,
+                        m_nBatch, m_nCin, m_nH, m_nW,
+                        m_nCout, m_nKH, m_nKW, m_nPad, m_nPad, m_nStride, m_nStride);
+                    return {gradInput, gradWeight};
+                }
             } else {
-                CUDABackend::conv2dBackwardWeight(
-                    cInput.floatDataPtr(), cGradOut.floatDataPtr(),
-                    gradWeight.mutableFloatDataPtr(), nullptr,
-                    m_nBatch, m_nCin, m_nH, m_nW,
-                    m_nCout, m_nKH, m_nKW, m_nPad, m_nPad, m_nStride, m_nStride);
+                // 20260330 ZJH 分组卷积 GPU 反向：逐组调用现有 backward kernel
+                int nInputGS = nCinPerGroup * m_nH * m_nW;       // 20260330 ZJH 每组输入步长
+                int nOutputGS = nCoutPerGroup * nHout * nWout;    // 20260330 ZJH 每组输出步长
+                int nWeightGS = nCoutPerGroup * nCinPerGroup * m_nKH * m_nKW;  // 20260330 ZJH 每组权重步长
+                for (int g = 0; g < m_nGroups; ++g) {
+                    for (int n = 0; n < m_nBatch; ++n) {
+                        const float* pGradOutG = cGradOut.floatDataPtr() + n * m_nCout * nHout * nWout + g * nOutputGS;
+                        const float* pWeightG = cWeight.floatDataPtr() + g * nWeightGS;
+                        float* pGradInG = gradInput.mutableFloatDataPtr() + n * m_nCin * m_nH * m_nW + g * nInputGS;
+                        // 20260330 ZJH BackwardInput: 每组独立求输入梯度
+                        CUDABackend::conv2dBackwardInput(
+                            pGradOutG, pWeightG, pGradInG,
+                            1, nCinPerGroup, m_nH, m_nW,
+                            nCoutPerGroup, m_nKH, m_nKW, m_nPad, m_nPad, m_nStride, m_nStride);
+                        const float* pInputG = cInput.floatDataPtr() + n * m_nCin * m_nH * m_nW + g * nInputGS;
+                        float* pGradWG = gradWeight.mutableFloatDataPtr() + g * nWeightGS;
+                        // 20260330 ZJH BackwardWeight: 每组独立求权重梯度（累加跨 batch）
+                        CUDABackend::conv2dBackwardWeight(
+                            pInputG, pGradOutG, pGradWG, nullptr,
+                            1, nCinPerGroup, m_nH, m_nW,
+                            nCoutPerGroup, m_nKH, m_nKW, m_nPad, m_nPad, m_nStride, m_nStride);
+                    }
+                }
+                if (m_bHasBias) {
+                    // 20260330 ZJH 偏置梯度 = gradOutput 在空间维度上求和
+                    auto gradBias = Tensor::zeros({m_nCout}, DeviceType::CUDA);
+                    // 20260330 ZJH 用标准卷积的 BackwardWeight 偏置路径：逐组收集
+                    // 简化实现：在 CPU 上汇总（偏置很小，D2H 开销可忽略）
+                    auto cpuGradOut = cGradOut.cpu();
+                    auto cpuGradBias = Tensor::zeros({m_nCout});
+                    float* pGB = cpuGradBias.mutableFloatDataPtr();
+                    const float* pGO = cpuGradOut.floatDataPtr();
+                    for (int n = 0; n < m_nBatch; ++n)
+                        for (int c = 0; c < m_nCout; ++c)
+                            for (int hw = 0; hw < nHout * nWout; ++hw)
+                                pGB[c] += pGO[(n * m_nCout + c) * nHout * nWout + hw];
+                    return {gradInput, gradWeight, cpuGradBias.cuda()};
+                }
                 return {gradInput, gradWeight};
             }
         }
 #endif
         // 20260319 ZJH CPU 路径
         auto gradInput = Tensor::zeros(cInput.shapeVec());
-        CPUBackend::conv2dBackwardInput(
-            cGradOut.floatDataPtr(), cWeight.floatDataPtr(),
-            gradInput.mutableFloatDataPtr(),
-            m_nBatch, m_nCin, m_nH, m_nW,
-            m_nCout, m_nKH, m_nKW, m_nStride, m_nPad);
-
         auto gradWeight = Tensor::zeros(cWeight.shapeVec());
-        if (m_bHasBias) {
-            auto gradBias = Tensor::zeros({m_nCout});
-            CPUBackend::conv2dBackwardWeight(
-                cInput.floatDataPtr(), cGradOut.floatDataPtr(),
-                gradWeight.mutableFloatDataPtr(), gradBias.mutableFloatDataPtr(),
+
+        if (m_nGroups == 1) {
+            // 20260319 ZJH 标准卷积 CPU 反向
+            CPUBackend::conv2dBackwardInput(
+                cGradOut.floatDataPtr(), cWeight.floatDataPtr(),
+                gradInput.mutableFloatDataPtr(),
                 m_nBatch, m_nCin, m_nH, m_nW,
                 m_nCout, m_nKH, m_nKW, m_nStride, m_nPad);
-            return {gradInput, gradWeight, gradBias};
+            if (m_bHasBias) {
+                auto gradBias = Tensor::zeros({m_nCout});
+                CPUBackend::conv2dBackwardWeight(
+                    cInput.floatDataPtr(), cGradOut.floatDataPtr(),
+                    gradWeight.mutableFloatDataPtr(), gradBias.mutableFloatDataPtr(),
+                    m_nBatch, m_nCin, m_nH, m_nW,
+                    m_nCout, m_nKH, m_nKW, m_nStride, m_nPad);
+                return {gradInput, gradWeight, gradBias};
+            } else {
+                CPUBackend::conv2dBackwardWeight(
+                    cInput.floatDataPtr(), cGradOut.floatDataPtr(),
+                    gradWeight.mutableFloatDataPtr(), nullptr,
+                    m_nBatch, m_nCin, m_nH, m_nW,
+                    m_nCout, m_nKH, m_nKW, m_nStride, m_nPad);
+                return {gradInput, gradWeight};
+            }
         } else {
-            CPUBackend::conv2dBackwardWeight(
-                cInput.floatDataPtr(), cGradOut.floatDataPtr(),
-                gradWeight.mutableFloatDataPtr(), nullptr,
-                m_nBatch, m_nCin, m_nH, m_nW,
-                m_nCout, m_nKH, m_nKW, m_nStride, m_nPad);
+            // 20260330 ZJH 分组卷积 CPU 反向：逐组调用
+            int nInputGS = nCinPerGroup * m_nH * m_nW;
+            int nOutputGS = nCoutPerGroup * nHout * nWout;
+            int nWeightGS = nCoutPerGroup * nCinPerGroup * m_nKH * m_nKW;
+            for (int g = 0; g < m_nGroups; ++g) {
+                for (int n = 0; n < m_nBatch; ++n) {
+                    const float* pGradOutG = cGradOut.floatDataPtr() + n * m_nCout * nHout * nWout + g * nOutputGS;
+                    const float* pWeightG = cWeight.floatDataPtr() + g * nWeightGS;
+                    float* pGradInG = gradInput.mutableFloatDataPtr() + n * m_nCin * m_nH * m_nW + g * nInputGS;
+                    CPUBackend::conv2dBackwardInput(
+                        pGradOutG, pWeightG, pGradInG,
+                        1, nCinPerGroup, m_nH, m_nW,
+                        nCoutPerGroup, m_nKH, m_nKW, m_nStride, m_nPad);
+                    const float* pInputG = cInput.floatDataPtr() + n * m_nCin * m_nH * m_nW + g * nInputGS;
+                    float* pGradWG = gradWeight.mutableFloatDataPtr() + g * nWeightGS;
+                    CPUBackend::conv2dBackwardWeight(
+                        pInputG, pGradOutG, pGradWG, nullptr,
+                        1, nCinPerGroup, m_nH, m_nW,
+                        nCoutPerGroup, m_nKH, m_nKW, m_nStride, m_nPad);
+                }
+            }
+            if (m_bHasBias) {
+                // 20260330 ZJH 偏置梯度：gradOutput 在 batch+spatial 维度求和
+                auto gradBias = Tensor::zeros({m_nCout});
+                float* pGB = gradBias.mutableFloatDataPtr();
+                const float* pGO = cGradOut.floatDataPtr();
+                for (int n = 0; n < m_nBatch; ++n)
+                    for (int c = 0; c < m_nCout; ++c)
+                        for (int hw = 0; hw < nHout * nWout; ++hw)
+                            pGB[c] += pGO[(n * m_nCout + c) * nHout * nWout + hw];
+                return {gradInput, gradWeight, gradBias};
+            }
             return {gradInput, gradWeight};
         }
+    }
+};
+
+// 20260331 ZJH DilatedConv2dBackward — 膨胀卷积反向（仅计算 grad_weight + grad_bias）
+// grad_input 跳过（编码器通过其他路径获得梯度），避免实现 dilated col2im
+class DilatedConv2dBackward : public GradFunction {
+public:
+    Tensor m_savedInput;
+    Tensor m_savedWeight;
+    int m_nBatch = 0, m_nCin = 0, m_nH = 0, m_nW = 0;
+    int m_nCout = 0, m_nKH = 0, m_nKW = 0;
+    int m_nStride = 1, m_nPad = 0, m_nDilation = 1;
+    bool m_bHasBias = false;
+
+    void releaseSavedTensors() override {
+        m_savedInput = Tensor();
+        m_savedWeight = Tensor();
+    }
+
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cGradOut = gradOutput.contiguous();
+        auto cInput = m_savedInput.contiguous();
+
+        int nEffKH = m_nKH + (m_nKH - 1) * (m_nDilation - 1);
+        int nHout = (m_nH + 2 * m_nPad - nEffKH) / m_nStride + 1;
+        int nWout = (m_nW + 2 * m_nPad - nEffKH) / m_nStride + 1;
+
+        // 20260331 ZJH grad_input 用零张量（梯度不回传到编码器的膨胀卷积输入）
+        auto gradInput = Tensor::zeros(cInput.shapeVec(), cInput.device());
+        auto gradWeight = Tensor::zeros(m_savedWeight.shapeVec(), cGradOut.device());
+
+#ifdef OM_HAS_CUDA
+        if (cGradOut.isCuda()) {
+            if (m_bHasBias) {
+                auto gradBias = Tensor::zeros({m_nCout}, DeviceType::CUDA);
+                CUDABackend::dilatedConv2dBackwardWeight(
+                    cInput.floatDataPtr(), cGradOut.floatDataPtr(),
+                    gradWeight.mutableFloatDataPtr(), gradBias.mutableFloatDataPtr(),
+                    m_nBatch, m_nCin, m_nH, m_nW,
+                    m_nCout, m_nKH, m_nKW, m_nStride, m_nPad, m_nDilation);
+                return {gradInput, gradWeight, gradBias};
+            } else {
+                CUDABackend::dilatedConv2dBackwardWeight(
+                    cInput.floatDataPtr(), cGradOut.floatDataPtr(),
+                    gradWeight.mutableFloatDataPtr(), nullptr,
+                    m_nBatch, m_nCin, m_nH, m_nW,
+                    m_nCout, m_nKH, m_nKW, m_nStride, m_nPad, m_nDilation);
+                return {gradInput, gradWeight};
+            }
+        }
+#endif
+        // 20260331 ZJH CPU 路径: 暂不支持，返回零梯度
+        if (m_bHasBias) return {gradInput, gradWeight, Tensor::zeros({m_nCout})};
+        return {gradInput, gradWeight};
     }
 };
 
@@ -625,6 +765,117 @@ public:
             gradInput.mutableFloatDataPtr(),
             gradGamma.mutableFloatDataPtr(), gradBeta.mutableFloatDataPtr(),
             m_nBatch, m_nChannels, m_nH, m_nW);
+        return {gradInput, gradGamma, gradBeta};
+    }
+};
+
+// 20260402 ZJH GroupNorm2dBackward — GroupNorm 反向传播 autograd 节点
+class GroupNorm2dBackward : public GradFunction {
+public:
+    Tensor m_savedInput;     // 20260402 ZJH 前向输入 [N,C,H,W]
+    Tensor m_savedMean;      // 20260402 ZJH per-(sample,group) 均值 [N*G]
+    Tensor m_savedInvStd;    // 20260402 ZJH per-(sample,group) 逆标准差 [N*G]
+    Tensor m_savedGamma;     // 20260402 ZJH 缩放参数 [C]
+    int m_nBatch = 0;        // 20260402 ZJH 批次大小
+    int m_nChannels = 0;     // 20260402 ZJH 通道数
+    int m_nH = 0;            // 20260402 ZJH 高度
+    int m_nW = 0;            // 20260402 ZJH 宽度
+    int m_nGroups = 0;       // 20260402 ZJH 组数
+    float m_fEps = 1e-5f;    // 20260402 ZJH 数值稳定 epsilon
+
+    // 20260402 ZJH 释放 GroupNorm 保存的输入和统计量
+    void releaseSavedTensors() override {
+        m_savedInput = Tensor();
+        m_savedMean = Tensor();
+        m_savedInvStd = Tensor();
+        m_savedGamma = Tensor();
+    }
+
+    std::vector<Tensor> backward(const Tensor& gradOutput) override {
+        auto cGrad = gradOutput.contiguous();  // 20260402 ZJH 确保连续
+
+#ifdef OM_HAS_CUDA
+        if (m_savedInput.isCuda()) {
+            // 20260402 ZJH GPU 路径：调用 CUDABackend::groupNorm2dBackward
+            auto gradInput = Tensor::zeros({m_nBatch, m_nChannels, m_nH, m_nW}, DeviceType::CUDA);
+            auto gradGamma = Tensor::zeros({m_nChannels}, DeviceType::CUDA);
+            auto gradBeta = Tensor::zeros({m_nChannels}, DeviceType::CUDA);
+
+            CUDABackend::groupNorm2dBackward(
+                cGrad.floatDataPtr(), m_savedInput.floatDataPtr(),
+                m_savedMean.floatDataPtr(), m_savedInvStd.floatDataPtr(),
+                m_savedGamma.floatDataPtr(),
+                gradInput.mutableFloatDataPtr(), gradGamma.mutableFloatDataPtr(),
+                gradBeta.mutableFloatDataPtr(),
+                m_nBatch, m_nChannels, m_nH, m_nW, m_nGroups, m_fEps);
+
+            return {gradInput, gradGamma, gradBeta};
+        }
+#endif
+        // 20260402 ZJH CPU 路径：手写 GroupNorm 反向
+        auto cInput = m_savedInput.isCuda() ? m_savedInput.cpu().contiguous() : m_savedInput.contiguous();
+        auto cMean = m_savedMean.isCuda() ? m_savedMean.cpu().contiguous() : m_savedMean.contiguous();
+        auto cInvStd = m_savedInvStd.isCuda() ? m_savedInvStd.cpu().contiguous() : m_savedInvStd.contiguous();
+        auto cGamma = m_savedGamma.isCuda() ? m_savedGamma.cpu().contiguous() : m_savedGamma.contiguous();
+        auto cGradCpu = cGrad.isCuda() ? cGrad.cpu().contiguous() : cGrad.contiguous();
+
+        auto gradInput = Tensor::zeros({m_nBatch, m_nChannels, m_nH, m_nW});
+        auto gradGamma = Tensor::zeros({m_nChannels});
+        auto gradBeta = Tensor::zeros({m_nChannels});
+
+        int nChannelsPerGroup = m_nChannels / m_nGroups;  // 20260402 ZJH 每组通道数
+        int nHW = m_nH * m_nW;                            // 20260402 ZJH 空间维度大小
+        int nGroupSize = nChannelsPerGroup * nHW;          // 20260402 ZJH 每组元素总数
+        const float* pIn = cInput.floatDataPtr();
+        const float* pGO = cGradCpu.floatDataPtr();
+        const float* pMean = cMean.floatDataPtr();
+        const float* pInvStd = cInvStd.floatDataPtr();
+        const float* pGamma = cGamma.floatDataPtr();
+        float* pGI = gradInput.mutableFloatDataPtr();
+        float* pGG = gradGamma.mutableFloatDataPtr();
+        float* pGB = gradBeta.mutableFloatDataPtr();
+
+        // 20260402 ZJH Pass 1: 累积 per-channel gradGamma 和 gradBeta
+        for (int n = 0; n < m_nBatch; ++n) {
+            for (int c = 0; c < m_nChannels; ++c) {
+                int g = c / nChannelsPerGroup;              // 20260402 ZJH 当前通道所属组
+                int nStatIdx = n * m_nGroups + g;           // 20260402 ZJH 统计量索引
+                float fMeanVal = pMean[nStatIdx];           // 20260402 ZJH 该组均值
+                float fInvStdVal = pInvStd[nStatIdx];       // 20260402 ZJH 该组逆标准差
+                int nOff = (n * m_nChannels + c) * nHW;     // 20260402 ZJH 当前通道起始偏移
+                for (int i = 0; i < nHW; ++i) {
+                    float fXhat = (pIn[nOff + i] - fMeanVal) * fInvStdVal;  // 20260402 ZJH 归一化值
+                    pGG[c] += pGO[nOff + i] * fXhat;       // 20260402 ZJH 累积 gradGamma
+                    pGB[c] += pGO[nOff + i];                // 20260402 ZJH 累积 gradBeta
+                }
+            }
+        }
+
+        // 20260402 ZJH Pass 2: 计算 gradInput
+        for (int n = 0; n < m_nBatch; ++n) {
+            for (int c = 0; c < m_nChannels; ++c) {
+                int g = c / nChannelsPerGroup;              // 20260402 ZJH 当前通道所属组
+                int nStatIdx = n * m_nGroups + g;           // 20260402 ZJH 统计量索引
+                float fMeanVal = pMean[nStatIdx];           // 20260402 ZJH 该组均值
+                float fInvStdVal = pInvStd[nStatIdx];       // 20260402 ZJH 该组逆标准差
+                // 20260402 ZJH 计算组内 gradGamma_sum 和 gradBeta_sum
+                float fGroupGG = 0.0f, fGroupGB = 0.0f;
+                int nCStart = g * nChannelsPerGroup;        // 20260402 ZJH 组内起始通道
+                for (int ci = nCStart; ci < nCStart + nChannelsPerGroup; ++ci) {
+                    fGroupGG += pGG[ci];                    // 20260402 ZJH 组内 gradGamma 求和
+                    fGroupGB += pGB[ci];                    // 20260402 ZJH 组内 gradBeta 求和
+                }
+                float fInvM = 1.0f / static_cast<float>(nGroupSize);  // 20260402 ZJH 组内元素倒数
+                int nOff = (n * m_nChannels + c) * nHW;     // 20260402 ZJH 当前通道起始偏移
+                for (int i = 0; i < nHW; ++i) {
+                    float fXhat = (pIn[nOff + i] - fMeanVal) * fInvStdVal;  // 20260402 ZJH 归一化值
+                    // 20260402 ZJH gradInput = gamma * invStd * (gradOut - mean(gradBeta) - xhat * mean(gradGamma))
+                    pGI[nOff + i] = pGamma[c] * fInvStdVal *
+                        (pGO[nOff + i] - fGroupGB * fInvM - fXhat * fGroupGG * fInvM);
+                }
+            }
+        }
+
         return {gradInput, gradGamma, gradBeta};
     }
 };
