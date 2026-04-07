@@ -26,15 +26,17 @@ ProjectManager::ProjectManager(QObject* pParent)
 
 // 20260322 ZJH 创建新项目
 // 流程：1. 创建 Project 对象 → 2. 设置元数据 → 3. 创建项目目录 → 4. 保存 .dfproj 文件 → 5. 通知全局
-Project* ProjectManager::createProject(const QString& strName, om::TaskType eType, const QString& strPath)
+Project* ProjectManager::createProject(const QString& strName, om::TaskType eType, const QString& strPath,
+                                       const QString& strDescription)
 {
     // 20260322 ZJH 创建新的 Project 实例
     auto pProject = std::make_unique<Project>();
 
-    // 20260322 ZJH 设置项目元数据
-    pProject->setName(strName);          // 20260322 ZJH 项目名称
-    pProject->setTaskType(eType);        // 20260322 ZJH 任务类型
-    pProject->setPath(strPath);          // 20260322 ZJH 项目路径
+    // 20260403 ZJH 设置项目元数据
+    pProject->setName(strName);                // 20260322 ZJH 项目名称
+    pProject->setTaskType(eType);              // 20260322 ZJH 任务类型
+    pProject->setPath(strPath);                // 20260322 ZJH 项目路径
+    pProject->setDescription(strDescription);  // 20260403 ZJH 项目描述
 
     // 20260322 ZJH 确保项目目录存在
     QDir dir(strPath);  // 20260322 ZJH 目标目录

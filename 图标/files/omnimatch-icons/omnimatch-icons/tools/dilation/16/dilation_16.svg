@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 100 100">
+<defs><linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1E4478"/><stop offset="100%" stop-color="#0E2240"/></linearGradient><linearGradient id="tr" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#4A9BE0"/><stop offset="100%" stop-color="#1A4A8A"/></linearGradient></defs>
+<rect x="2" y="2" width="96" height="96" rx="16" fill="url(#tr)"/><rect x="5" y="5" width="90" height="90" rx="13" fill="url(#tb)"/>
+<rect x="30" y="30" width="28" height="28" rx="3" fill="#7EAED0" opacity=".4" stroke="#7EAED0" stroke-width="1.2"/>
+<rect x="22" y="22" width="44" height="44" rx="5" fill="none" stroke="#4CB848" stroke-width="2" stroke-dasharray="5 3"/>
+<g stroke="#4CB848" stroke-width="1.8" stroke-linecap="round">
+<line x1="44" y1="16" x2="44" y2="22"/><line x1="44" y1="66" x2="44" y2="72"/>
+<line x1="16" y1="44" x2="22" y2="44"/><line x1="66" y1="44" x2="72" y2="44"/>
+<path d="M44 16 L40 20 M44 16 L48 20"/><path d="M44 72 L40 68 M44 72 L48 68"/>
+<path d="M16 44 L20 40 M16 44 L20 48"/><path d="M72 44 L68 40 M72 44 L68 48"/>
+</g>
+<text x="50" y="84" text-anchor="middle" font-size="9" fill="#4CB848" font-weight="600" font-family="Arial,sans-serif">D+</text>
+</svg>

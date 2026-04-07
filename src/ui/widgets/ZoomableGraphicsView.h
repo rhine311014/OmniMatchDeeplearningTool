@@ -44,6 +44,10 @@ public:
     // 20260322 ZJH 等比缩放图像以适应视图大小
     void fitInView();
 
+    // 20260404 ZJH 等比缩放到指定矩形区域（用于检查页双击跳转定位标注）
+    // 参数: rect - 目标矩形（场景坐标）
+    void fitInView(const QRectF& rect);
+
     // 20260322 ZJH 缩放到 1:1 实际像素大小
     void zoomToActualSize();
 

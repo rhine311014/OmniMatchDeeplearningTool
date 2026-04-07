@@ -448,6 +448,8 @@ public:
     }
 
     // 20260331 ZJH 膨胀卷积 GPU 前向（im2col+GEMM，支持 dilation 和 groups）
+    // 20260406 ZJH 参数: nDilation — 空洞率（核元素间隔），nGroups — 分组数（深度可分离时 groups=Cin）
+    //               有效感受野 = KH + (KH-1)*(dilation-1)
     static void dilatedConv2d(const float* pInput, const float* pWeight, const float* pBias,
                                float* pOutput,
                                int nBatch, int nCin, int nH, int nW,
@@ -456,11 +458,12 @@ public:
 #ifdef OM_HAS_CUDA
         omCudaDilatedConv2d(pInput, pWeight, pBias, pOutput,
                             nBatch, nCin, nH, nW, nCout, nKH, nKW,
-                            nStride, nPad, nDilation, nGroups);
+                            nStride, nPad, nDilation, nGroups);  // 20260406 ZJH 调用 CUDA 膨胀卷积前向内核
 #endif
     }
 
-    // 20260331 ZJH 膨胀卷积反向权重梯度
+    // 20260331 ZJH 膨胀卷积反向权重梯度：计算 gradWeight 和 gradBias
+    // 20260406 ZJH 原理：gradWeight = gradOutput × im2col(input)^T，在 GPU 上完成全部计算
     static void dilatedConv2dBackwardWeight(const float* pInput, const float* pGradOutput,
                                              float* pGradWeight, float* pGradBias,
                                              int nBatch, int nCin, int nH, int nW,
@@ -469,7 +472,7 @@ public:
 #ifdef OM_HAS_CUDA
         omCudaDilatedConv2dBackwardWeight(pInput, pGradOutput, pGradWeight, pGradBias,
                                            nBatch, nCin, nH, nW, nCout, nKH, nKW,
-                                           nStride, nPad, nDilation);
+                                           nStride, nPad, nDilation);  // 20260406 ZJH 调用 CUDA 膨胀卷积反向权重内核
 #endif
     }
 
@@ -535,29 +538,30 @@ public:
 #endif
     }
 
-    // 20260325 ZJH AvgPool2d 反向
+    // 20260325 ZJH AvgPool2d 反向：将梯度均匀散布回窗口内各位置
     static void avgPool2dBackward(const float* pGradOut, float* pGradIn,
                                   int nBatch, int nChannels, int nH, int nW,
                                   int nKH, int nKW, int nStride, int nPad) {
 #ifdef OM_HAS_CUDA
-        // 20260325 ZJH 先将 gradInput 清零
-        int nInputSize = nBatch * nChannels * nH * nW;
-        omCudaMemset(pGradIn, 0, static_cast<size_t>(nInputSize) * sizeof(float));
+        // 20260325 ZJH 先将 gradInput 清零（梯度需要累加，初始必须为零）
+        int nInputSize = nBatch * nChannels * nH * nW;  // 20260406 ZJH 输入总元素数
+        omCudaMemset(pGradIn, 0, static_cast<size_t>(nInputSize) * sizeof(float));  // 20260406 ZJH GPU 内存清零
         int nHout = (nH + 2 * nPad - nKH) / nStride + 1;  // 20260325 ZJH 输出高度
         int nWout = (nW + 2 * nPad - nKW) / nStride + 1;  // 20260325 ZJH 输出宽度
-        (void)nHout; (void)nWout;
+        (void)nHout; (void)nWout;  // 20260406 ZJH 消除未使用变量警告（CUDA kernel 内部自行计算）
         omCudaAvgPool2dBackward(pGradOut, pGradIn,
                                 nBatch, nChannels, nH, nW,
-                                nKH, nKW, nStride, nStride, nPad, nPad);
+                                nKH, nKW, nStride, nStride, nPad, nPad);  // 20260406 ZJH 调用 CUDA AvgPool2d 反向内核
 #endif
     }
 
     // 20260325 ZJH AdaptiveAvgPool2d 前向：将任意大小输入池化到固定 (outH, outW)
+    // 20260406 ZJH 参数: pIn — GPU 输入 [N,C,H,W]，pOut — GPU 输出 [N,C,outH,outW]
     static void adaptiveAvgPool2d(const float* pIn, float* pOut,
                                   int nBatch, int nChannels, int nH, int nW,
                                   int nOutH, int nOutW) {
 #ifdef OM_HAS_CUDA
-        omCudaAdaptiveAvgPool2d(pIn, pOut, nBatch, nChannels, nH, nW, nOutH, nOutW);
+        omCudaAdaptiveAvgPool2d(pIn, pOut, nBatch, nChannels, nH, nW, nOutH, nOutW);  // 20260406 ZJH 调用 CUDA 自适应平均池化内核
 #endif
     }
 
@@ -597,26 +601,38 @@ public:
     }
 
     // 20260402 ZJH GroupNorm2d 前向 — 调用 CUDA kernel
+    // 20260406 ZJH 参数: pInput — GPU 输入 [N,C,H,W]，pOutput — GPU 输出 [N,C,H,W]
+    //               pGamma/pBeta — 可学习缩放/偏移 [C]，pSavedMean/pSavedInvStd — 保存统计量 [N*G]
+    //               nGroups — 组数，fEps — 数值稳定性常数
     static void groupNorm2d(const float* pInput, float* pOutput,
                             const float* pGamma, const float* pBeta,
                             float* pSavedMean, float* pSavedInvStd,
                             int nBatch, int nChannels, int nH, int nW,
                             int nGroups, float fEps) {
+#ifdef OM_HAS_CUDA
+        // 20260406 ZJH 调用 CUDA GroupNorm2d 前向内核（组内通道共享均值/方差）
         omCudaGroupNorm2d(pInput, pOutput, pGamma, pBeta,
                           pSavedMean, pSavedInvStd,
                           nBatch, nChannels, nH, nW, nGroups, fEps);
+#endif
     }
 
     // 20260402 ZJH GroupNorm2d 反向 — 调用 CUDA kernel
+    // 20260406 ZJH 参数: pGradOutput — 上游梯度 [N,C,H,W]，pInput — 前向输入（反向需要）
+    //               pMean/pInvStd — 前向保存的统计量，pGamma — 缩放参数
+    //               pGradInput/pGradGamma/pGradBeta — 输出梯度
     static void groupNorm2dBackward(const float* pGradOutput, const float* pInput,
                                      const float* pMean, const float* pInvStd,
                                      const float* pGamma,
                                      float* pGradInput, float* pGradGamma, float* pGradBeta,
                                      int nBatch, int nChannels, int nH, int nW,
                                      int nGroups, float fEps) {
+#ifdef OM_HAS_CUDA
+        // 20260406 ZJH 调用 CUDA GroupNorm2d 反向内核（计算 gradInput/gradGamma/gradBeta）
         omCudaGroupNorm2dBackward(pGradOutput, pInput, pMean, pInvStd, pGamma,
                                    pGradInput, pGradGamma, pGradBeta,
                                    nBatch, nChannels, nH, nW, nGroups, fEps);
+#endif
     }
 
     // 20260325 ZJH LayerNorm 前向
@@ -719,156 +735,166 @@ public:
 #endif
     }
 
-    // 20260326 ZJH AdaptiveAvgPool2d 反向传播
+    // 20260326 ZJH AdaptiveAvgPool2d 反向传播：将梯度均匀散布回自适应划分的输入区域
     static void adaptiveAvgPool2dBackward(const float* pGradOut, float* pGradIn,
         int nBatch, int nChannels, int nH, int nW, int nOutH, int nOutW) {
 #ifdef OM_HAS_CUDA
-        omCudaAdaptiveAvgPool2dBackward(pGradOut, pGradIn, nBatch, nChannels, nH, nW, nOutH, nOutW);
+        omCudaAdaptiveAvgPool2dBackward(pGradOut, pGradIn, nBatch, nChannels, nH, nW, nOutH, nOutW);  // 20260406 ZJH 调用 CUDA 自适应平均池化反向内核
 #endif
     }
 
-    // 20260326 ZJH AddBias 反向传播
+    // 20260326 ZJH AddBias 反向传播（通道维 reduction）：gradBias[c] = sum_n_hw(gradOut[n,c,hw])
     static void addBiasBackward(const float* pGradOut, float* pGradBias,
         int nN, int nC, int nHW) {
 #ifdef OM_HAS_CUDA
-        omCudaAddBiasBackward(pGradOut, pGradBias, nN, nC, nHW);
+        omCudaAddBiasBackward(pGradOut, pGradBias, nN, nC, nHW);  // 20260406 ZJH 调用 CUDA 偏置反向内核（沿 N 和 HW 维归约）
 #endif
     }
 
-    // 20260326 ZJH UpsampleBilinear 反向传播
+    // 20260326 ZJH UpsampleBilinear 反向传播：将输出梯度按双线性插值权重散布回输入
     static void upsampleBilinearBackward(const float* pGradOut, float* pGradIn,
         int nBatch, int nChannels, int nInH, int nInW, int nOutH, int nOutW) {
 #ifdef OM_HAS_CUDA
-        omCudaUpsampleBilinearBackward(pGradOut, pGradIn, nBatch, nChannels, nInH, nInW, nOutH, nOutW);
+        omCudaUpsampleBilinearBackward(pGradOut, pGradIn, nBatch, nChannels, nInH, nInW, nOutH, nOutW);  // 20260406 ZJH 调用 CUDA 双线性上采样反向内核
 #endif
     }
 
-    // 20260326 ZJH ConcatChannels 反向传播
+    // 20260326 ZJH ConcatChannels 反向传播（按通道拆分梯度）：gradOut[N,CA+CB,HW] → gradA[N,CA,HW] + gradB[N,CB,HW]
     static void concatChannelsBackward(const float* pGradOut, float* pGradA, float* pGradB,
         int nBatch, int nCA, int nCB, int nHW) {
 #ifdef OM_HAS_CUDA
-        omCudaConcatChannelsBackward(pGradOut, pGradA, pGradB, nBatch, nCA, nCB, nHW);
+        omCudaConcatChannelsBackward(pGradOut, pGradA, pGradB, nBatch, nCA, nCB, nHW);  // 20260406 ZJH 调用 CUDA 通道拆分反向内核
 #endif
     }
 
-    // 20260326 ZJH BCEWithLogits 反向传播
+    // 20260326 ZJH BCEWithLogits 反向传播：gradLogits[i] = (sigmoid(logits[i]) - targets[i]) * fInvN
+    // 20260406 ZJH fInvN — 批次平均缩放因子（1.0/N）
     static void bceWithLogitsBackward(const float* pLogits, const float* pTargets,
         float* pGradLogits, int nCount, float fInvN) {
 #ifdef OM_HAS_CUDA
-        omCudaBCEWithLogitsBackward(pLogits, pTargets, pGradLogits, nCount, fInvN);
+        omCudaBCEWithLogitsBackward(pLogits, pTargets, pGradLogits, nCount, fInvN);  // 20260406 ZJH 调用 CUDA BCE 反向内核
 #endif
     }
 
     // ===== 20260327 ZJH Phase 4B: 补齐缺失的前向操作 =====
 
-    // 20260327 ZJH 逐元素除法
+    // 20260327 ZJH 逐元素除法：pOut[i] = pA[i] / pB[i]
     static void div(const float* pA, const float* pB, float* pOut, size_t nCount) {
 #ifdef OM_HAS_CUDA
-        omCudaDiv(pA, pB, pOut, static_cast<int>(nCount));
+        omCudaDiv(pA, pB, pOut, static_cast<int>(nCount));  // 20260406 ZJH 调用 CUDA 逐元素除法内核
 #endif
     }
 
-    // 20260327 ZJH 值裁剪
+    // 20260327 ZJH 值裁剪：pOut[i] = clamp(pIn[i], fMin, fMax)
     static void clip(const float* pIn, float* pOut, size_t nCount, float fMin, float fMax) {
 #ifdef OM_HAS_CUDA
-        omCudaClip(pIn, pOut, static_cast<int>(nCount), fMin, fMax);
+        omCudaClip(pIn, pOut, static_cast<int>(nCount), fMin, fMax);  // 20260406 ZJH 调用 CUDA 值裁剪内核
 #endif
     }
 
-    // 20260327 ZJH 双线性上采样前向
+    // 20260327 ZJH 双线性上采样前向：[N,C,H,W] → [N,C,nOutH,nOutW]
     static void upsampleBilinear(const float* pIn, float* pOut,
         int nBatch, int nChannels, int nH, int nW, int nOutH, int nOutW) {
 #ifdef OM_HAS_CUDA
-        omCudaUpsampleBilinear(pIn, pOut, nBatch, nChannels, nH, nW, nOutH, nOutW);
+        omCudaUpsampleBilinear(pIn, pOut, nBatch, nChannels, nH, nW, nOutH, nOutW);  // 20260406 ZJH 调用 CUDA 双线性上采样内核
 #endif
     }
 
-    // 20260327 ZJH 通道维度拼接前向
+    // 20260327 ZJH 通道维度拼接前向：[N,C1,HW] + [N,C2,HW] → [N,C1+C2,HW]
     static void concatChannels(const float* pA, const float* pB, float* pOut,
         int nBatch, int nC1, int nC2, int nHW) {
 #ifdef OM_HAS_CUDA
-        omCudaConcatChannels(pA, pB, pOut, nBatch, nC1, nC2, nHW);
+        omCudaConcatChannels(pA, pB, pOut, nBatch, nC1, nC2, nHW);  // 20260406 ZJH 调用 CUDA 通道拼接内核
 #endif
     }
 
     // 20260327 ZJH BCE 前向（GPU 归约，结果写入 GPU float，调用方需 D2H 读取标量）
+    // 20260406 ZJH pLogits — GPU 原始 logits，pTargets — GPU 二元目标，pResult — GPU 标量损失输出
     static void bceWithLogitsForward(const float* pLogits, const float* pTargets,
         float* pResult, int nCount) {
 #ifdef OM_HAS_CUDA
-        omCudaBCEWithLogits(pLogits, pTargets, pResult, nCount);
+        omCudaBCEWithLogits(pLogits, pTargets, pResult, nCount);  // 20260406 ZJH 调用 CUDA BCE 前向归约内核
 #endif
     }
 
     // 20260327 ZJH CrossEntropy 前向（GPU 归约）
+    // 20260406 ZJH pSoftmax — GPU softmax 输出 [B,C]，pTarget — GPU one-hot 目标 [B,C]
+    //               pResult — GPU 标量损失输出（调用方需 D2H 读取）
     static void crossEntropyForward(const float* pSoftmax, const float* pTarget,
         float* pResult, int nBatch, int nClasses) {
 #ifdef OM_HAS_CUDA
-        omCudaCrossEntropy(pSoftmax, pTarget, pResult, nBatch, nClasses);
+        omCudaCrossEntropy(pSoftmax, pTarget, pResult, nBatch, nClasses);  // 20260406 ZJH 调用 CUDA CE 前向归约内核
 #endif
     }
 
-    // 20260327 ZJH LayerNorm 反向
+    // 20260327 ZJH LayerNorm 反向：计算 gradInput/gradGamma/gradBeta
+    // 20260406 ZJH pGradOut — 上游梯度 [B,D]，pInput — 前向输入（反向需要）
+    //               pMean/pInvStd — 前向保存统计量 [B]，pGamma — 缩放参数 [D]
     static void layerNormBackward(const float* pGradOut, const float* pInput,
         const float* pMean, const float* pInvStd, const float* pGamma,
         float* pGradInput, float* pGradGamma, float* pGradBeta,
         int nBatch, int nDim) {
 #ifdef OM_HAS_CUDA
         omCudaLayerNormBackward(pGradOut, pInput, pMean, pInvStd, pGamma,
-                                pGradInput, pGradGamma, pGradBeta, nBatch, nDim);
+                                pGradInput, pGradGamma, pGradBeta, nBatch, nDim);  // 20260406 ZJH 调用 CUDA LayerNorm 反向内核
 #endif
     }
 
-    // 20260327 ZJH 转置卷积前向
+    // 20260327 ZJH 转置卷积前向（反卷积，用于上采样）
+    // 20260406 ZJH pInput: [N,Cin,Hin,Win]  pWeight: [Cin,Cout,KH,KW]  pBias: [Cout]
+    //               pOutput: [N,Cout,Hout,Wout]，Hout = (Hin-1)*stride - 2*pad + KH
     static void convTranspose2d(const float* pInput, const float* pWeight, const float* pBias,
         float* pOutput,
         int nBatch, int nCin, int nHin, int nWin,
         int nCout, int nKH, int nKW, int nStride, int nPad) {
 #ifdef OM_HAS_CUDA
         omCudaConvTranspose2d(pInput, pWeight, pBias, pOutput,
-                              nBatch, nCin, nHin, nWin, nCout, nKH, nKW, nStride, nPad);
+                              nBatch, nCin, nHin, nWin, nCout, nKH, nKW, nStride, nPad);  // 20260406 ZJH 调用 CUDA 转置卷积内核
 #endif
     }
 
-    // 20260328 ZJH 沿最后一维拼接前向
+    // 20260328 ZJH 沿最后一维拼接前向：[nOuter, nDimA] + [nOuter, nDimB] → [nOuter, nDimA+nDimB]
     static void concatLastDim(const float* pA, const float* pB, float* pOut,
         int nOuter, int nDimA, int nDimB) {
 #ifdef OM_HAS_CUDA
-        omCudaConcatLastDim(pA, pB, pOut, nOuter, nDimA, nDimB);
+        omCudaConcatLastDim(pA, pB, pOut, nOuter, nDimA, nDimB);  // 20260406 ZJH 调用 CUDA 最后一维拼接内核
 #endif
     }
 
-    // 20260328 ZJH 沿最后一维拼接反向
+    // 20260328 ZJH 沿最后一维拼接反向：将梯度拆分回 pGradA [nOuter,nDimA] 和 pGradB [nOuter,nDimB]
     static void concatLastDimBackward(const float* pGradOut, float* pGradA, float* pGradB,
         int nOuter, int nDimA, int nDimB) {
 #ifdef OM_HAS_CUDA
-        omCudaConcatLastDimBackward(pGradOut, pGradA, pGradB, nOuter, nDimA, nDimB);
+        omCudaConcatLastDimBackward(pGradOut, pGradA, pGradB, nOuter, nDimA, nDimB);  // 20260406 ZJH 调用 CUDA 最后一维拼接反向内核
 #endif
     }
 
-    // 20260328 ZJH 沿最后一维切片前向
+    // 20260328 ZJH 沿最后一维切片前向：从 [nOuter, nFullDim] 中截取 [nOuter, nLen]
+    // 20260406 ZJH nStart — 切片起始位置，nLen — 切片长度
     static void sliceLastDim(const float* pIn, float* pOut,
         int nOuter, int nFullDim, int nStart, int nLen) {
 #ifdef OM_HAS_CUDA
-        omCudaSliceLastDim(pIn, pOut, nOuter, nFullDim, nStart, nLen);
+        omCudaSliceLastDim(pIn, pOut, nOuter, nFullDim, nStart, nLen);  // 20260406 ZJH 调用 CUDA 最后一维切片内核
 #endif
     }
 
-    // 20260328 ZJH 沿最后一维切片反向
+    // 20260328 ZJH 沿最后一维切片反向：将切片位置的梯度散布回完整维度
     static void sliceLastDimBackward(const float* pGradOut, float* pGradIn,
         int nOuter, int nFullDim, int nStart, int nLen) {
 #ifdef OM_HAS_CUDA
-        omCudaSliceLastDimBackward(pGradOut, pGradIn, nOuter, nFullDim, nStart, nLen);
+        omCudaSliceLastDimBackward(pGradOut, pGradIn, nOuter, nFullDim, nStart, nLen);  // 20260406 ZJH 调用 CUDA 最后一维切片反向内核
 #endif
     }
 
     // 20260328 ZJH Softmax Last Dim 反向：gradIn = softmax * (gradOut - dot(gradOut, softmax))
-    // pGradOut: [nOuter, nLastDim] 上游梯度
-    // pSoftmax: [nOuter, nLastDim] 前向 softmax 输出
-    // pGradIn:  [nOuter, nLastDim] 输出的输入梯度
+    // 20260406 ZJH pGradOut: [nOuter, nLastDim] 上游梯度
+    //               pSoftmax: [nOuter, nLastDim] 前向 softmax 输出
+    //               pGradIn:  [nOuter, nLastDim] 输出的输入梯度
+    //               标准 softmax Jacobian-vector product 的 GPU 实现
     static void softmaxLastDimBackward(const float* pGradOut, const float* pSoftmax,
         float* pGradIn, int nOuter, int nLastDim) {
 #ifdef OM_HAS_CUDA
-        omCudaSoftmaxLastDimBackward(pGradOut, pSoftmax, pGradIn, nOuter, nLastDim);
+        omCudaSoftmaxLastDimBackward(pGradOut, pSoftmax, pGradIn, nOuter, nLastDim);  // 20260406 ZJH 调用 CUDA softmax 反向内核
 #endif
     }
 
@@ -936,22 +962,24 @@ public:
     // ===== ViT Attention Kernels =====
 
     // 20260330 ZJH QKV split + head rearrange: [B*S, 3D] → Q[BH,S,d] K[BH,S,d] V[BH,S,d]
-    // Q 自动乘以 fScale 消除后续缩放步骤，全 GPU 操作无 D2H
+    // 20260406 ZJH Q 自动乘以 fScale = 1/sqrt(headDim) 消除后续缩放步骤，全 GPU 操作无 D2H
+    //               用于 ViT/Transformer 多头注意力的 QKV 拆分与头重排
     static void qkvSplitHeads(const float* pQkv, float* pQ, float* pK, float* pV,
                                int nBatch, int nSeqLen, int nHeads, int nHeadDim,
                                float fScale) {
 #ifdef OM_HAS_CUDA
-        omCudaQkvSplitHeads(pQkv, pQ, pK, pV, nBatch, nSeqLen, nHeads, nHeadDim, fScale);
+        omCudaQkvSplitHeads(pQkv, pQ, pK, pV, nBatch, nSeqLen, nHeads, nHeadDim, fScale);  // 20260406 ZJH 调用 CUDA QKV 拆分+缩放内核
 #endif
     }
 
-    // 20260330 ZJH Merge heads: [BH, S, d] → [B*S, D]
+    // 20260330 ZJH Merge heads: [BH, S, d] → [B*S, D]（多头注意力输出合并）
+    // 20260406 ZJH 将多头拆分后的注意力输出合并回原始维度，D = nHeads * nHeadDim
     static void mergeHeads(const float* pIn, float* pOut,
                             int nBatch, int nSeqLen, int nHeads, int nHeadDim) {
 #ifdef OM_HAS_CUDA
-        omCudaMergeHeads(pIn, pOut, nBatch, nSeqLen, nHeads, nHeadDim);
+        omCudaMergeHeads(pIn, pOut, nBatch, nSeqLen, nHeads, nHeadDim);  // 20260406 ZJH 调用 CUDA 多头合并内核
 #endif
     }
-};
+};  // 20260406 ZJH class CUDABackend 结束
 
-} // namespace om
+}  // 20260406 ZJH namespace om 结束

@@ -1,6 +1,479 @@
 # 开发记录
 
+## [2026-04-07]
+
+### 20:00 - 二次全面审计+行业对齐优化（8项）
+- **修改文件**: `src/engine/bridge/EngineBridge.cpp`, `src/core/training/TrainingSession.cpp`, `src/core/DLTypes.cpp`
+- **修改类型**: 修复+优化
+- **修改内容**:
+  - P0: CPU路径Dice Loss从sigmoid改为softmax（与GPU路径一致）
+  - P0: CPU路径分割增强跳过（掩码不同步）
+  - P1: 删除OHEM死代码（tMask未使用,每batch浪费D2H+排序）
+  - P1: LR Finder保存/恢复全部参数（不只head,防骨干污染）
+  - P1: 背景patch排除缺陷区域（IoU>0.1重试,防标签污染）
+  - P1: 推理后处理增加形态学开闭运算（对标Halcon closing_circle）
+  - P2: 默认epoch/LR对齐Halcon/MVTec行业标准（分割80轮+早停,旧值500-800过高）
+- **关联功能**: 训练+推理全链路
+
+### 15:00 - 分割训练全流程审计修复（6项）
+- **修改文件**: `src/engine/bridge/EngineBridge.cpp`
+- **修改类型**: 修复
+- **修改内容**:
+  - P0: 分割模型禁用EngineBridge内部几何增强（图像翻转但掩码不同步→像素标签错位）
+  - P0: Dice Loss从sigmoid改为softmax概率（与CE一致，消除梯度冲突）
+  - P1: 类别权重归一化在neg_ratio修改后重算fWeightSum
+  - P1: 推理时BN buffers也迁移到GPU
+  - P2: LR Finder跳过分割模型（损失函数不匹配）
+  - P2: ReduceLROnPlateau同步修改fLr基准值（防止CosineAnnealing覆盖）
+  - 禁用自动混合精度（GradScaler与梯度裁剪交互bug）
+- **关联功能**: 语义分割训练+推理
+
+## [2026-04-06]
+
+### 22:00 - UI pages层20文件逐行注释补全
+
+- **修改文件**: `src/ui/pages/**/*.h`, `src/ui/pages/**/*.cpp`
+- **修改类型**: 修改
+- **修改内容**: 对src/ui/pages/目录下全部10个.h和10个.cpp文件（共15034行）进行逐行中文注释覆盖率检查。BasePage.h/cpp、ProjectPage.h/cpp、NewProjectDialog.h/cpp、GalleryPage.h、ImagePage.h、SplitPage.h、EvaluationPage.h、ExportPage.h、TrainingPage.h、InspectionPage.h共14个文件已有完整注释直接跳过。为以下6个.cpp文件补全缺失注释：(1) GalleryPage.cpp构造函数初始化列表29行逐行注释；(2) SplitPage.cpp构造函数初始化列表24行逐行注释；(3) EvaluationPage.cpp构造函数初始化列表45行+定时器创建3行注释+三栏面板创建3行注释；(4) ExportPage.cpp构造函数初始化列表34行+进度条初始化7行注释；(5) TrainingPage.cpp构造函数初始化列表59行+训练会话信号连接8行注释+控制按钮连接4行注释；(6) ImagePage.cpp工具快捷键注释12行+UI清空标签10行注释；(7) InspectionPage.cpp构造函数初始化列表47行+模型卸载5行注释+模型加载5行注释+按钮状态10行注释+结果标签重置5行注释；(8) EvaluationPage.h推理结果渲染区4行注释修复
+- **关联功能**: UI页面层(8个工作流页面+NewProjectDialog)注释规范化
+
+### 20:30 - app/widgets/dialogs/main注释检查
+
+- **修改文件**: `src/main.cpp`
+- **修改类型**: 修改
+- **修改内容**: 对src/app/(6文件)、src/ui/widgets/(36文件)、src/ui/dialogs/(12文件)、src/main.cpp、CMakeLists.txt共56个文件进行逐行中文注释覆盖率检查。src/app/全部6文件、src/ui/widgets/全部36文件、src/ui/dialogs/全部12文件、CMakeLists.txt注释已满覆盖无需修改。为src/main.cpp补全缺失注释：main函数签名注释、QApplication创建注释、SVG图标渲染循环内变量注释、阶段机定时器和堆变量注释、各阶段case注释(0-14)、阶段推进和事件循环注释
+- **关联功能**: app层/widgets层/dialogs层/入口/构建配置注释规范化
+
+### 18:30 - CUDA内核2文件逐行注释补全
+
+- **修改文件**: `src/cuda/cuda_kernels.cu`
+- **修改类型**: 修改
+- **修改内容**: 对cuda_kernels.cuh(535行)和cuda_kernels.cu(4904行)进行逐行中文注释覆盖率检查。头文件已有完整注释无需修改。为cu文件补全缺失注释：设备管理接口(GetDeviceCount/GetDeviceName/GetMemInfo)函数体内变量和返回值注释；内存管理接口(CopyH2D/CopyD2H/CopyD2D/Memset/Synchronize)行尾注释；ReLU/Sigmoid/GELU/SiLU前向kernel内部变量注释和接口函数启动参数注释；批量矩阵乘法kernel内部tile/shared memory/同步/累加注释；朴素Conv2d kernel内循环变量和坐标计算注释；膨胀im2col kernel内变量反推和填充注释；膨胀卷积分组路径(groups>1)逐变量注释；膨胀卷积反向权重梯度全流程注释；LayerNorm/BatchNorm前向kernel内标准化和仿射变换注释
+- **关联功能**: CUDA GPU加速内核(50+kernel)注释规范化
+
+### 17:20 - EngineBridge桥接层4文件逐行注释补全
+
+- **修改文件**: `src/engine/bridge/EngineBridge.cpp`
+- **修改类型**: 修改
+- **修改内容**: 对EngineBridge.h(392行)、EngineBridge.cpp(4679行)、ModelRegistry.h(109行)、ModelRegistry.cpp(382行)共4个桥接层文件进行逐行中文注释覆盖率检查。EngineBridge.h/ModelRegistry.h/ModelRegistry.cpp三个文件已有完整注释无需修改。为EngineBridge.cpp补全缺失注释：构造/析构函数注释、totalParameters/trainableParameters/hasModel方法注释、train()入口校验返回值注释、本地缓存变量(nNumClasses/nInputDim/nTrainCount/nValCount/nBatchSize/nEpochs/fLr)注释、早停变量(fBestValLoss/nPatienceCounter)注释、随机引擎rng注释、epoch训练循环变量(nBatches/fEpochLoss)注释、验证阶段变量(fValLoss/nValCorrect)注释、推理函数变量(result/nInputDim/nNumClasses/nH)注释、输出张量处理(cpu/contiguous/floatDataPtr/numel)注释、TTA推理变量注释、Benchmark统计(排序/分位数/min/max)注释、精度回归检测bPass注释、缺陷生成器结果字段注释、buildTrainAugmentConfig返回值注释、模型创建失败路径注释、eval模式切换注释
+- **关联功能**: 引擎桥接层(EngineBridge/ModelRegistry)注释规范化
+
+### 16:46 - HAL层3文件逐行注释补全
+
+- **修改文件**: `src/hal/om.hal.cuda_backend.ixx`
+- **修改类型**: 修改
+- **修改内容**: 对HAL层3个文件进行逐行中文注释覆盖率检查。om.hal.simd.ixx(380行)和om.hal.cpu_backend.ixx(1633行)已有完整教科书级注释无需修改。为om.hal.cuda_backend.ixx补全缺失注释：GroupNorm2d前向/反向添加#ifdef OM_HAS_CUDA保护和参数说明注释；为div/clip/upsampleBilinear/concatChannels/bceWithLogitsForward/crossEntropyForward/layerNormBackward/convTranspose2d/concatLastDim/sliceLastDim/softmaxLastDimBackward/dilatedConv2d/dilatedConv2dBackwardWeight等20+方法的CUDA调用行添加行尾注释；为adaptiveAvgPool2dBackward/addBiasBackward/upsampleBilinearBackward/concatChannelsBackward/bceWithLogitsBackward等反向方法补全功能描述注释；为ViT attention kernel(qkvSplitHeads/mergeHeads)补全参数说明和功能注释；为AvgPool2dBackward补全局部变量注释；添加类和命名空间结束注释
+- **关联功能**: HAL硬件抽象层(SIMD/CPU/CUDA后端)注释规范化
+
+### 16:41 - 引擎模块6文件注释补全(metrics/inference_enhance/advanced_learning/defect_generator/retrieval/autoencoder)
+
+- **修改文件**: `src/engine/om.engine.metrics.ixx`, `src/engine/om.engine.defect_generator.ixx`
+- **修改类型**: 修改
+- **修改内容**: 对6个引擎模块文件进行逐行中文注释覆盖率检查。4个文件已有完整注释无需修改(inference_enhance/advanced_learning/retrieval/autoencoder)。为metrics.ixx补全numClasses访问器和2个私有成员变量注释。为defect_generator.ixx补全大量缺失注释：导入模块注释、PerlinNoise2D排列表初始化/generate生成器循环/noise2d核心函数参数/fade/lerp/grad辅助函数、DefectTextureBank的generateMask/generateTexture内部变量、DDPMTiny的forward逐层注释/addNoise公式注释/parameters/buffers/train方法注释/UNet成员变量/噪声调度序列/upsampleNN/catCh工具函数、DefectGenerator::generate全流程注释(DRAEM+路线和DDPM路线的逐行变量/循环/分支注释)
+- **关联功能**: 引擎层评估指标/缺陷生成/检索/自编码器模块注释规范化
+
+### 16:37 - 张量核心三文件逐行注释补全
+
+- **修改文件**: `src/engine/om.engine.tensor_storage.ixx`, `src/engine/om.engine.tensor.ixx`, `src/engine/om.engine.tensor_ops.ixx`
+- **修改类型**: 修改
+- **修改内容**: 对张量核心三文件进行逐行中文注释补全。tensor_storage.ixx 补全5个访问器函数注释、头文件包含注释、模块声明注释。tensor.ixx 补全头文件包含注释、模块导入注释、析构函数注释。tensor_ops.ixx 补全头文件包含注释、模块导入注释，以及全部运算函数中缺失的autograd节点创建/参数保存/边连接/反向绑定注释、return语句注释、局部变量声明注释（涵盖add/sub/mul/div/matmul/reshape/transpose/slice/conv2d/batchnorm/groupnorm/maxpool/avgpool/flatten/dropout/sigmoid/leakyReLU/upsample/concat/convTranspose/BCE/GELU/SiLU/layerNorm/adaptiveAvgPool/batchedMatmul/softmax/tanh/clip/diceLoss等全部30+运算函数）
+- **关联功能**: 张量引擎核心模块注释规范化
+
+### 18:30 - 6文件逐行注释补全(混合精度/剪枝/蒸馏/少样本/自监督/GradCAM)
+
+- **修改文件**: `src/engine/om.engine.distillation.ixx`
+- **修改类型**: 修改
+- **修改内容**: 对fp16/pruning/distillation/fewshot/selfsup/gradcam共6个文件进行逐行注释检查。5个文件已有完整注释无需修改。为distillation.ixx补全缺失注释：DistillationManager构造函数、computeLoss内部变量/分支/返回值、computeFeatureLoss/computeAttentionLoss参数和返回值、统计查询方法、compressionRatio/modelSizeMB方法、8个成员变量、ModelPruner::prune内部循环变量、sparsity方法、QuantizationHelper::fakeQuantize/calibrate/estimateCompression逐行注释
+- **关联功能**: 引擎层蒸馏/剪枝/量化模块注释规范化
+
+### 18:05 - 引擎模块批量注释补全(15文件)
+
+- **修改文件**: `src/engine/om.engine.parallel.ixx`
+- **修改类型**: 修改
+- **修改内容**: 对15个引擎模块文件进行逐行中文注释覆盖率检查。14个文件已有完整注释无需修改(mnist/zeroshot_det/gpu_trainer/dataset_version/annotation/hypersearch/tensorrt/applications/active_learning/rest_api/hybrid_judge/production_monitor/sod/distributed)。为om.engine.parallel.ixx补全缺失注释：析构函数、workerLoop工作线程主循环、PrefetchItem成员变量、TrainStats吞吐量方法、InferenceTimer计时器、成员变量用途等
+- **关联功能**: 引擎层并行推理/训练模块注释规范化
+
+### 17:20 - CRNN/SAM2UNet模块注释补全
+
+- **修改文件**: `src/engine/om.engine.crnn.ixx`, `src/engine/om.engine.sam2_unet.ixx`
+- **修改类型**: 修改
+- **修改内容**: 为CRNN OCR模块和SAM2-UNet分割模块补全缺失的逐行中文注释。CRNN补充辅助函数段落注释、hiddenSize/inputSize/outputSize/numClasses访问器注释；SAM2UNet补充HieraBlock构造函数参数说明、forward输入输出注释、残差连接分支注释、parameters/buffers/train方法注释、成员变量注释、upsampleAndCat函数参数/返回值/逐行注释。DBNet/EdgeExtraction/SAM三个文件已有完整注释无需修改
+- **关联功能**: 引擎层OCR和分割模块注释规范化
+
+### 16:35 - AutoGrad自动微分模块注释补全
+
+- **修改文件**: `src/engine/om.engine.autograd.ixx`
+- **修改类型**: 修改
+- **修改内容**: 为自动微分模块补全缺失的逐行中文注释。包括全局模块片段注释、#include头文件用途、export module声明、namespace说明、BatchNorm2d/GroupNorm2d/AvgPool2d/MaxPool2d/Flatten/Dropout/Sigmoid/LeakyReLU/GELU/SiLU/LayerNorm/AdaptiveAvgPool2d/Tanh/BCEWithLogits/UpsampleBilinear/ConcatChannels等backward函数的功能说明和参数/返回值注释、runBackward拓扑排序BFS各步骤注释、CPU fallback路径变量注释等
+- **关联功能**: 引擎层自动微分模块注释规范化
+
+### 16:33 - 异常检测模型注释补全
+
+- **修改文件**: `src/engine/om.engine.efficientad.ixx`, `src/engine/om.engine.patchcore.ixx`, `src/engine/om.engine.gcad.ixx`, `src/engine/om.engine.dinomaly.ixx`, `src/engine/om.engine.zeroshot_ad.ixx`
+- **修改类型**: 修改
+- **修改内容**: 为5个异常检测模型文件补全缺失的逐行中文注释。包括 #include 用途、模块导入说明、构造函数参数含义、forward 输入输出说明、成员变量用途、循环目的和边界条件、条件分支含义、返回值语义、GELU 公式说明、cosine similarity 分量注释、最近邻上采样坐标映射、通道均值计算、CLS token 扩展、Transformer 层注释等
+- **关联功能**: 引擎层异常检测模块注释规范化
+
+### 17:00 - 骨干网络模型注释补全
+
+- **修改文件**: `src/engine/om.engine.resnet.ixx`, `src/engine/om.engine.resnet50.ixx`, `src/engine/om.engine.mobilenet.ixx`, `src/engine/om.engine.vit.ixx`, `src/engine/om.engine.convnext.ixx`
+- **修改类型**: 修改
+- **修改内容**: 为5个骨干网络模型文件补全缺失的逐行中文注释。包括 #include 用途、export module 声明、import 模块说明、构造函数参数含义、forward 输入输出说明、成员变量用途、循环目的、条件分支含义、返回值语义等。convnext.ixx 原有注释已完整无需修改
+- **关联功能**: 引擎层骨干网络模块注释规范化
+
+### 16:32 - Module基类模块注释补全
+- **修改文件**: `src/engine/om.engine.module.ixx`
+- **修改类型**: 修改
+- **修改内容**: 补全缺失的逐行注释（#include用途、export module声明、namespace说明、buffers()内部变量和循环注释、namedBuffers/namedParameters结果容器和全限定名构建注释、fallback分支条件判断注释、debugChildCount/debugParamCount返回值注释）
+- **关联功能**: 引擎层模块注释规范化
+
+### 16:31 - 分割/检测模型注释补全
+
+- **修改文件**: `src/engine/om.engine.segmodels.ixx`, `src/engine/om.engine.instance_seg.ixx`
+- **修改类型**: 修改
+- **修改内容**: 为 SegNet/FCN8s/DeepLabV3/ASPPModule/ASPPLite/ResBlock 类补全缺失注释（类说明、构造函数参数、forward返回值、private成员变量用途、融合循环逻辑说明等），为 instance_seg 的 ProtoNet/InstanceHead/SimpleInstanceSeg/NMS/assembleMasks 补全成员变量和 getter 函数注释。om.engine.unet.ixx 和 om.engine.yolo.ixx 已有完整注释无需修改
+- **关联功能**: 引擎层模型模块注释规范化
+
+### 16:31 - linear/activations注释补全
+- **修改文件**: `src/engine/om.engine.linear.ixx`, `src/engine/om.engine.activations.ixx`
+- **修改类型**: 修改
+- **修改内容**: 补全两个模块缺失的逐行注释（module声明、export module、namespace、#include用途、GELU/SiLU/Tanh的forward函数参数返回值注释）
+- **关联功能**: 引擎层模块注释规范化
+
+### 16:29 - autograd/optimizer注释补全
+- **修改文件**: `src/engine/om.engine.autograd.ixx`, `src/engine/om.engine.optimizer.ixx`
+- **修改类型**: 修改
+- **修改内容**: 为DilatedConv2dBackward/AvgPool2dBackward/ConvTranspose2dBackwardFn成员变量补全注释，为AdamW构造函数/addParams/step/zeroGrad/成员变量补全逐行注释。loss.ixx和scheduler.ixx已有完整注释无需修改
+- **关联功能**: 引擎层核心模块注释规范化
+
+### 16:29 - 引擎工具模块逐行注释补全
+- **修改文件**: `src/engine/om.engine.data_pipeline.ixx`
+- **修改类型**: 修改
+- **修改内容**: 补全数据管线模块缺失的注释（augmentImage内部变量声明、分区标题、Random Erasing注释等），其余5个文件(serializer/onnx/data_synthesis/checkpoint/pretrained)已有完整注释无需修改
+- **关联功能**: 引擎层工具模块注释规范化
+
+### 14:00 - 引擎模块逐行中文注释补全
+- **修改文件**: `src/engine/om.engine.conv.ixx`
+- **修改类型**: 修改
+- **修改内容**: 为 AvgPool2d、DilatedConv2d、Dropout2d 等类补全缺失的逐行中文注释（变量声明、函数调用、返回值、条件分支等），其余三个文件(module/linear/activations)已有完整注释无需修改
+- **关联功能**: 引擎层模块注释规范化
+
+## [2026-04-05]
+
+### 17:00 - 修复训练提前停止(自动收敛绕过patience)
+- **修改文件**: `src/engine/bridge/EngineBridge.cpp`
+- **修改类型**: 修复
+- **修改内容**: 自动收敛检测增加patience已消耗过半的前置条件，防止val_loss短暂平坦时绕过用户设置的patience提前停训
+- **关联功能**: 训练早停策略
+
+### 16:30 - 修复分割训练损失异常(~66000)
+- **修改文件**: `src/engine/bridge/EngineBridge.cpp`
+- **修改类型**: 修复
+- **修改内容**: BoundaryLoss的边界掩码从[B,1,H,W]扩展为[B,C,H,W]，修复tensorMul形状不匹配导致GPU越界读取随机显存
+- **关联功能**: 语义分割训练
+
+### 16:00 - 修复语义分割拆分标签统计错误
+- **修改文件**: `src/ui/pages/split/SplitPage.cpp`, `src/core/data/ImageDataset.cpp`
+- **修改类型**: 修复
+- **修改内容**: SplitPage标签统计改为按标注计数（与图库页一致）; autoSplit分层采样按主标签分组替代统一9999组
+- **关联功能**: 数据拆分页面
+
+### 15:30 - 修复分割模型推理不出缺陷
+- **修改文件**: `src/engine/bridge/EngineBridge.cpp`
+- **修改类型**: 修复
+- **修改内容**: loadModel() 增加 nNormType (GroupNorm/BatchNorm) 不匹配检测，自动重建正确归一化架构
+- **关联功能**: 语义分割推理（UNet/DeepLabV3/MobileSegNet）
+
+## [2026-04-04]
+
+### 21:30 - 修复GPU训练不可用(OM_HAS_CUDA未传递到UI层)
+- **修改文件**: `CMakeLists.txt`
+- **修改类型**: 修复
+- **修改内容**:
+  - om_ui_pages缺少OM_HAS_CUDA编译定义，导致TrainingPage中#ifndef OM_HAS_CUDA为真
+  - CUDA设备被静默回退到CPU，用户选GPU实际跑CPU（bUseCuda=0）
+  - 添加 if(OM_ENABLE_CUDA) target_compile_definitions(om_ui_pages PRIVATE OM_HAS_CUDA=1) endif()
+- **关联功能**: GPU训练
+
+### 21:15 - 修复训练matmul崩溃+防御性校验
+- **修改文件**: `src/hal/om.hal.simd.ixx`, `src/hal/om.hal.cpu_backend.ixx`, `src/engine/om.engine.tensor_ops.ixx`
+- **修改类型**: 修复
+- **修改内容**:
+  - matmulAVX2入口添加空指针/零维度防御（nM/nK/nN<=0或pA/pB/pC为null直接返回）
+  - CPUBackend::matmul入口添加同样的防御性校验
+  - tensorMatmul添加2D维度校验（ndim<2时打印错误并返回安全张量）
+  - tensorMatmul添加内维度匹配校验（A.shape(1)!=B.shape(0)时打印错误并返回零张量）
+  - 用fprintf(stderr)替代std::cerr避免MSVC C++ modules ICE
+- **关联功能**: 训练引擎稳定性
+
+### 20:55 - 双击跳转缩放定位+缩放状态同步
+- **修改文件**: `src/ui/widgets/ZoomableGraphicsView.h`, `src/ui/widgets/ZoomableGraphicsView.cpp`, `src/ui/pages/image/ImagePage.cpp`
+- **修改类型**: 修改
+- **修改内容**:
+  - ZoomableGraphicsView新增fitInView(QRectF)重载，正确同步m_dZoomFactor内部状态
+  - 检查页双击跳转后自动缩放到标注区域（50% padding），支持后续滚轮缩放
+  - 退出fitOnResize模式，锁定到标注位置不被窗口resize打断
+  - 自动发射zoomChanged信号更新右侧缩放百分比显示
+- **关联功能**: 检查页→图像页标注定位缩放
+
+### 20:30 - 检查页双击跳转图像页自动选中标注
+- **修改文件**: `src/app/Application.h`, `src/app/Application.cpp`, `src/app/MainWindow.cpp`, `src/ui/pages/inspection/InspectionPage.cpp`, `src/ui/pages/image/ImagePage.h`, `src/ui/pages/image/ImagePage.cpp`
+- **修改类型**: 修改
+- **修改内容**:
+  - Application::notifyOpenImage/requestOpenImage 信号新增可选 strAnnotationUuid 参数
+  - InspectionPage双击实例时从AnnotationIdxRole获取标注UUID传递给信号
+  - MainWindow连接处理扩展为传递标注UUID给ImagePage
+  - ImagePage::loadImage新增strAnnotationUuid参数，存入m_strPendingAnnotationUuid
+  - onAsyncImageLoaded加载完成后调用selectAnnotationByUuid自动选中标注
+- **关联功能**: 检查页→图像页标注跳转联动
+
+### 20:10 - 检查页Halcon风格实例视图+轮廓叠加
+- **修改文件**: `src/ui/widgets/ThumbnailDelegate.h`, `src/ui/widgets/ThumbnailDelegate.cpp`, `src/ui/pages/inspection/InspectionPage.cpp`
+- **修改类型**: 修改
+- **修改内容**:
+  - 实例视图不再限制任务类型，有vecAnnotations即启用（对标Halcon DL Tool）
+  - 新增AnnotationPolyRole存储标注多边形数据（原图坐标系）
+  - refreshModel()为每个实例构建轮廓多边形（Polygon直接用/Rect转矩形多边形）
+  - ThumbnailDelegate绘制裁剪缩略图后叠加标注轮廓+半透明填充
+  - 轮廓坐标从原图坐标系变换到缩略图坐标系（含padding补偿）
+  - updateStatistics()实例视图判断逻辑与refreshModel()保持一致
+- **关联功能**: 检查页实例视图（对标Halcon检查页）
+
+### 19:51 - 检查页默认显示已标注图像+标签行点击过滤
+- **修改文件**: `src/ui/pages/inspection/InspectionPage.cpp`, `src/ui/pages/inspection/InspectionPage.h`
+- **修改类型**: 修改
+- **修改内容**:
+  - 项目加载后状态过滤默认设为"已标注"，检查页只显示已标注图像
+  - 左侧统计面板标签行添加点击交互：点击标签行过滤到该标签，再次点击取消过滤
+  - 点击"未标注的图像"行切换到只显示未标注图像
+  - 标签行增加手形光标和悬停高亮样式
+  - 新增 eventFilter 处理标签行鼠标点击事件
+- **关联功能**: 检查页数据过滤交互
+
+## [2026-04-03]
+
+### 10:14 - 粒子动画流畅度最终修复
+- **修改文件**: `src/ui/widgets/SplashScreen.cpp`, `src/app/MainWindow.cpp`, `src/main.cpp`
+- **修改类型**: 修复
+- **修改内容**:
+  - tickAnimation()内加双重processEvents()，强制DWM合成器刷新窗口
+  - initPage()每个页面构造后加processEvents()让主线程处理绘制
+  - 阶段定时器间隔从16ms→50ms，每阶段之间留足时间给DWM合成粒子帧
+  - 结合后台线程持续渲染+主线程processEvents强制刷新，双重保障流畅度
+- **关联功能**: 启动动画流畅度
+
+### 10:08 - 粒子动画后台线程渲染
+- **修改文件**: `src/ui/widgets/SplashScreen.h`, `src/ui/widgets/SplashScreen.cpp`
+- **修改类型**: 重构
+- **修改内容**:
+  - 新增ParticleRenderThread后台线程类，独立于主线程持续16ms循环更新粒子+渲染到QImage
+  - 粒子位置更新和QPainter绘制在后台线程执行，绘制到本地QImage帧缓冲区
+  - SplashScreen::paintEvent()仅做drawImage拷贝(~1ms)，不再直接计算粒子
+  - frameReady信号用QueuedConnection投递，主线程空闲时自动触发update重绘
+  - 主线程任何阻塞(页面构造/GPU检测)期间，后台线程粒子位置持续更新不停止
+  - tickAnimation()仍可用(只做repaint)，但不再是动画流畅的必要条件
+- **关联功能**: 启动画面粒子动画流畅度
+
+### 09:39 - exe文件图标嵌入
+- **修改文件**: `resources/icons/app_icon.ico`(新增), `resources/app_icon.rc`(新增), `CMakeLists.txt`
+- **修改类型**: 新增
+- **修改内容**:
+  - 用Python+Pillow生成app_icon.ico(7种尺寸: 16/24/32/48/64/128/256)
+  - 创建app_icon.rc资源文件，定义IDI_ICON1指向ico文件
+  - CMakeLists.txt omnimatch_app目标添加app_icon.rc，编译时嵌入图标到exe
+  - 效果: 资源管理器/任务栏/标题栏均显示应用图标
+- **关联功能**: 应用图标
+
+### 09:30 - 启动动画彻底修复+图标修复
+- **修改文件**: `src/main.cpp`, `src/ui/widgets/SplashScreen.h`, `src/ui/widgets/SplashScreen.cpp`
+- **修改类型**: 修复
+- **修改内容**:
+  - 核心修复: SplashScreen新增tickAnimation()方法 = updateParticles() + repaint()
+  - repaint()直接调用paintEvent()不经过事件循环，阻塞期间也能同步绘制粒子
+  - main.cpp每个阻塞操作(页面构造/主题加载等)前后各调一次tickAnimation()
+  - GPU等待期间每16ms也调用tickAnimation()保持粒子运动
+  - 修复标题栏无图标: 阶段14添加pMW->setWindowIcon(QApplication::windowIcon())
+- **关联功能**: 启动画面流畅度、窗口图标
+
+### 09:04 - 启动动画流畅度优化
+- **修改文件**: `src/main.cpp`, `src/ui/widgets/SplashScreen.h`, `src/ui/widgets/SplashScreen.cpp`
+- **修改类型**: 修改
+- **修改内容**:
+  - 阶段定时器间隔从0ms改为32ms，保证每阶段之间粒子动画至少运行2帧
+  - 进度条从不确定模式改为确定模式(0~100%)，每阶段更新真实进度百分比
+  - SplashScreen新增setProgress(int)方法，首次调用自动切换确定模式
+  - setStatus/setProgress内调用repaint()立即刷新，防止后续阻塞延迟显示
+- **关联功能**: 启动画面流畅度
+
+### 08:21 - 修复启动动画卡住(阶段机重构)
+- **修改文件**: `src/main.cpp`, `src/app/MainWindow.h`, `src/app/MainWindow.cpp`
+- **修改类型**: 重构/修复
+- **修改内容**:
+  - 根因: 原启动流程在app.exec()之前同步执行所有初始化，事件循环未启动，QTimer无法触发，动画冻结
+  - main.cpp: 用阶段机定时器(interval=0)驱动15个阶段，每tick只做一步工作后归还事件循环
+  - 阶段: Application单例→GPU后台检测→等待完成→主题→MainWindow骨架→页面0~7逐个→finalizeInit→fadeOut
+  - GPU检测用QtConcurrent::run放后台线程，阶段2轮询isFinished()不阻塞
+  - MainWindow: 构造函数新增bDeferPages参数，true时只创建骨架不创建页面
+  - 新增initPage(int)分步创建单个页面，finalizeInit()完成信号连接和状态栏初始化
+  - 每个页面构造函数独占一个tick(~10-50ms)，tick之间事件循环处理粒子定时器(16ms)保持60FPS
+- **关联功能**: 启动画面、应用初始化流程
+
+### 00:41 - Halcon风格新建项目对话框
+- **修改文件**: `src/ui/pages/project/NewProjectDialog.h`, `src/ui/pages/project/NewProjectDialog.cpp`, `src/core/project/Project.h`, `src/core/project/Project.cpp`, `src/core/project/ProjectManager.h`, `src/core/project/ProjectManager.cpp`, `src/core/project/ProjectSerializer.cpp`, `src/ui/pages/project/ProjectPage.cpp`
+- **修改类型**: 重构/新增
+- **修改内容**:
+  - 新建项目对话框从简单表单重构为 Halcon DL Tool 风格：卡片网格选择任务类型(10种) + 右侧描述面板 + 底部项目信息表单
+  - 新增导入数据集按钮区、项目描述多行文本框、保存相对图像路径复选框
+  - Project 类新增 m_strDescription 字段及 getter/setter
+  - ProjectManager::createProject() 新增 description 参数
+  - ProjectSerializer 支持 description 字段序列化/反序列化（向后兼容）
+  - ProjectPage 调用方同步传递 description 参数
+  - 修复 TaskType 范围检查(0-7→0-9)适配新增的图像检索和无监督分割类型
+- **关联功能**: 项目管理模块、新建项目流程
+
 ## [2026-04-02]
+
+### 22:13 - Phase 3.2/3.8/3.9 三项优化实施
+- **修改文件**: `src/engine/om.engine.convnext.ixx`(新增), `src/engine/bridge/ModelRegistry.cpp`, `src/engine/bridge/EngineBridge.h`, `src/engine/bridge/EngineBridge.cpp`, `src/ui/pages/evaluation/EvaluationPage.h`, `src/ui/pages/evaluation/EvaluationPage.cpp`, `src/ui/pages/export/ExportPage.h`, `src/ui/pages/export/ExportPage.cpp`, `CMakeLists.txt`
+- **修改类型**: 新增/修改
+- **修改内容**:
+  - **Phase 3.2 ConvNeXt-Tiny**: 新建 om.engine.convnext.ixx 模块，实现 LayerNormChannel + ConvNeXtBlock(DW-Conv7x7→LN→1x1Conv→GELU→1x1Conv+LayerScale) + ConvNeXtDownsample + ConvNeXtTiny(4 Stage [3,3,9,3] 通道 [96,192,384,768])。注册到 ModelRegistry，添加 CMake 模块引用。
+  - **Phase 3.8 AutoML**: BridgeTrainParams 添加 bSmartMode 字段，EngineBridge::train() 添加智能选择逻辑（按任务类型+数据量自动选模型/LR/batch/epoch/优化器）
+  - **Phase 3.9 模型对比+部署包**: EvaluationPage 添加 QTableWidget 对比表格（模型名称|精度|延迟|大小|训练时间），评估完成自动追加。ExportPage 添加一键部署包按钮，打包 .onnx + inference_config.json + README.txt 到独立目录
+- **关联功能**: 新模型架构、AutoML 智能训练、模型对比面板、一键部署包导出
+
+## [2026-04-03]
+
+### 02:30 - Phase 2.3~2.7 四项优化实施
+- **修改文件**: `src/engine/bridge/EngineBridge.h`, `src/engine/bridge/EngineBridge.cpp`, `src/ui/pages/training/TrainingPage.h`, `src/ui/pages/training/TrainingPage.cpp`, `src/core/training/TrainingConfig.h`, `src/core/DataDiagnostics.h`(新增), `src/engine/om.engine.efficientad.ixx`, `src/engine/om.engine.data_pipeline.ixx`
+- **修改类型**: 新增/修改
+- **修改内容**:
+  - **[OPT-2.3] 高级增强集成**: buildTrainAugmentConfig() 根据模型类型自动配置 — EfficientAD→CutPaste, YOLO→Mosaic, 分类→MixUp/CutMix, 分割→ElasticDeform; BridgeTrainParams 新增 bAdvancedAugment 开关
+  - **[OPT-2.5] Continual Learning UI**: TrainingPage 添加增量训练 QCheckBox + EWC λ 微调框; BridgeTrainParams/TrainingConfig 新增 bContinualLearning/fEwcLambda 字段
+  - **[OPT-2.6] 数据质量诊断**: 新增 DataDiagnostics.h — analyze() 统计类别分布/检测不平衡/生成建议; computeClassWeights() 计算逆频率加权
+  - **[OPT-2.7] 自适应阈值校准**: EfficientAD 新增 setAnomalyThreshold(); 校准流程增强为 3-sigma 基线 + 验证集 F1-max 搜索（含正常+异常样本时自动启用）
+- **关联功能**: 训练增强管线、增量学习、数据诊断、异常检测阈值优化
+
+### 01:30 - 21项优化方案批量实施（Phase 1-3）
+- **修改文件**: `cuda_kernels.cu/cuh`, `EngineBridge.cpp/h`, `ModelExporter.cpp/h`, `om.engine.loss.ixx`, `om.engine.autograd.ixx`, `om.engine.pruning.ixx`, `om.engine.data_pipeline.ixx`, `OnnxRuntimeInference.h`, `om.engine.patchcore.ixx`, `om.engine.efficientad.ixx`, `TrainingPage.cpp/h`, `ExportPage.cpp/h`, `EvaluationPage.cpp/h`, `om.engine.convnext.ixx`(新增), `DataDiagnostics.h`(新增)
+- **修改类型**: 新增/修改
+- **修改内容**:
+  - **Phase 1 (5项已完成)**: ① FP16 自动启用(GPU CC≥7.0 检测) ② ImageNet ResNet18 预训练骨干(PatchCore+EfficientAD) ③ LR Range Test 扩展至分割/检测 ④ 训练时间预估+过拟合/欠拟合/LR震荡诊断 ⑤ TensorRT 一键优化按钮
+  - **Phase 2 (7项)**: ⑥ cuDNN 卷积(已有,默认ON) ⑦ AsyncDataLoader 异步数据管线 ⑧ CutPaste/MixUp/CutMix/Mosaic/ElasticDeform ⑨ 模型量化流水线(PTQ/QAT) ⑩ Continual Learning UI ⑪ DataDiagnostics 数据质量诊断 ⑫ F1-max 阈值校准
+  - **Phase 3 (9项)**: ⑬ 渐进式分辨率参数 ⑭ ConvNeXt-Tiny 架构 ⑮ TensorBufferPool 缓冲区复用 ⑯ Conv+BN 融合(fuseConvBN) ⑰ CUDA Graph 推理 ⑱ ORT 高级优化配置 ⑲ AdaptiveLossWeighter ⑳ AutoML bSmartMode ㉑ 模型对比+部署包导出
+- **关联功能**: 全面优化方案 OPTIMIZATION_PLAN.md 的 21 项实施
+
+## [2026-04-02]
+
+### 27:30 - Phase1.2 ImageNet预训练骨干替换
+- **修改文件**: `src/engine/om.engine.patchcore.ixx`, `src/engine/om.engine.efficientad.ixx`, `src/engine/bridge/EngineBridge.cpp`
+- **修改类型**: 修改
+- **修改内容**: PatchCore 和 EfficientAD 的特征提取器从 4 层轻量 CNN 升级为 ResNet18 预训练骨干。PatchCore 新增 ResNet18FeatureExtractor 类（Layer2+Layer3 多尺度拼接 384 维特征），EfficientAD 新增 ResNet18Backbone 类（教师=预训练冻结，学生=随机初始化）。添加 bUsePretrainedBackbone 标志（默认 true），保留原始 CNN 作为 fallback。EngineBridge 自动搜索并加载 pretrained/resnet18_imagenet.omm 到教师网络。
+- **关联功能**: 异常检测精度提升（对标 PatchCore/EfficientAD 论文 SOTA）
+
+### 26:30 - Phase2.2 异步多线程数据管线
+- **修改文件**: `src/engine/om.engine.data_pipeline.ixx`
+- **修改类型**: 新增
+- **修改内容**: 实现 AsyncDataLoader 类 — 多线程异步数据预取管线，对标 PyTorch DataLoader(num_workers=4, prefetch_factor=2)。N 个 worker 线程并行执行加载→增强→归一化写入环形缓冲区，训练线程阻塞读取就绪 batch，实现 CPU/GPU 流水线重叠。包含 Fisher-Yates 洗牌、thread_local 临时缓冲、原子任务分配、条件变量同步。
+- **关联功能**: 训练加速（预期 1.5-3x）
+
+### 25:30 - Phase1.4训练诊断+Phase1.5 TRT优化
+
+- **修改文件**: `src/ui/pages/training/TrainingPage.h`, `src/ui/pages/training/TrainingPage.cpp`, `src/ui/pages/export/ExportPage.h`, `src/ui/pages/export/ExportPage.cpp`
+- **修改类型**: 修改
+- **修改内容**:
+  - Phase 1.4 训练时间预估+智能诊断: epoch回调中滑动平均估算剩余时间; 自动检测过拟合(train↓val↑连续3+epoch)/欠拟合(前5epoch下降<5%)/LR过大(损失正负交替震荡)/梯度消失(val_metric连续10epoch无改善); 诊断建议面板输出到训练日志; 正面反馈每10epoch检查
+  - Phase 1.5 TensorRT一键优化: ExportPage新增TRT优化分组框(精度FP16/INT8/FP32下拉框+橙色优化按钮+进度条+状态标签); QThread异步构建不阻塞UI; 自动检查ONNX存在性; 构建完成显示延迟对比; 添加导出历史记录
+- **关联功能**: 训练页面诊断系统 + 导出页面TensorRT优化
+
+### 24:00 - 全面优化方案制定
+- **修改文件**: `OPTIMIZATION_PLAN.md`
+- **修改类型**: 新增
+- **修改内容**: 基于项目代码深度审计 + 联网搜索 2025-2026 前沿技术，制定 21 项优化方案（训练加速/精度提升/推理优化/易用性），对标 HALCON 25.11 / MVTec DL Tool 25.12 / Anomalib / YOLO26
+- **关联功能**: 项目整体优化路线图（Phase 1-3，2-6 个月）
+
+### 23:30 - 最新研究8项优化
+
+- **修改文件**: `EngineBridge.cpp/h`, `resnet50.ixx`, `ModelExporter.cpp`, `test_regression.cpp`, `DLTypes.h/cpp`, `ModelRegistry.cpp`, `CMakeLists.txt`, `om.engine.dinomaly.ixx`(新增), `om.engine.sam2_unet.ixx`(新增)
+- **修改类型**: 新增/修改
+- **修改内容**:
+  - Phase1: BN折叠推理优化(训练完成后自动Conv+BN合并,推理减少~50%算子); ONNX INT8量化导出; One-shot/Few-shot训练验证(1/5张图收敛测试)
+  - Phase2: BlurPool抗锯齿下采样(3x3高斯滤波+stride采样,对标ETFA2025); Dinomaly架构(CVPR2025 SOTA 99.6%AUROC: ViT编码器+MLP瓶颈+Transformer解码器+Cosine重建损失)
+  - Phase3: SAM2-UNet(Hiera编码器+U-Net解码器,IoU+20%); 半监督训练参数(bSemiSupervised+fPseudoLabelThreshold)
+- **关联功能**: 基于CVPR2025/ETFA2025/Nature2024最新论文的8项深度学习优化
+
+### 22:00 - 5项死集成全部接线
+
+- **修改文件**: `EngineBridge.h`, `EngineBridge.cpp`, `om.engine.efficientad.ixx`
+- **修改类型**: 修改
+- **修改内容**:
+  - (1) FP16真正接入: GradScaler实例化 + loss缩放(scale) + backward + 梯度反缩放(unscaleGrads) + NaN跳过step + 动态update
+  - (2) BoundaryLoss真正接入: 在线边界检测(4-邻域mask边缘) + 边界加权损失项(0.3权重) + CE+Dice+Boundary三项混合
+  - (3) DenseCRF真正接入: 分割推理argmax前自动执行CRF精化(5次迭代+颜色引导双边滤波) + fallback到原始argmax
+  - (4) MultiScaleFPN真正接入: EfficientAD.computeAnomalyScoreMultiScale(3级特征H/4+H/8+H/16无参数加权融合→H/4输出)
+  - (5) Pruning真正接入: BridgeTrainParams.bPruneAfterTraining + 训练完成后自动pruneModelMagnitude + analyzeSparsity统计
+- **关联功能**: 消灭全部5个死集成点(FP16/BoundaryLoss/CRF/FPN/Pruning)
+
+### 21:00 - 死集成修复(3项关键接线)
+
+- **修改文件**: `EngineBridge.cpp`
+- **修改类型**: 修改
+- **修改内容**:
+  - EdgeExtraction训练路径: bIsEdgeExtraction标记 + BCE+Dice边缘损失(正样本20x加权) + mask→边缘目标转换
+  - GCAD自动拟合: 训练完成后自动收集正常样本全局特征→fitGlobalDistribution+calibrateThreshold(无需用户手动调用)
+  - EngineBridge导入edge_extraction模块
+- **关联功能**: 消除3个死集成点(EdgeExtraction训练/GCAD Stage2/模块导入)
+
+### 20:00 - 4大方向系统性优化
+
+- **修改文件**: `om.engine.edge_extraction.ixx`(新增), `tests/test_regression.cpp`(新增), `EngineBridge.h`, `EngineBridge.cpp`, `DLTypes.h`, `DLTypes.cpp`, `ModelRegistry.cpp`, `CMakeLists.txt`
+- **修改类型**: 新增/修改
+- **修改内容**:
+  - (1) DL边缘提取: EdgeExtractionNet(轻量U-Net 32ch, 4级编解码+深监督+NMS thin后处理, ~0.5M参数, 对标Halcon独有能力); EdgeBCEDiceLoss(正样本20x加权); 注册EdgeUNet=80
+  - (2) 万级回归测试框架: 4级金字塔(L1张量5000+case, L2模型3000+case, L3训练收敛2000+case, L4小样本1000+case); 确定性训练验证(同种子→同loss); 推理延迟benchmark
+  - (3) 推理benchmark: benchmarkInference(warmup+median/p95/p99/FPS统计)
+  - (4) 精度基线系统: saveAccuracyBaseline/loadAccuracyBaseline/checkAccuracyRegression(JSON存储, ±2%容忍度, 推理速度≤1.2x基线)
+- **关联功能**: 对标Halcon Edge Extraction + 训练工程化 + 推理速度验证
+
+### 18:30 - 检查页实例视图(对标Halcon)
+
+- **修改文件**: `ThumbnailDelegate.h`, `ThumbnailDelegate.cpp`, `InspectionPage.cpp`
+- **修改类型**: 修改
+- **修改内容**: 检查页从"显示完整图像"改为"显示标注实例裁剪图"(对标Halcon DL Tool 24.05); ThumbnailDelegate新增CropRectRole/AnnotationIdxRole/ImageIndexRole; refreshModel()对分割/检测任务遍历vecAnnotations每个标注生成独立缩略图(按labelId排序分组); paint()支持裁剪渲染+10%padding+标签色边框; 统计显示"N个标注"替代"N张图像"
+- **关联功能**: 对标Halcon DL Tool检查页实例视图
+
+### 17:30 - 系统性8项差距补全
+
+- **修改文件**: `om.engine.efficientad.ixx`, `om.engine.loss.ixx`, `EngineBridge.h`, `EngineBridge.cpp`, `InspectionPage.cpp`
+- **修改类型**: 新增/修改
+- **修改内容**:
+  - (1) EfficientAD多尺度FPN: forwardMultiScale()三级特征提取 + MultiScaleAnomalyFPN融合(H/4+H/8+H/16→H/4热力图, 4x像素密度提升)
+  - (2) DenseCRFPostProcessor: 纯CPU高斯双边CRF后处理(5次迭代消息传递, 空间+颜色双核, ~50ms/帧, 边界F1+5-10%)
+  - (3) BoundaryLoss接线: BridgeTrainParams.bUseBoundaryLoss标志 + 训练日志"CE+Dice+Boundary"
+  - (4) FP16混合精度: BridgeTrainParams.bMixedPrecision + GradScaler配置(初始scale=1024, 动态NaN检测)
+  - (5) 确定性训练: BridgeTrainParams.bDeterministic/nRandomSeed + 种子固定(srand)
+  - (6) TTA推理UI接线: InspectionPage推理按钮根据m_pChkEnableTTA/m_pCboTTAMode调用inferWithTTA()
+  - (7) GCAD训练: Teacher冻结+Student MSE蒸馏 + 优化器仅含Student+GlobalEncoder参数
+  - (8) DBNet训练: 概率图BCE+阈值图L1+二值图BCE三项损失(DBLoss), mask最近邻下采样到H/4
+- **关联功能**: 对标Halcon/ViDi 8项核心差距系统性补全
+
+### 16:00 - 标签统计对标Halcon DL Tool
+
+- **修改文件**: `InspectionPage.cpp`, `InspectionPage.h`
+- **修改类型**: 修改
+- **修改内容**: 标签统计面板重构: 纯文本QLabel→动态彩色标签行(彩色ID方块+标签名+右对齐计数); 标注计数不再加"张"单位(与Halcon一致,按标注实例数显示); 未标注行灰色独立显示; 亮度自适应文字颜色
+- **关联功能**: 对标 Halcon DL Tool 24.05 检查页面标签面板
+
+### 15:30 - 对标Halcon/ViDi能力差距补全
+
+- **修改文件**: `om.engine.loss.ixx`, `om.engine.crnn.ixx`, `om.engine.gcad.ixx`(新增), `om.engine.dbnet.ixx`(新增), `DLTypes.h`, `DLTypes.cpp`, `ModelRegistry.cpp`, `EngineBridge.h`, `EngineBridge.cpp`, `CMakeLists.txt`
+- **修改类型**: 新增/修改
+- **修改内容**:
+  - Phase 1: BoundaryLoss(距离变换边界加权) + SegmentationCombinedLoss(CE+Dice+Boundary三项); CharsetManager多语言字符集(5级: Digits→Latin→Industrial→Extended→CJK 20902字符)
+  - Phase 2: GCAD全局上下文异常检测(双分支: LocalFeatureExtractor+GlobalContextEncoder+GaussianDistribution, 检测布局异常+纹理异常)
+  - Phase 3: DBNet可微分二值化文本检测(ResNet18+FPN+DBHead, 概率图+阈值图+可微分二值化B=σ(k*(P-T)))
+  - Phase 4: EngineBridge集成GCAD推理/分布拟合、ContinualLearner增量训练(EWC)、TTA增强推理; ModelRegistry注册GCAD/DBNet/CRNN
+- **关联功能**: 对标Halcon 25.11 GCAD+增量学习, Cognex ViDi Blue OCR, 分割边界精度提升
 
 ### 02:15 - GroupNorm2d 单元测试
 

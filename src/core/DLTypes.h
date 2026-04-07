@@ -20,7 +20,9 @@ enum class TaskType : uint8_t {
     InstanceSegmentation = 4,  // 20260322 ZJH 实例分割（像素级分类 + 实例区分）
     DeepOCR              = 5,  // 20260322 ZJH 深度OCR（文本检测 + 文字识别）
     ZeroShotDefectDetection = 6,  // 20260322 ZJH 零样本缺陷检测（CLIP 文本引导，无需训练）
-    ZeroShotObjectDetection = 7   // 20260322 ZJH 零样本目标检测（开放词汇检测，文本描述驱动）
+    ZeroShotObjectDetection = 7,  // 20260322 ZJH 零样本目标检测（开放词汇检测，文本描述驱动）
+    ImageRetrieval          = 8,  // 20260402 ZJH DL 图像检索（特征嵌入+余弦相似度搜索，对标海康）
+    UnsupervisedSegmentation= 9   // 20260402 ZJH DL 无监督分割（类 SAM 自动分区，无需标注）
 };
 
 // 20260322 ZJH 推理后端类型枚举（9 种）
@@ -97,6 +99,7 @@ enum class ModelArchitecture : uint8_t {
     PatchCore   = 11,  // 20260322 ZJH PatchCore 核心补丁记忆库异常检测
     EfficientAD = 12,  // 20260322 ZJH EfficientAD 高效异常检测
     FastFlow    = 13,  // 20260322 ZJH FastFlow 归一化流异常检测
+    GCAD        = 14,  // 20260402 ZJH Global Context AD 全局上下文异常检测（布局+纹理双分支）
 
     // 20260322 ZJH 目标检测模型（编号 20-24）
     YOLOv5Nano  = 20,  // 20260322 ZJH YOLOv5-Nano 轻量检测
@@ -118,6 +121,8 @@ enum class ModelArchitecture : uint8_t {
     // 20260322 ZJH OCR 模型（编号 50-54）
     PaddleOCRv4 = 50,  // 20260322 ZJH PaddleOCR v4 文字识别
     PPOCR       = 51,  // 20260322 ZJH PP-OCR 轻量文字识别
+    DBNet       = 52,  // 20260402 ZJH DBNet 可微分二值化文本检测
+    DBNetCRNN   = 53,  // 20260402 ZJH DBNet+CRNN 端到端 OCR 流水线（检测+识别）
 
     // 20260322 ZJH 零样本缺陷检测模型（编号 60-64）
     WinCLIP     = 60,  // 20260322 ZJH WinCLIP 零样本缺陷检测
@@ -125,7 +130,18 @@ enum class ModelArchitecture : uint8_t {
 
     // 20260322 ZJH 零样本目标检测模型（编号 70-74）
     GroundingDINO = 70,  // 20260322 ZJH Grounding DINO 零样本目标检测
-    YOLOWorld     = 71   // 20260322 ZJH YOLO-World 零样本目标检测
+    YOLOWorld     = 71,  // 20260322 ZJH YOLO-World 零样本目标检测
+
+    // 20260402 ZJH DL 边缘提取模型（编号 80-84）— 对标 Halcon Edge Extraction
+    EdgeUNet      = 80,  // 20260402 ZJH 轻量 U-Net 边缘提取（~0.5M 参数）
+
+    // 20260402 ZJH DL 图像检索（编号 82-84）— 对标海康 VisionMaster
+    ImageRetrievalNet = 82,  // 20260402 ZJH 特征嵌入网络（CNN backbone + 全局池化 + L2 归一化）
+
+    // 20260402 ZJH CVPR 2025 / 前沿架构（编号 90-99）
+    Dinomaly      = 90,  // 20260402 ZJH Dinomaly (CVPR 2025 SOTA, 99.6% AUROC MVTec AD)
+    SAM2UNet      = 91,  // 20260402 ZJH SAM2-UNet (Hiera 编码器 + U-Net 解码器, IoU +20%)
+    MobileSAM     = 92   // 20260402 ZJH MobileSAM 无监督分割（轻量 SAM，自动分区无需标注）
 };
 
 // 20260330 ZJH 模型能力等级枚举（借鉴海康 VisionTrain "模型能力" 概念）

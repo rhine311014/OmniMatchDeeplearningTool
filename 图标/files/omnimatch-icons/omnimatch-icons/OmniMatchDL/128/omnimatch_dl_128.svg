@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 180 180">
+  <defs>
+    <linearGradient id="ring1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5BA8E8"/>
+      <stop offset="50%" stop-color="#2E6DBF"/>
+      <stop offset="100%" stop-color="#1A3F7A"/>
+    </linearGradient>
+    <linearGradient id="bg1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1B3A6B"/>
+      <stop offset="100%" stop-color="#0D1F3C"/>
+    </linearGradient>
+    <linearGradient id="greenG" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#6FCF5C"/>
+      <stop offset="100%" stop-color="#3BA534"/>
+    </linearGradient>
+    <radialGradient id="glow1" cx="50%" cy="30%" r="60%">
+      <stop offset="0%" stop-color="#3B7DD8" stop-opacity=".25"/>
+      <stop offset="100%" stop-color="#0D1F3C" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="90" cy="90" r="86" fill="url(#ring1)"/>
+  <circle cx="90" cy="90" r="82" fill="none" stroke="#7CC4F0" stroke-width="1" opacity=".5"/>
+  <circle cx="90" cy="90" r="74" fill="url(#bg1)"/>
+  <circle cx="90" cy="90" r="74" fill="url(#glow1)"/>
+  <g stroke="#4A8CC8" stroke-width="0.8" opacity=".6">
+    <line x1="45" y1="45" x2="70" y2="60"/><line x1="45" y1="45" x2="90" y2="55"/>
+    <line x1="45" y1="45" x2="70" y2="75"/><line x1="45" y1="90" x2="70" y2="60"/>
+    <line x1="45" y1="90" x2="70" y2="75"/><line x1="45" y1="90" x2="70" y2="95"/>
+    <line x1="45" y1="90" x2="90" y2="55"/><line x1="45" y1="135" x2="70" y2="95"/>
+    <line x1="45" y1="135" x2="70" y2="115"/><line x1="45" y1="135" x2="90" y2="125"/>
+    <line x1="70" y1="60" x2="90" y2="55"/><line x1="70" y1="60" x2="90" y2="90"/>
+    <line x1="70" y1="75" x2="90" y2="55"/><line x1="70" y1="75" x2="90" y2="90"/>
+    <line x1="70" y1="95" x2="90" y2="90"/><line x1="70" y1="95" x2="90" y2="125"/>
+    <line x1="70" y1="115" x2="90" y2="90"/><line x1="70" y1="115" x2="90" y2="125"/>
+    <line x1="90" y1="55" x2="115" y2="60"/><line x1="90" y1="55" x2="115" y2="80"/>
+    <line x1="90" y1="90" x2="115" y2="60"/><line x1="90" y1="90" x2="115" y2="80"/>
+    <line x1="90" y1="90" x2="115" y2="100"/><line x1="90" y1="90" x2="115" y2="120"/>
+    <line x1="90" y1="125" x2="115" y2="100"/><line x1="90" y1="125" x2="115" y2="120"/>
+    <line x1="115" y1="60" x2="138" y2="70"/><line x1="115" y1="80" x2="138" y2="70"/>
+    <line x1="115" y1="80" x2="138" y2="110"/><line x1="115" y1="100" x2="138" y2="70"/>
+    <line x1="115" y1="100" x2="138" y2="110"/><line x1="115" y1="120" x2="138" y2="110"/>
+  </g>
+  <g>
+    <circle cx="45" cy="45" r="4.5" fill="#fff"/><circle cx="45" cy="90" r="4.5" fill="#fff"/>
+    <circle cx="45" cy="135" r="4.5" fill="#fff"/>
+    <circle cx="70" cy="60" r="4" fill="#D0E8FF"/><circle cx="70" cy="75" r="3.5" fill="#D0E8FF"/>
+    <circle cx="70" cy="95" r="3.5" fill="#D0E8FF"/><circle cx="70" cy="115" r="4" fill="#D0E8FF"/>
+    <circle cx="90" cy="55" r="4" fill="#D0E8FF"/><circle cx="90" cy="90" r="4" fill="#D0E8FF"/>
+    <circle cx="90" cy="125" r="4" fill="#D0E8FF"/>
+    <circle cx="115" cy="60" r="3.5" fill="#D0E8FF"/><circle cx="115" cy="80" r="3.5" fill="#D0E8FF"/>
+    <circle cx="115" cy="100" r="3.5" fill="#D0E8FF"/><circle cx="115" cy="120" r="3.5" fill="#D0E8FF"/>
+    <circle cx="138" cy="70" r="4.5" fill="#fff"/><circle cx="138" cy="110" r="4.5" fill="#fff"/>
+  </g>
+  <circle cx="90" cy="90" r="22" fill="none" stroke="url(#greenG)" stroke-width="2.5"/>
+  <circle cx="90" cy="90" r="16" fill="#0D1F3C" stroke="url(#greenG)" stroke-width="1.5"/>
+  <line x1="90" y1="62" x2="90" y2="70" stroke="#6FCF5C" stroke-width="1.5"/>
+  <line x1="90" y1="110" x2="90" y2="118" stroke="#6FCF5C" stroke-width="1.5"/>
+  <line x1="62" y1="90" x2="70" y2="90" stroke="#6FCF5C" stroke-width="1.5"/>
+  <line x1="110" y1="90" x2="118" y2="90" stroke="#6FCF5C" stroke-width="1.5"/>
+  <text x="90" y="86" text-anchor="middle" font-size="10" fill="#6FCF5C" font-weight="700" font-family="Arial,sans-serif">OM</text>
+  <text x="90" y="98" text-anchor="middle" font-size="9" fill="#6FCF5C" font-weight="600" font-family="Arial,sans-serif">DL</text>
+  <line x1="107" y1="107" x2="128" y2="128" stroke="url(#greenG)" stroke-width="4" stroke-linecap="round"/>
+  <line x1="107" y1="107" x2="128" y2="128" stroke="#8FE880" stroke-width="1.5" stroke-linecap="round" opacity=".4"/>
+</svg>

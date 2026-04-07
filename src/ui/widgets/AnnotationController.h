@@ -99,6 +99,21 @@ public:
     // 20260322 ZJH 重做上一步被撤销的操作
     void redo();
 
+    // ===== 复制/粘贴标注 (Ctrl+C / Ctrl+V) =====
+
+    // 20260330 ZJH 复制当前选中的标注到内部剪贴板
+    // 存储: 标注类型 + 坐标 + 标签信息
+    // 返回: true 表示成功复制, false 表示无选中标注
+    bool copySelectedAnnotation();
+
+    // 20260330 ZJH 粘贴剪贴板中的标注到当前图像
+    // 参数: ptOffset - 粘贴位置偏移量（相对于原始坐标的偏移，默认右下偏移 20px）
+    // 返回: true 表示成功粘贴, false 表示剪贴板为空
+    bool pasteAnnotation(const QPointF& ptOffset = QPointF(20.0, 20.0));
+
+    // 20260330 ZJH 检查内部剪贴板是否有内容
+    bool hasClipboardAnnotation() const;
+
     // 20260322 ZJH 设置画笔半径（仅画笔工具有效）
     // 参数: nRadius - 画笔半径（像素）
     void setBrushRadius(int nRadius);
@@ -197,4 +212,9 @@ private:
 
     // ===== 图形项映射 =====
     QMap<QString, AnnotationGraphicsItem*> m_mapItems;  // 20260322 ZJH UUID → 图形项映射
+
+    // ===== 剪贴板 =====
+    // 20260330 ZJH 内部剪贴板（存储复制的标注数据，跨图像粘贴用）
+    bool m_bClipboardValid = false;    // 20260330 ZJH 剪贴板是否有有效数据
+    Annotation m_clipboardAnnotation;  // 20260330 ZJH 剪贴板中的标注数据副本
 };

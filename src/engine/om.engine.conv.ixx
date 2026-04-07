@@ -192,19 +192,26 @@ private:
 // 20260319 ZJH AvgPool2d — 2D 平均池化层
 class AvgPool2d : public Module {
 public:
+    // 20260406 ZJH 构造函数
+    // nKernelSize: 池化窗口大小
+    // nStride: 步幅，默认与 kernelSize 相同
+    // nPadding: 填充，默认 0
     AvgPool2d(int nKernelSize, int nStride = -1, int nPadding = 0)
         : m_nKernelSize(nKernelSize),
-          m_nStride(nStride > 0 ? nStride : nKernelSize),
+          m_nStride(nStride > 0 ? nStride : nKernelSize),  // 20260406 ZJH 默认步幅等于核大小
           m_nPadding(nPadding) {}
 
+    // 20260406 ZJH forward — 平均池化前向传播
+    // input: [N, C, H, W]
+    // 返回: [N, C, Hout, Wout]，Hout = (H + 2*pad - kernel) / stride + 1
     Tensor forward(const Tensor& input) override {
-        return tensorAvgPool2d(input, m_nKernelSize, m_nStride, m_nPadding);
+        return tensorAvgPool2d(input, m_nKernelSize, m_nStride, m_nPadding);  // 20260406 ZJH 调用 tensor_ops 平均池化
     }
 
 private:
-    int m_nKernelSize;
-    int m_nStride;
-    int m_nPadding;
+    int m_nKernelSize;  // 20260406 ZJH 池化窗口大小
+    int m_nStride;      // 20260406 ZJH 步幅
+    int m_nPadding;     // 20260406 ZJH 填充
 };
 
 // 20260319 ZJH Dropout — 随机失活层
@@ -355,95 +362,113 @@ public:
           m_nKernelSize(nKernelSize), m_nStride(nStride), m_nPadding(nPadding),
           m_nDilation(nDilation), m_nGroups(nGroups), m_bUseBias(bBias)
     {
-        int nCinPerGroup = nInChannels / nGroups;
+        int nCinPerGroup = nInChannels / nGroups;  // 20260406 ZJH 每组输入通道数
+        // 20260406 ZJH 随机初始化权重 [Cout, Cin/Groups, KH, KW]
         m_weight = Tensor::randn({nOutChannels, nCinPerGroup, nKernelSize, nKernelSize});
-        float fFanIn = static_cast<float>(nCinPerGroup * nKernelSize * nKernelSize);
-        float fScale = std::sqrt(2.0f / fFanIn);
-        float* pW = m_weight.mutableFloatDataPtr();
+        float fFanIn = static_cast<float>(nCinPerGroup * nKernelSize * nKernelSize);  // 20260406 ZJH fan_in = 每组输入通道 × 核面积
+        float fScale = std::sqrt(2.0f / fFanIn);  // 20260406 ZJH Kaiming 缩放因子
+        float* pW = m_weight.mutableFloatDataPtr();  // 20260406 ZJH 权重可写指针
+        // 20260406 ZJH 逐元素乘以缩放因子完成 Kaiming 初始化
         for (int i = 0; i < m_weight.numel(); ++i) pW[i] *= fScale;
-        registerParameter("weight", m_weight);
+        registerParameter("weight", m_weight);  // 20260406 ZJH 注册权重参数（自动开启梯度）
+        // 20260406 ZJH 可选偏置初始化为零
         if (bBias) {
-            m_bias = Tensor::zeros({nOutChannels});
-            registerParameter("bias", m_bias);
+            m_bias = Tensor::zeros({nOutChannels});  // 20260406 ZJH 零初始化偏置 [Cout]
+            registerParameter("bias", m_bias);  // 20260406 ZJH 注册偏置参数
         }
     }
 
+    // 20260406 ZJH forward — 膨胀卷积前向传播
+    // input: [N, Cin, H, W]
+    // 返回: [N, Cout, Hout, Wout]，Hout = (H + 2*pad - effKH) / stride + 1
+    //       effKH = kernel + (kernel-1)*(dilation-1)（膨胀后的等效核大小）
     Tensor forward(const Tensor& input) override {
-        auto cInput = input.contiguous();
-        auto cWeight = m_weight.contiguous();
-        int nBatch = cInput.shape(0);
-        int nH = cInput.shape(2);
-        int nW = cInput.shape(3);
+        auto cInput = input.contiguous();  // 20260406 ZJH 确保输入内存连续
+        auto cWeight = m_weight.contiguous();  // 20260406 ZJH 确保权重内存连续
+        int nBatch = cInput.shape(0);  // 20260406 ZJH 批大小
+        int nH = cInput.shape(2);  // 20260406 ZJH 输入高度
+        int nW = cInput.shape(3);  // 20260406 ZJH 输入宽度
+        // 20260406 ZJH 计算膨胀后的等效卷积核大小: kernel + (kernel-1)*(dilation-1)
         int nEffKH = m_nKernelSize + (m_nKernelSize - 1) * (m_nDilation - 1);
-        int nEffKW = nEffKH;
+        int nEffKW = nEffKH;  // 20260406 ZJH 正方形核，宽度等于高度
+        // 20260406 ZJH 计算输出空间尺寸
         int nHout = (nH + 2 * m_nPadding - nEffKH) / m_nStride + 1;
         int nWout = (nW + 2 * m_nPadding - nEffKW) / m_nStride + 1;
 
         // 20260331 ZJH GPU 路径: 原生 CUDA 膨胀 im2col+GEMM + autograd（零 D2H）
         if (isCudaTensor(input)) {
+            // 20260406 ZJH 在 GPU 上分配输出张量
             auto result = Tensor::zeros({nBatch, m_nOutChannels, nHout, nWout}, DeviceType::CUDA);
-            bool bHasBias = (m_bias.numel() > 0);
-            const float* pBias = bHasBias ? m_bias.contiguous().floatDataPtr() : nullptr;
+            bool bHasBias = (m_bias.numel() > 0);  // 20260406 ZJH 检查是否有偏置
+            const float* pBias = bHasBias ? m_bias.contiguous().floatDataPtr() : nullptr;  // 20260406 ZJH 偏置指针（无偏置时为空）
+            // 20260406 ZJH 调用 CUDA 后端膨胀卷积: im2col 展开 + GEMM 矩阵乘
             CUDABackend::dilatedConv2d(cInput.floatDataPtr(), cWeight.floatDataPtr(), pBias,
                                         result.mutableFloatDataPtr(),
                                         nBatch, m_nInChannels, nH, nW,
                                         m_nOutChannels, m_nKernelSize, m_nKernelSize,
                                         m_nStride, m_nPadding, m_nDilation, m_nGroups);
             // 20260331 ZJH 注册 autograd backward（让 ASPP 膨胀卷积权重可被优化器更新）
+            // 20260406 ZJH 当输入或权重需要梯度时，构建反向传播计算图
             if (input.requiresGrad() || m_weight.requiresGrad()) {
+                // 20260406 ZJH 创建膨胀卷积反向传播节点
                 auto pBackward = std::make_shared<DilatedConv2dBackward>();
-                pBackward->m_savedInput = cInput;
-                pBackward->m_savedWeight = cWeight;
-                pBackward->m_nBatch = nBatch;
-                pBackward->m_nCin = m_nInChannels;
-                pBackward->m_nH = nH;   pBackward->m_nW = nW;
-                pBackward->m_nCout = m_nOutChannels;
-                pBackward->m_nKH = m_nKernelSize;  pBackward->m_nKW = m_nKernelSize;
-                pBackward->m_nStride = m_nStride;
-                pBackward->m_nPad = m_nPadding;
-                pBackward->m_nDilation = m_nDilation;
-                pBackward->m_bHasBias = bHasBias;
+                pBackward->m_savedInput = cInput;  // 20260406 ZJH 保存输入用于反向梯度计算
+                pBackward->m_savedWeight = cWeight;  // 20260406 ZJH 保存权重用于反向梯度计算
+                pBackward->m_nBatch = nBatch;  // 20260406 ZJH 保存 batch 维度
+                pBackward->m_nCin = m_nInChannels;  // 20260406 ZJH 保存输入通道数
+                pBackward->m_nH = nH;   pBackward->m_nW = nW;  // 20260406 ZJH 保存输入空间尺寸
+                pBackward->m_nCout = m_nOutChannels;  // 20260406 ZJH 保存输出通道数
+                pBackward->m_nKH = m_nKernelSize;  pBackward->m_nKW = m_nKernelSize;  // 20260406 ZJH 保存核大小
+                pBackward->m_nStride = m_nStride;  // 20260406 ZJH 保存步幅
+                pBackward->m_nPad = m_nPadding;  // 20260406 ZJH 保存填充
+                pBackward->m_nDilation = m_nDilation;  // 20260406 ZJH 保存膨胀率
+                pBackward->m_bHasBias = bHasBias;  // 20260406 ZJH 保存是否有偏置标志
                 Tensor tInputRef = input;  // 20260331 ZJH 非 const 拷贝
+                // 20260406 ZJH 建立 autograd 边: 输入→反向节点、权重→反向节点
                 pBackward->m_vecInputEdges.push_back(makeEdge(tInputRef, 0));
                 pBackward->m_vecInputEdges.push_back(makeEdge(m_weight, 0));
-                if (bHasBias) pBackward->m_vecInputEdges.push_back(makeEdge(m_bias, 0));
-                result.setGradFnRaw(pBackward);
-                result.setRequiresGrad(true);
+                if (bHasBias) pBackward->m_vecInputEdges.push_back(makeEdge(m_bias, 0));  // 20260406 ZJH 有偏置时也建立边
+                result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点挂到输出张量
+                result.setRequiresGrad(true);  // 20260406 ZJH 标记输出需要梯度
             }
-            return result;
+            return result;  // 20260406 ZJH 返回 GPU 上的卷积结果（已挂载 autograd）
         }
         // 20260331 ZJH CPU 路径: CPUBackend 膨胀卷积
-        auto result = Tensor::zeros({nBatch, m_nOutChannels, nHout, nWout});
-        bool bHasBias = (m_bias.numel() > 0);
-        const float* pBias = bHasBias ? m_bias.contiguous().floatDataPtr() : nullptr;
+        auto result = Tensor::zeros({nBatch, m_nOutChannels, nHout, nWout});  // 20260406 ZJH CPU 上分配输出张量
+        bool bHasBias = (m_bias.numel() > 0);  // 20260406 ZJH 检查是否有偏置
+        const float* pBias = bHasBias ? m_bias.contiguous().floatDataPtr() : nullptr;  // 20260406 ZJH 偏置指针
 
+        // 20260406 ZJH 调用 CPU 后端膨胀卷积（含分组支持）
         CPUBackend::dilatedConv2d(cInput.floatDataPtr(), cWeight.floatDataPtr(), pBias,
                                    result.mutableFloatDataPtr(),
                                    nBatch, m_nInChannels, nH, nW,
                                    m_nOutChannels, m_nKernelSize, m_nKernelSize,
                                    m_nStride, m_nPadding, m_nDilation, m_nGroups);
-        return result;
+        return result;  // 20260406 ZJH 返回 CPU 上的卷积结果
     }
 
     // 20260330 ZJH 显式重写 parameters() 避免 Module 基类默认实现在 C++23 模块边界下的指针失效问题
     std::vector<Tensor*> parameters() override {
-        std::vector<Tensor*> v;
-        v.push_back(&m_weight);
+        std::vector<Tensor*> v;  // 20260406 ZJH 参数指针容器
+        v.push_back(&m_weight);  // 20260406 ZJH 始终包含权重
+        // 20260406 ZJH 有偏置且非空时才加入偏置参数
         if (m_bUseBias && m_bias.numel() > 0) v.push_back(&m_bias);
-        return v;
+        return v;  // 20260406 ZJH 返回参数指针列表
     }
 
 private:
-    int m_nInChannels, m_nOutChannels, m_nKernelSize;
-    int m_nStride, m_nPadding, m_nDilation, m_nGroups;
-    bool m_bUseBias;
-    Tensor m_weight, m_bias;
+    int m_nInChannels, m_nOutChannels, m_nKernelSize;  // 20260406 ZJH 输入通道数、输出通道数、卷积核大小
+    int m_nStride, m_nPadding, m_nDilation, m_nGroups;  // 20260406 ZJH 步幅、填充、膨胀率、分组数
+    bool m_bUseBias;  // 20260406 ZJH 是否使用偏置
+    Tensor m_weight, m_bias;  // 20260406 ZJH 卷积权重和偏置张量
 };
 
 // 20260320 ZJH Dropout2d — 空间 Dropout（整个通道置零）
 // 训练时以概率 p 将整个特征图通道置零，评估时直接透传
 class Dropout2d : public Module {
 public:
+    // 20260406 ZJH 构造函数
+    // fProb: 通道失活概率，默认 0.5
     Dropout2d(float fProb = 0.5f) : m_fProb(fProb) {}
 
     // 20260329 ZJH Dropout2d forward — 用 tensorMul 保持 autograd 链
@@ -483,7 +508,7 @@ public:
     }
 
 private:
-    float m_fProb;
+    float m_fProb;  // 20260406 ZJH 通道失活概率
 };
 
 // 20260320 ZJH LayerNorm — 层归一化模块

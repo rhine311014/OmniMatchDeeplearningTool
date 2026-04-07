@@ -2,6 +2,15 @@
 // 核心运算的 CUDA kernel 实现，使用 shared memory tiling 优化 matmul
 // 20260324 ZJH 重大优化：32x32 tiling / im2col+GEMM 卷积 / GPU reduction BatchNorm
 //              异步流 / 内存池 / ILP 元素运算 / 转置 kernel
+// 20260402 ZJH [修复] CUDA 12.8 + MSVC 18 兼容性: cuda_bf16.hpp 在 x64 下
+//   inline asm 用 32 位 "r" 约束传递 64 位指针，导致 41 个编译错误
+//   解决方案: 禁用 bf16 cache hint 内联汇编函数（本项目不使用 bfloat16）
+//   定义 __CUDA_NO_BFLOAT16_OPERATORS__ 不能阻止有问题的 ld/st 函数
+//   因此直接通过 __CUDA_ARCH__ guard 让有问题的函数定义不被实例化
+// 20260402 ZJH [修复] CUDA 12.8 + MSVC 18 (x64) 兼容性
+// cuda_fp16.hpp / cuda_bf16.hpp 的 cache hint ld/st asm 用 "r" 约束传递 64 位指针
+// 已通过 patch SDK 头文件修复: "r"(ptr) → "l"(ptr)（64 位寄存器约束）
+// 见: E:/DevelopmentTools/cuda12.8/include/cuda_fp16.hpp, cuda_bf16.hpp
 #include "cuda_kernels.cuh"
 #include <cuda_runtime.h>
 #include <cstdio>
@@ -286,22 +295,37 @@ extern "C" int omCudaInit(int nDeviceId) {
     return 0;
 }
 
+// 20260406 ZJH 获取系统中可用 CUDA 设备数量
 extern "C" int omCudaGetDeviceCount() {
-    int nCount = 0;
-    cudaGetDeviceCount(&nCount);
-    return nCount;
+    int nCount = 0;  // 20260406 ZJH 设备计数初始化为 0
+    cudaGetDeviceCount(&nCount);  // 20260406 ZJH 查询 CUDA 驱动获取设备数量
+    return nCount;  // 20260406 ZJH 返回设备数量（无 GPU 时返回 0）
 }
 
+// 20260406 ZJH 获取指定设备的名称字符串
 extern "C" int omCudaGetDeviceName(int nDeviceId, char* pNameBuf, int nBufSize) {
-    cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, nDeviceId));
-    snprintf(pNameBuf, nBufSize, "%s", prop.name);
-    return 0;
+    cudaDeviceProp prop;  // 20260406 ZJH 设备属性结构体
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, nDeviceId));  // 20260406 ZJH 查询设备属性
+    snprintf(pNameBuf, nBufSize, "%s", prop.name);  // 20260406 ZJH 将设备名称拷贝到输出缓冲区
+    return 0;  // 20260406 ZJH 返回 0 表示成功
 }
 
+// 20260406 ZJH 查询指定设备的显存信息（空闲和总量，单位字节）
 extern "C" int omCudaGetMemInfo(int nDeviceId, size_t* pFreeMem, size_t* pTotalMem) {
-    CUDA_CHECK(cudaSetDevice(nDeviceId));
-    CUDA_CHECK(cudaMemGetInfo(pFreeMem, pTotalMem));
+    CUDA_CHECK(cudaSetDevice(nDeviceId));  // 20260406 ZJH 切换到目标设备
+    CUDA_CHECK(cudaMemGetInfo(pFreeMem, pTotalMem));  // 20260406 ZJH 查询当前空闲显存和总显存
+    return 0;  // 20260406 ZJH 返回 0 表示成功
+}
+
+// 20260402 ZJH 查询 GPU 计算能力（Compute Capability）
+// CC ≥ 7.0 (Volta+): 支持 Tensor Core FP16，混合精度训练可获 1.5-2x 加速
+// CC ≥ 8.0 (Ampere+): 支持 TF32 + BF16，更高精度的混合精度
+// CC ≥ 8.9 (Ada Lovelace): 支持 FP8 Transformer Engine
+extern "C" int omCudaGetComputeCapability(int nDeviceId, int* pMajor, int* pMinor) {
+    cudaDeviceProp prop;  // 20260402 ZJH 设备属性结构体
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, nDeviceId));
+    if (pMajor) *pMajor = prop.major;  // 20260402 ZJH 主版本号
+    if (pMinor) *pMinor = prop.minor;  // 20260402 ZJH 次版本号
     return 0;
 }
 
@@ -325,34 +349,40 @@ extern "C" int omCudaFree(void* pDevPtr) {
     return 0;
 }
 
+// 20260406 ZJH Host -> Device 同步拷贝接口
 extern "C" int omCudaCopyH2D(void* pDst, const void* pSrc, size_t nBytes) {
-    cudaError_t err = cudaMemcpy(pDst, pSrc, nBytes, cudaMemcpyHostToDevice);
+    cudaError_t err = cudaMemcpy(pDst, pSrc, nBytes, cudaMemcpyHostToDevice);  // 20260406 ZJH 同步 H2D 拷贝
     if (err != cudaSuccess) {
+        // 20260406 ZJH 拷贝失败，输出诊断信息（目标指针、字节数、错误描述）
         fprintf(stderr, "[CUDA] H2D FAILED: %s (dst=%p, nBytes=%zu)\n",
                 cudaGetErrorString(err), pDst, nBytes);
-        return -1;
+        return -1;  // 20260406 ZJH 返回 -1 表示失败
     }
-    return 0;
+    return 0;  // 20260406 ZJH 返回 0 表示成功
 }
 
+// 20260406 ZJH Device -> Host 同步拷贝接口
 extern "C" int omCudaCopyD2H(void* pDst, const void* pSrc, size_t nBytes) {
-    CUDA_CHECK(cudaMemcpy(pDst, pSrc, nBytes, cudaMemcpyDeviceToHost));
-    return 0;
+    CUDA_CHECK(cudaMemcpy(pDst, pSrc, nBytes, cudaMemcpyDeviceToHost));  // 20260406 ZJH 同步 D2H 拷贝
+    return 0;  // 20260406 ZJH 返回 0 表示成功
 }
 
+// 20260406 ZJH Device -> Device 同步拷贝接口
 extern "C" int omCudaCopyD2D(void* pDst, const void* pSrc, size_t nBytes) {
-    CUDA_CHECK(cudaMemcpy(pDst, pSrc, nBytes, cudaMemcpyDeviceToDevice));
-    return 0;
+    CUDA_CHECK(cudaMemcpy(pDst, pSrc, nBytes, cudaMemcpyDeviceToDevice));  // 20260406 ZJH 同步 D2D 拷贝
+    return 0;  // 20260406 ZJH 返回 0 表示成功
 }
 
+// 20260406 ZJH GPU 内存清零/填充接口
 extern "C" int omCudaMemset(void* pDev, int nValue, size_t nBytes) {
-    CUDA_CHECK(cudaMemset(pDev, nValue, nBytes));
-    return 0;
+    CUDA_CHECK(cudaMemset(pDev, nValue, nBytes));  // 20260406 ZJH 按字节填充 GPU 内存
+    return 0;  // 20260406 ZJH 返回 0 表示成功
 }
 
+// 20260406 ZJH 同步当前设备上所有 CUDA 流（阻塞 CPU 直到 GPU 完成所有操作）
 extern "C" int omCudaSynchronize() {
-    CUDA_CHECK(cudaDeviceSynchronize());
-    return 0;
+    CUDA_CHECK(cudaDeviceSynchronize());  // 20260406 ZJH 全局设备同步
+    return 0;  // 20260406 ZJH 返回 0 表示成功
 }
 
 // 20260324 ZJH 异步 Host -> Device 拷贝（使用传输流，与计算流并行）
@@ -545,76 +575,87 @@ extern "C" int omCudaAddScalar(const float* pA, float fScalar, float* pC, int nC
 // 激活函数 Kernels
 // =====================================================================
 
-// 20260320 ZJH ReLU kernel
+// 20260320 ZJH ReLU 前向 kernel：正值直通，负值置零
 __global__ void kernelReLU(const float* pIn, float* pOut, int nCount) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < nCount) pOut[idx] = pIn[idx] > 0.0f ? pIn[idx] : 0.0f;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  // 20260406 ZJH 全局线程索引
+    if (idx < nCount) pOut[idx] = pIn[idx] > 0.0f ? pIn[idx] : 0.0f;  // 20260406 ZJH ReLU: max(0, x)
 }
 
+// 20260406 ZJH ReLU 前向接口
 extern "C" int omCudaReLU(const float* pIn, float* pOut, int nCount) {
-    int nBlocks = (nCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int nBlocks = (nCount + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 20260406 ZJH 计算所需线程块数
+    // 20260406 ZJH 启动 ReLU kernel，每线程处理一个元素，绑定计算流
     kernelReLU<<<nBlocks, BLOCK_SIZE, 0, s_computeStream>>>(pIn, pOut, nCount);
-    CUDA_CHECK(cudaGetLastError());
-    return 0;
+    CUDA_CHECK(cudaGetLastError());  // 20260406 ZJH 检查 kernel 启动错误
+    return 0;  // 20260406 ZJH 返回 0 表示成功
 }
 
-// 20260320 ZJH ReLU 反向 kernel
+// 20260320 ZJH ReLU 反向 kernel：正值梯度直通，负值梯度置零
 __global__ void kernelReLUBackward(const float* pIn, const float* pGradOut, float* pGradIn, int nCount) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < nCount) pGradIn[idx] = pIn[idx] > 0.0f ? pGradOut[idx] : 0.0f;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  // 20260406 ZJH 全局线程索引
+    if (idx < nCount) pGradIn[idx] = pIn[idx] > 0.0f ? pGradOut[idx] : 0.0f;  // 20260406 ZJH ReLU 导数: x>0 时为 1，否则为 0
 }
 
+// 20260406 ZJH ReLU 反向接口
 extern "C" int omCudaReLUBackward(const float* pIn, const float* pGradOut, float* pGradIn, int nCount) {
-    int nBlocks = (nCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int nBlocks = (nCount + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 20260406 ZJH 计算所需线程块数
+    // 20260406 ZJH 启动 ReLU 反向 kernel，绑定计算流
     kernelReLUBackward<<<nBlocks, BLOCK_SIZE, 0, s_computeStream>>>(pIn, pGradOut, pGradIn, nCount);
-    CUDA_CHECK(cudaGetLastError());
-    return 0;
+    CUDA_CHECK(cudaGetLastError());  // 20260406 ZJH 检查 kernel 启动错误
+    return 0;  // 20260406 ZJH 返回 0 表示成功
 }
 
-// 20260320 ZJH Sigmoid kernel
+// 20260320 ZJH Sigmoid 前向 kernel：out = 1 / (1 + exp(-in))
 __global__ void kernelSigmoid(const float* pIn, float* pOut, int nCount) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < nCount) pOut[idx] = 1.0f / (1.0f + expf(-pIn[idx]));
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  // 20260406 ZJH 全局线程索引
+    if (idx < nCount) pOut[idx] = 1.0f / (1.0f + expf(-pIn[idx]));  // 20260406 ZJH sigmoid 激活函数
 }
 
+// 20260406 ZJH Sigmoid 前向接口
 extern "C" int omCudaSigmoid(const float* pIn, float* pOut, int nCount) {
-    int nBlocks = (nCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int nBlocks = (nCount + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 20260406 ZJH 计算所需线程块数
+    // 20260406 ZJH 启动 Sigmoid kernel，绑定计算流
     kernelSigmoid<<<nBlocks, BLOCK_SIZE, 0, s_computeStream>>>(pIn, pOut, nCount);
-    CUDA_CHECK(cudaGetLastError());
-    return 0;
+    CUDA_CHECK(cudaGetLastError());  // 20260406 ZJH 检查 kernel 启动错误
+    return 0;  // 20260406 ZJH 返回 0 表示成功
 }
 
-// 20260320 ZJH GELU kernel
+// 20260320 ZJH GELU 前向 kernel：使用 tanh 近似公式
+// GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 __global__ void kernelGELU(const float* pIn, float* pOut, int nCount) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  // 20260406 ZJH 全局线程索引
     if (idx < nCount) {
-        float x = pIn[idx];
-        float inner = 0.7978845608f * (x + 0.044715f * x * x * x);
-        pOut[idx] = 0.5f * x * (1.0f + tanhf(inner));
+        float x = pIn[idx];  // 20260406 ZJH 读取输入值
+        float inner = 0.7978845608f * (x + 0.044715f * x * x * x);  // 20260406 ZJH sqrt(2/pi)=0.7978... 乘以 (x + 0.044715*x^3)
+        pOut[idx] = 0.5f * x * (1.0f + tanhf(inner));  // 20260406 ZJH GELU 近似公式
     }
 }
 
+// 20260406 ZJH GELU 前向接口
 extern "C" int omCudaGELU(const float* pIn, float* pOut, int nCount) {
-    int nBlocks = (nCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int nBlocks = (nCount + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 20260406 ZJH 计算所需线程块数
+    // 20260406 ZJH 启动 GELU kernel，绑定计算流
     kernelGELU<<<nBlocks, BLOCK_SIZE, 0, s_computeStream>>>(pIn, pOut, nCount);
-    CUDA_CHECK(cudaGetLastError());
-    return 0;
+    CUDA_CHECK(cudaGetLastError());  // 20260406 ZJH 检查 kernel 启动错误
+    return 0;  // 20260406 ZJH 返回 0 表示成功
 }
 
-// 20260320 ZJH SiLU kernel
+// 20260320 ZJH SiLU 前向 kernel：SiLU(x) = x * sigmoid(x)（又称 Swish 激活）
 __global__ void kernelSiLU(const float* pIn, float* pOut, int nCount) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  // 20260406 ZJH 全局线程索引
     if (idx < nCount) {
-        float sig = 1.0f / (1.0f + expf(-pIn[idx]));
-        pOut[idx] = pIn[idx] * sig;
+        float sig = 1.0f / (1.0f + expf(-pIn[idx]));  // 20260406 ZJH sigmoid(x)
+        pOut[idx] = pIn[idx] * sig;  // 20260406 ZJH x * sigmoid(x)
     }
 }
 
+// 20260406 ZJH SiLU 前向接口
 extern "C" int omCudaSiLU(const float* pIn, float* pOut, int nCount) {
-    int nBlocks = (nCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int nBlocks = (nCount + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 20260406 ZJH 计算所需线程块数
+    // 20260406 ZJH 启动 SiLU kernel，绑定计算流
     kernelSiLU<<<nBlocks, BLOCK_SIZE, 0, s_computeStream>>>(pIn, pOut, nCount);
-    CUDA_CHECK(cudaGetLastError());
-    return 0;
+    CUDA_CHECK(cudaGetLastError());  // 20260406 ZJH 检查 kernel 启动错误
+    return 0;  // 20260406 ZJH 返回 0 表示成功
 }
 
 // =====================================================================
@@ -776,23 +817,26 @@ __global__ void kernelMatmulBatched(const float* __restrict__ pA,
     float* pCb = pC + b * nM * nN;
 
     // 20260330 ZJH 复用 32x32 tiled matmul 逻辑
-    const int TILE = 32;
-    __shared__ float tileA[TILE][TILE];
-    __shared__ float tileB[TILE][TILE];
+    const int TILE = 32;  // 20260406 ZJH tile 大小 32x32，复用主 matmul 的优化策略
+    __shared__ float tileA[TILE][TILE];  // 20260406 ZJH A 矩阵 shared memory tile
+    __shared__ float tileB[TILE][TILE];  // 20260406 ZJH B 矩阵 shared memory tile
 
-    int row = blockIdx.y * TILE + threadIdx.y;
-    int col = blockIdx.x * TILE + threadIdx.x;
-    float fSum = 0.0f;
+    int row = blockIdx.y * TILE + threadIdx.y;  // 20260406 ZJH 输出行索引（在当前 batch 内）
+    int col = blockIdx.x * TILE + threadIdx.x;  // 20260406 ZJH 输出列索引（在当前 batch 内）
+    float fSum = 0.0f;  // 20260406 ZJH 累加器，维护在寄存器中避免全局内存读写
 
+    // 20260406 ZJH 沿 K 方向分 tile 遍历，每次加载 32x32 的 A 和 B 块
     for (int t = 0; t < (nK + TILE - 1) / TILE; ++t) {
-        int aCol = t * TILE + threadIdx.x;
-        int bRow = t * TILE + threadIdx.y;
-        tileA[threadIdx.y][threadIdx.x] = (row < nM && aCol < nK) ? pAb[row * nK + aCol] : 0.0f;
-        tileB[threadIdx.y][threadIdx.x] = (bRow < nK && col < nN) ? pBb[bRow * nN + col] : 0.0f;
-        __syncthreads();
+        int aCol = t * TILE + threadIdx.x;  // 20260406 ZJH A 矩阵列坐标
+        int bRow = t * TILE + threadIdx.y;  // 20260406 ZJH B 矩阵行坐标
+        tileA[threadIdx.y][threadIdx.x] = (row < nM && aCol < nK) ? pAb[row * nK + aCol] : 0.0f;  // 20260406 ZJH 合并加载 A tile（越界填零）
+        tileB[threadIdx.y][threadIdx.x] = (bRow < nK && col < nN) ? pBb[bRow * nN + col] : 0.0f;  // 20260406 ZJH 合并加载 B tile（越界填零）
+        __syncthreads();  // 20260406 ZJH 等待 tile 加载完成
+        // 20260406 ZJH 计算 tile 内积：32 次 FMA 操作
         for (int k = 0; k < TILE; ++k) fSum += tileA[threadIdx.y][k] * tileB[k][threadIdx.x];
-        __syncthreads();
+        __syncthreads();  // 20260406 ZJH 等待所有线程完成计算后再加载下一 tile
     }
+    // 20260406 ZJH 将累加结果写回当前 batch 的输出矩阵
     if (row < nM && col < nN) pCb[row * nN + col] = fSum;
 }
 
@@ -900,28 +944,29 @@ __global__ void kernelIm2colDilated(const float* __restrict__ pInput,
                               int nStrideH, int nStrideW,
                               int nDilH, int nDilW,
                               int nHout, int nWout) {
-    int nIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    int nColRows = nCin * nKH * nKW;
-    int nColCols = nHout * nWout;
-    int nTotalCols = nColRows * nColCols;
-    if (nIdx >= nTotalCols) return;
+    int nIdx = blockIdx.x * blockDim.x + threadIdx.x;  // 20260406 ZJH 全局线程索引
+    int nColRows = nCin * nKH * nKW;  // 20260406 ZJH col 矩阵行数
+    int nColCols = nHout * nWout;  // 20260406 ZJH col 矩阵列数
+    int nTotalCols = nColRows * nColCols;  // 20260406 ZJH col 矩阵总元素数
+    if (nIdx >= nTotalCols) return;  // 20260406 ZJH 越界检查
 
-    int nColCol = nIdx % nColCols;
-    int nColRow = nIdx / nColCols;
-    int nOw = nColCol % nWout;
-    int nOh = nColCol / nWout;
-    int nKw = nColRow % nKW;
-    int nKh = (nColRow / nKW) % nKH;
-    int nCi = nColRow / (nKH * nKW);
+    // 20260406 ZJH 从线性索引反推 col 矩阵中的 (行, 列) 坐标
+    int nColCol = nIdx % nColCols;  // 20260406 ZJH 列索引 = 输出空间位置
+    int nColRow = nIdx / nColCols;  // 20260406 ZJH 行索引 = (cin, kh, kw) 组合
+    int nOw = nColCol % nWout;  // 20260406 ZJH 输出列坐标
+    int nOh = nColCol / nWout;  // 20260406 ZJH 输出行坐标
+    int nKw = nColRow % nKW;  // 20260406 ZJH 核列偏移
+    int nKh = (nColRow / nKW) % nKH;  // 20260406 ZJH 核行偏移
+    int nCi = nColRow / (nKH * nKW);  // 20260406 ZJH 输入通道索引
 
-    // 20260331 ZJH dilation: 核偏移乘以膨胀率
-    int nIh = nOh * nStrideH - nPadH + nKh * nDilH;
-    int nIw = nOw * nStrideW - nPadW + nKw * nDilW;
+    // 20260331 ZJH dilation: 核偏移乘以膨胀率，使采样点间隔更大
+    int nIh = nOh * nStrideH - nPadH + nKh * nDilH;  // 20260406 ZJH 输入行坐标（含 dilation）
+    int nIw = nOw * nStrideW - nPadW + nKw * nDilW;  // 20260406 ZJH 输入列坐标（含 dilation）
 
     if (nIh >= 0 && nIh < nH && nIw >= 0 && nIw < nW) {
-        pCol[nIdx] = pInput[(nCi * nH + nIh) * nW + nIw];
+        pCol[nIdx] = pInput[(nCi * nH + nIh) * nW + nIw];  // 20260406 ZJH 有效位置：拷贝输入值
     } else {
-        pCol[nIdx] = 0.0f;
+        pCol[nIdx] = 0.0f;  // 20260406 ZJH 越界：零填充
     }
 }
 
@@ -1002,25 +1047,27 @@ __global__ void kernelConv2d(const float* pInput, const float* pWeight, const fl
     int nTotal = nBatch * nCout * nHout * nWout;
     if (idx >= nTotal) return;
 
-    // 20260320 ZJH 解码线性索引为 (n, co, oh, ow)
-    int ow = idx % nWout;
-    int oh = (idx / nWout) % nHout;
-    int co = (idx / (nWout * nHout)) % nCout;
-    int n  = idx / (nWout * nHout * nCout);
+    // 20260320 ZJH 解码线性索引为 (n, co, oh, ow) 四维坐标
+    int ow = idx % nWout;  // 20260406 ZJH 输出宽度索引
+    int oh = (idx / nWout) % nHout;  // 20260406 ZJH 输出高度索引
+    int co = (idx / (nWout * nHout)) % nCout;  // 20260406 ZJH 输出通道索引
+    int n  = idx / (nWout * nHout * nCout);  // 20260406 ZJH batch 索引
 
-    float fSum = 0.0f;
+    float fSum = 0.0f;  // 20260406 ZJH 卷积累加器
+    // 20260406 ZJH 三重循环遍历所有输入通道和卷积核位置
     for (int ci = 0; ci < nCin; ++ci)
     for (int kh = 0; kh < nKH; ++kh)
     for (int kw = 0; kw < nKW; ++kw) {
-        int ih = oh * nStride - nPad + kh;
-        int iw = ow * nStride - nPad + kw;
+        int ih = oh * nStride - nPad + kh;  // 20260406 ZJH 输入行坐标（考虑 stride 和 padding）
+        int iw = ow * nStride - nPad + kw;  // 20260406 ZJH 输入列坐标
         if (ih >= 0 && ih < nH && iw >= 0 && iw < nW) {
+            // 20260406 ZJH 有效位置：输入值 × 卷积核权重，累加到 fSum
             fSum += pInput[((n * nCin + ci) * nH + ih) * nW + iw]
                   * pWeight[((co * nCin + ci) * nKH + kh) * nKW + kw];
         }
     }
-    if (pBias) fSum += pBias[co];
-    pOutput[idx] = fSum;
+    if (pBias) fSum += pBias[co];  // 20260406 ZJH 加偏置（如果有）
+    pOutput[idx] = fSum;  // 20260406 ZJH 写入输出
 }
 
 // 20260324 ZJH Conv2d 前向统一入口：自动选择 im2col+GEMM 或朴素实现
@@ -1156,63 +1203,74 @@ extern "C" int omCudaDilatedConv2d(const float* pInput, const float* pWeight, co
                                     int nBatch, int nCin, int nH, int nW,
                                     int nCout, int nKH, int nKW,
                                     int nStride, int nPad, int nDilation, int nGroups) {
-    int nEffKH = nKH + (nKH - 1) * (nDilation - 1);
-    int nEffKW = nKW + (nKW - 1) * (nDilation - 1);
-    int nHout = (nH + 2 * nPad - nEffKH) / nStride + 1;
-    int nWout = (nW + 2 * nPad - nEffKW) / nStride + 1;
+    // 20260406 ZJH 计算膨胀卷积的有效卷积核大小: effK = K + (K-1)*(dilation-1)
+    int nEffKH = nKH + (nKH - 1) * (nDilation - 1);  // 20260406 ZJH 有效核高度
+    int nEffKW = nKW + (nKW - 1) * (nDilation - 1);  // 20260406 ZJH 有效核宽度
+    int nHout = (nH + 2 * nPad - nEffKH) / nStride + 1;  // 20260406 ZJH 输出高度
+    int nWout = (nW + 2 * nPad - nEffKW) / nStride + 1;  // 20260406 ZJH 输出宽度
 
     if (nGroups == 1) {
-        int nColRows = nCin * nKH * nKW;
-        int nColCols = nHout * nWout;
-        size_t nColBytes = static_cast<size_t>(nColRows) * nColCols * sizeof(float);
-        float* pCol = static_cast<float*>(gpuPoolAlloc(nColBytes));
-        if (!pCol) return -1;
+        // 20260406 ZJH 标准卷积路径（groups=1）：全通道 im2col + GEMM
+        int nColRows = nCin * nKH * nKW;  // 20260406 ZJH im2col 矩阵行数
+        int nColCols = nHout * nWout;  // 20260406 ZJH im2col 矩阵列数
+        size_t nColBytes = static_cast<size_t>(nColRows) * nColCols * sizeof(float);  // 20260406 ZJH col 矩阵字节数
+        float* pCol = static_cast<float*>(gpuPoolAlloc(nColBytes));  // 20260406 ZJH 从内存池分配临时 col 缓冲
+        if (!pCol) return -1;  // 20260406 ZJH 分配失败
 
+        // 20260406 ZJH 逐 batch 处理：im2col 展开 + GEMM
         for (int n = 0; n < nBatch; ++n) {
-            const float* pBatchIn = pInput + n * nCin * nH * nW;
-            float* pBatchOut = pOutput + n * nCout * nHout * nWout;
-            int nTotalCol = nColRows * nColCols;
-            int nIm2colBlocks = (nTotalCol + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            const float* pBatchIn = pInput + n * nCin * nH * nW;  // 20260406 ZJH 当前 batch 输入偏移
+            float* pBatchOut = pOutput + n * nCout * nHout * nWout;  // 20260406 ZJH 当前 batch 输出偏移
+            int nTotalCol = nColRows * nColCols;  // 20260406 ZJH col 矩阵总元素数
+            int nIm2colBlocks = (nTotalCol + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 20260406 ZJH im2col kernel 所需线程块数
+            // 20260406 ZJH 启动膨胀 im2col kernel（带 dilation 参数），绑定计算流
             kernelIm2colDilated<<<nIm2colBlocks, BLOCK_SIZE, 0, s_computeStream>>>(
                 pBatchIn, pCol, nCin, nH, nW, nKH, nKW,
                 nPad, nPad, nStride, nStride, nDilation, nDilation, nHout, nWout);
+            // 20260406 ZJH GEMM: Output[Cout, Hout*Wout] = Weight[Cout, Cin*KH*KW] * Col
             omCudaMatmul(pWeight, pCol, pBatchOut, nCout, nColRows, nColCols);
             if (pBias) {
-                int nBiasTotal = nCout * nColCols;
-                int nBiasBlocks = (nBiasTotal + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                // 20260406 ZJH 加偏置（可选），每个输出通道加一个标量
+                int nBiasTotal = nCout * nColCols;  // 20260406 ZJH 输出总元素数
+                int nBiasBlocks = (nBiasTotal + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 20260406 ZJH 线程块数
                 kernelAddBias<<<nBiasBlocks, BLOCK_SIZE, 0, s_computeStream>>>(pBatchOut, pBias, nCout, nColCols);
             }
         }
-        gpuPoolFree(pCol);
+        gpuPoolFree(pCol);  // 20260406 ZJH 归还 im2col 临时缓冲到内存池
     } else {
-        int nCinPerG = nCin / nGroups;
-        int nCoutPerG = nCout / nGroups;
-        int nColRows = nCinPerG * nKH * nKW;
-        int nColCols = nHout * nWout;
-        size_t nColBytes = static_cast<size_t>(nColRows) * nColCols * sizeof(float);
-        float* pCol = static_cast<float*>(gpuPoolAlloc(nColBytes));
-        if (!pCol) return -1;
+        // 20260406 ZJH 分组卷积路径（groups > 1）：每组独立 im2col + GEMM
+        int nCinPerG = nCin / nGroups;  // 20260406 ZJH 每组输入通道数
+        int nCoutPerG = nCout / nGroups;  // 20260406 ZJH 每组输出通道数
+        int nColRows = nCinPerG * nKH * nKW;  // 20260406 ZJH 每组 im2col 矩阵行数
+        int nColCols = nHout * nWout;  // 20260406 ZJH im2col 矩阵列数
+        size_t nColBytes = static_cast<size_t>(nColRows) * nColCols * sizeof(float);  // 20260406 ZJH col 矩阵字节数
+        float* pCol = static_cast<float*>(gpuPoolAlloc(nColBytes));  // 20260406 ZJH 分配临时 col 缓冲
+        if (!pCol) return -1;  // 20260406 ZJH 分配失败
 
+        // 20260406 ZJH 逐 batch 逐组处理
         for (int n = 0; n < nBatch; ++n) {
             for (int g = 0; g < nGroups; ++g) {
-                const float* pGIn = pInput + (n * nCin + g * nCinPerG) * nH * nW;
-                float* pGOut = pOutput + (n * nCout + g * nCoutPerG) * nHout * nWout;
-                const float* pGW = pWeight + g * nCoutPerG * nCinPerG * nKH * nKW;
-                int nTotalCol = nColRows * nColCols;
-                int nIm2colBlocks = (nTotalCol + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                const float* pGIn = pInput + (n * nCin + g * nCinPerG) * nH * nW;  // 20260406 ZJH 当前组输入偏移
+                float* pGOut = pOutput + (n * nCout + g * nCoutPerG) * nHout * nWout;  // 20260406 ZJH 当前组输出偏移
+                const float* pGW = pWeight + g * nCoutPerG * nCinPerG * nKH * nKW;  // 20260406 ZJH 当前组权重偏移
+                int nTotalCol = nColRows * nColCols;  // 20260406 ZJH col 矩阵总元素数
+                int nIm2colBlocks = (nTotalCol + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 20260406 ZJH im2col 线程块数
+                // 20260406 ZJH 对当前组执行膨胀 im2col
                 kernelIm2colDilated<<<nIm2colBlocks, BLOCK_SIZE, 0, s_computeStream>>>(
                     pGIn, pCol, nCinPerG, nH, nW, nKH, nKW,
                     nPad, nPad, nStride, nStride, nDilation, nDilation, nHout, nWout);
+                // 20260406 ZJH GEMM: 当前组的 Output = Weight * Col
                 omCudaMatmul(pGW, pCol, pGOut, nCoutPerG, nColRows, nColCols);
                 if (pBias) {
-                    const float* pGBias = pBias + g * nCoutPerG;
-                    int nBiasTotal = nCoutPerG * nColCols;
-                    int nBiasBlocks = (nBiasTotal + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                    // 20260406 ZJH 当前组加偏置
+                    const float* pGBias = pBias + g * nCoutPerG;  // 20260406 ZJH 当前组偏置偏移
+                    int nBiasTotal = nCoutPerG * nColCols;  // 20260406 ZJH 当前组输出总元素数
+                    int nBiasBlocks = (nBiasTotal + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 20260406 ZJH 线程块数
                     kernelAddBias<<<nBiasBlocks, BLOCK_SIZE, 0, s_computeStream>>>(pGOut, pGBias, nCoutPerG, nColCols);
                 }
             }
         }
-        gpuPoolFree(pCol);
+        gpuPoolFree(pCol);  // 20260406 ZJH 归还 im2col 临时缓冲到内存池
     }
     CUDA_CHECK(cudaGetLastError());
     return 0;
@@ -1416,10 +1474,11 @@ extern "C" int omCudaSum(const float* pData, float* pResult, int nCount) {
     // 20260324 ZJH 使用优化后的 warp-shuffle reduction 替代旧的两阶段 reduction
     int nBlocks = (nCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
     if (nBlocks > 1024) nBlocks = 1024;  // 20260324 ZJH 限制 grid 大小，grid-stride loop 处理剩余
-    int nWarps = (BLOCK_SIZE + 31) / 32;  // 20260324 ZJH shared memory 需要 nWarps 个 float
+    int nWarps = (BLOCK_SIZE + 31) / 32;  // 20260324 ZJH shared memory 需要 nWarps 个 float（每 warp 一个部分和）
 
+    // 20260406 ZJH 分配部分和缓冲区（第一阶段输出 nBlocks 个部分和）
     float* pPartial = static_cast<float*>(gpuPoolAlloc(nBlocks * sizeof(float)));
-    if (!pPartial) return -1;
+    if (!pPartial) return -1;  // 20260406 ZJH 分配失败
 
     // 20260330 ZJH 绑定到计算流
     kernelReduceSum<<<nBlocks, BLOCK_SIZE, nWarps * sizeof(float), s_computeStream>>>(pData, pPartial, nCount);
@@ -1552,16 +1611,16 @@ __global__ void kernelBatchNorm2dForward(
     const float* pMean, const float* pInvStd,
     int nBatch, int nChannels, int nSpatial)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int nTotal = nBatch * nChannels * nSpatial;
-    if (idx >= nTotal) return;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  // 20260406 ZJH 全局线程索引
+    int nTotal = nBatch * nChannels * nSpatial;  // 20260406 ZJH 总元素数
+    if (idx >= nTotal) return;  // 20260406 ZJH 越界检查
 
-    int s = idx % nSpatial;
-    int c = (idx / nSpatial) % nChannels;
+    int s = idx % nSpatial;  // 20260406 ZJH 空间维度索引（未使用但保留用于调试）
+    int c = (idx / nSpatial) % nChannels;  // 20260406 ZJH 通道索引（决定使用哪组 mean/invStd/gamma/beta）
     (void)s;  // 20260320 ZJH 抑制未使用警告
 
-    float fNorm = (pInput[idx] - pMean[c]) * pInvStd[c];
-    pOutput[idx] = pGamma[c] * fNorm + pBeta[c];
+    float fNorm = (pInput[idx] - pMean[c]) * pInvStd[c];  // 20260406 ZJH 标准化: (x - mean) * invStd
+    pOutput[idx] = pGamma[c] * fNorm + pBeta[c];  // 20260406 ZJH 仿射变换: gamma * norm + beta
 }
 
 // 20260324 ZJH 更新 running stats kernel — 在 GPU 上直接更新（避免 D2H/H2D 往返）
@@ -1705,18 +1764,19 @@ extern "C" int omCudaBatchNorm2d(const float* pInput, float* pOutput,
 // LayerNorm 前向 kernel
 // =====================================================================
 
+// 20260406 ZJH LayerNorm 前向归一化 kernel：逐元素 (input - mean) * invStd * gamma + beta
 __global__ void kernelLayerNormForward(const float* pInput, float* pOutput,
                                         const float* pGamma, const float* pBeta,
                                         const float* pMean, const float* pInvStd,
                                         int nBatch, int nDim) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int nTotal = nBatch * nDim;
-    if (idx >= nTotal) return;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  // 20260406 ZJH 全局线程索引
+    int nTotal = nBatch * nDim;  // 20260406 ZJH 总元素数
+    if (idx >= nTotal) return;  // 20260406 ZJH 越界检查
 
-    int b = idx / nDim;
-    int d = idx % nDim;
-    float fNorm = (pInput[idx] - pMean[b]) * pInvStd[b];
-    pOutput[idx] = pGamma[d] * fNorm + pBeta[d];
+    int b = idx / nDim;  // 20260406 ZJH batch 索引（每个样本独立归一化）
+    int d = idx % nDim;  // 20260406 ZJH 维度索引（gamma/beta 沿此维度）
+    float fNorm = (pInput[idx] - pMean[b]) * pInvStd[b];  // 20260406 ZJH 标准化: (x - mean) * invStd
+    pOutput[idx] = pGamma[d] * fNorm + pBeta[d];  // 20260406 ZJH 仿射变换: gamma * norm + beta
 }
 
 // 20260324 ZJH LayerNorm 统计量计算 kernel — 每 block 处理一个 batch 样本
@@ -2853,48 +2913,60 @@ extern "C" int omCudaDilatedConv2dBackwardWeight(const float* pInput, const floa
                                                    int nBatch, int nCin, int nH, int nW,
                                                    int nCout, int nKH, int nKW,
                                                    int nStride, int nPad, int nDilation) {
-    int nEffKH = nKH + (nKH - 1) * (nDilation - 1);
-    int nEffKW = nKW + (nKW - 1) * (nDilation - 1);
-    int nHout = (nH + 2 * nPad - nEffKH) / nStride + 1;
-    int nWout = (nW + 2 * nPad - nEffKW) / nStride + 1;
-    int nColRows = nCin * nKH * nKW;
-    int nColCols = nHout * nWout;
+    // 20260406 ZJH 计算膨胀卷积有效核大小和输出尺寸
+    int nEffKH = nKH + (nKH - 1) * (nDilation - 1);  // 20260406 ZJH 有效核高度
+    int nEffKW = nKW + (nKW - 1) * (nDilation - 1);  // 20260406 ZJH 有效核宽度
+    int nHout = (nH + 2 * nPad - nEffKH) / nStride + 1;  // 20260406 ZJH 输出高度
+    int nWout = (nW + 2 * nPad - nEffKW) / nStride + 1;  // 20260406 ZJH 输出宽度
+    int nColRows = nCin * nKH * nKW;  // 20260406 ZJH im2col 矩阵行数
+    int nColCols = nHout * nWout;  // 20260406 ZJH im2col 矩阵列数
 
+    // 20260406 ZJH 分配三个临时缓冲区：col 矩阵、转置后的 colT、临时 GEMM 结果
     float* pCol = static_cast<float*>(gpuPoolAlloc(static_cast<size_t>(nColRows) * nColCols * sizeof(float)));
     float* pColT = static_cast<float*>(gpuPoolAlloc(static_cast<size_t>(nColCols) * nColRows * sizeof(float)));
     float* pTmp = static_cast<float*>(gpuPoolAlloc(static_cast<size_t>(nCout) * nColRows * sizeof(float)));
     if (!pCol || !pColT || !pTmp) {
+        // 20260406 ZJH OOM 防御：释放已分配缓冲
         if (pCol) gpuPoolFree(pCol); if (pColT) gpuPoolFree(pColT); if (pTmp) gpuPoolFree(pTmp);
-        return -1;
+        return -1;  // 20260406 ZJH 分配失败
     }
 
-    int nWeightSize = nCout * nColRows;
-    omCudaMemset(pGradWeight, 0, static_cast<size_t>(nWeightSize) * sizeof(float));
-    if (pGradBias) omCudaMemset(pGradBias, 0, static_cast<size_t>(nCout) * sizeof(float));
+    // 20260406 ZJH 清零梯度（后续逐 batch 累加）
+    int nWeightSize = nCout * nColRows;  // 20260406 ZJH 权重梯度总元素数
+    omCudaMemset(pGradWeight, 0, static_cast<size_t>(nWeightSize) * sizeof(float));  // 20260406 ZJH 清零权重梯度
+    if (pGradBias) omCudaMemset(pGradBias, 0, static_cast<size_t>(nCout) * sizeof(float));  // 20260406 ZJH 清零偏置梯度
 
+    // 20260406 ZJH 逐 batch 处理：im2col → transpose → GEMM → 累加
     for (int n = 0; n < nBatch; ++n) {
-        const float* pBatchIn = pInput + n * nCin * nH * nW;
-        const float* pBatchGradOut = pGradOutput + n * nCout * nHout * nWout;
+        const float* pBatchIn = pInput + n * nCin * nH * nW;  // 20260406 ZJH 当前 batch 输入偏移
+        const float* pBatchGradOut = pGradOutput + n * nCout * nHout * nWout;  // 20260406 ZJH 当前 batch 梯度偏移
 
-        int nTotalCol = nColRows * nColCols;
-        int nBlocks = (nTotalCol + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        // 20260406 ZJH 步骤 1: 膨胀 im2col 展开输入
+        int nTotalCol = nColRows * nColCols;  // 20260406 ZJH col 矩阵元素数
+        int nBlocks = (nTotalCol + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 20260406 ZJH im2col 线程块数
         kernelIm2colDilated<<<nBlocks, BLOCK_SIZE, 0, s_computeStream>>>(
             pBatchIn, pCol, nCin, nH, nW, nKH, nKW,
             nPad, nPad, nStride, nStride, nDilation, nDilation, nHout, nWout);
 
+        // 20260406 ZJH 步骤 2: 转置 col → colT
         omCudaTranspose(pCol, pColT, nColRows, nColCols);
+        // 20260406 ZJH 步骤 3: tmp = gradOut[Cout, ColCols] × colT[ColCols, ColRows]
         omCudaMatmul(pBatchGradOut, pColT, pTmp, nCout, nColCols, nColRows);
+        // 20260406 ZJH 步骤 4: gradWeight += tmp（逐元素累加）
         omCudaAdd(pGradWeight, pTmp, pGradWeight, nWeightSize);
 
+        // 20260406 ZJH 步骤 5: 偏置梯度归约（如果有偏置）
         if (pGradBias) {
-            int nThreads = min(nColCols, 256);
-            nThreads = ((nThreads + 31) / 32) * 32;
-            if (nThreads < 32) nThreads = 32;
+            int nThreads = min(nColCols, 256);  // 20260406 ZJH 线程数取空间大小和 256 的较小值
+            nThreads = ((nThreads + 31) / 32) * 32;  // 20260406 ZJH 对齐到 warp 倍数
+            if (nThreads < 32) nThreads = 32;  // 20260406 ZJH 至少一个 warp
+            // 20260406 ZJH 每 block 一个通道，归约该通道的空间维度梯度
             kernelConvBiasGradReduce<<<nCout, nThreads, 0, s_computeStream>>>(
                 pBatchGradOut, pGradBias, nCout, nColCols);
         }
     }
 
+    // 20260406 ZJH 归还三个临时缓冲区到内存池
     gpuPoolFree(pCol); gpuPoolFree(pColT); gpuPoolFree(pTmp);
     CUDA_CHECK(cudaGetLastError());
     return 0;
@@ -4822,5 +4894,61 @@ extern "C" int omCudaMallocHost(void** ppPtr, size_t nBytes) {
 // 返回: 0 成功, -1 失败
 extern "C" int omCudaFreeHost(void* pPtr) {
     CUDA_CHECK(cudaFreeHost(pPtr));  // 20260330 ZJH 释放 page-locked 内存
+    return 0;
+}
+
+// =====================================================================
+// 20260402 ZJH [OPT-3.5] CUDA Graph 实现
+// CUDA Graph 将一系列 kernel launch 录制为静态图，后续一键回放
+// 消除 CPU→GPU 的 kernel dispatch 开销（每次 launch ~5-10μs）
+// 对于有几十个 kernel 的推理图，总节省可达 100-500μs
+// =====================================================================
+
+// 20260402 ZJH 开始 CUDA Graph 捕获
+// 将计算流切换到捕获模式，后续所有 kernel launch 被录制但不执行
+extern "C" int omCudaGraphBeginCapture() {
+    initStreams();  // 20260402 ZJH 确保流已初始化
+    // 20260402 ZJH 在计算流上启动 Graph 捕获
+    // cudaStreamCaptureModeGlobal: 捕获当前流及所有被它依赖的流上的操作
+    CUDA_CHECK(cudaStreamBeginCapture(s_computeStream, cudaStreamCaptureModeGlobal));
+    return 0;
+}
+
+// 20260402 ZJH 结束捕获并实例化为可执行图
+// 将录制的操作序列编译为 cudaGraphExec_t，可多次回放
+extern "C" int omCudaGraphEndCapture(void** pGraphExec) {
+    if (!pGraphExec) return -1;  // 20260402 ZJH 空指针检查
+
+    cudaGraph_t graph = nullptr;           // 20260402 ZJH 捕获的图对象
+    cudaGraphExec_t graphExec = nullptr;   // 20260402 ZJH 可执行图实例
+
+    // 20260402 ZJH 结束捕获，获取图对象
+    CUDA_CHECK(cudaStreamEndCapture(s_computeStream, &graph));
+
+    // 20260402 ZJH 实例化图（编译 kernel 参数+依赖关系为静态执行计划）
+    CUDA_CHECK(cudaGraphInstantiate(&graphExec, graph, nullptr, nullptr, 0));
+
+    // 20260402 ZJH 释放图模板（实例化后不再需要）
+    cudaGraphDestroy(graph);
+
+    *pGraphExec = static_cast<void*>(graphExec);  // 20260402 ZJH 输出可执行图句柄
+    return 0;
+}
+
+// 20260402 ZJH 回放已捕获的 CUDA Graph
+// 一次调用执行完整的推理序列（所有 kernel 按录制顺序执行）
+// CPU 侧开销仅为一次 cudaGraphLaunch 调用（~3μs，vs 每个 kernel ~5-10μs）
+extern "C" int omCudaGraphLaunch(void* pGraphExec) {
+    if (!pGraphExec) return -1;  // 20260402 ZJH 空指针检查
+    auto graphExec = static_cast<cudaGraphExec_t>(pGraphExec);  // 20260402 ZJH 类型转换
+    CUDA_CHECK(cudaGraphLaunch(graphExec, s_computeStream));    // 20260402 ZJH 在计算流上回放
+    return 0;
+}
+
+// 20260402 ZJH 释放 CUDA Graph 资源
+extern "C" int omCudaGraphDestroy(void* pGraphExec) {
+    if (!pGraphExec) return 0;  // 20260402 ZJH 空指针安全
+    auto graphExec = static_cast<cudaGraphExec_t>(pGraphExec);
+    CUDA_CHECK(cudaGraphExecDestroy(graphExec));  // 20260402 ZJH 释放可执行图
     return 0;
 }

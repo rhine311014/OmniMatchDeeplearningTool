@@ -128,11 +128,12 @@ public:
     // 20260320 ZJH 重置矩阵
     void reset() { std::fill(m_vecMatrix.begin(), m_vecMatrix.end(), 0); }
 
+    // 20260406 ZJH 获取类别总数
     int numClasses() const { return m_nNumClasses; }
 
 private:
-    int m_nNumClasses;
-    std::vector<int> m_vecMatrix;
+    int m_nNumClasses;  // 20260406 ZJH 类别总数
+    std::vector<int> m_vecMatrix;  // 20260406 ZJH 一维展开的混淆矩阵存储，大小 nNumClasses * nNumClasses
 };
 
 // =========================================================

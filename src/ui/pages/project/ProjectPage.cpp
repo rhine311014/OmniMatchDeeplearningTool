@@ -23,6 +23,7 @@
 #include <QScrollArea>       // 20260322 ZJH 可滚动区域（标签列表）
 #include <QFrame>            // 20260322 ZJH 分割线
 #include <QDebug>            // 20260322 ZJH 调试日志
+#include <QFileInfo>         // 20260403 ZJH 文件路径解析（新建项目路径提取）
 
 // 20260322 ZJH 构造函数：创建双视图布局和项目管理器
 ProjectPage::ProjectPage(QWidget* pParent)
@@ -118,30 +119,33 @@ void ProjectPage::triggerOpenProject()
 
 // ===== 槽函数 =====
 
-// 20260322 ZJH 新建项目按钮点击
+// 20260403 ZJH 新建项目按钮点击（Halcon 风格对话框）
 void ProjectPage::onNewProject()
 {
-    // 20260322 ZJH 弹出新建项目对话框
+    // 20260403 ZJH 弹出 Halcon 风格新建项目对话框
     NewProjectDialog dlg(this);
     if (dlg.exec() != QDialog::Accepted) {
-        return;  // 20260322 ZJH 用户取消，不创建项目
+        return;  // 20260403 ZJH 用户取消，不创建项目
     }
 
-    // 20260322 ZJH 从对话框获取用户输入
-    QString strName = dlg.projectName();      // 20260322 ZJH 项目名称
-    om::TaskType eType = dlg.taskType();      // 20260322 ZJH 任务类型
-    QString strPath = dlg.projectPath();      // 20260322 ZJH 项目路径
+    // 20260403 ZJH 从对话框获取用户输入
+    QString strName = dlg.projectName();                // 20260403 ZJH 项目名称
+    om::TaskType eType = dlg.taskType();                // 20260403 ZJH 任务类型
+    QString strFilePath = dlg.projectPath();            // 20260403 ZJH 项目文件路径（.omdl）
+    QString strDescription = dlg.projectDescription();  // 20260403 ZJH 项目描述
 
-    // 20260322 ZJH 在路径下创建以项目名命名的子目录
-    QString strFullPath = strPath + "/" + strName;  // 20260322 ZJH 完整项目目录
+    // 20260403 ZJH 从 .omdl 文件路径提取项目目录（去掉文件名）
+    QFileInfo fileInfo(strFilePath);                        // 20260403 ZJH 解析文件路径信息
+    QString strProjectDir = fileInfo.absolutePath() + "/" + strName;  // 20260403 ZJH 项目目录
 
-    // 20260322 ZJH 调用 ProjectManager 创建项目
-    Project* pProject = m_pProjectManager->createProject(strName, eType, strFullPath);
+    // 20260403 ZJH 调用 ProjectManager 创建项目（含描述）
+    Project* pProject = m_pProjectManager->createProject(
+        strName, eType, strProjectDir, strDescription);
 
     if (pProject) {
-        qDebug() << "[ProjectPage] onNewProject: 项目创建成功" << strName;  // 20260322 ZJH 成功日志
+        qDebug() << "[ProjectPage] onNewProject: 项目创建成功" << strName;  // 20260403 ZJH 成功日志
     } else {
-        // 20260322 ZJH 创建失败提示
+        // 20260403 ZJH 创建失败提示
         QMessageBox::warning(this,
             QStringLiteral("创建失败"),
             QStringLiteral("无法创建项目，请检查路径权限。"));

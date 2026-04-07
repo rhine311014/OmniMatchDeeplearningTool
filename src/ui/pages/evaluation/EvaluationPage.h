@@ -65,6 +65,9 @@ private slots:
     // 20260322 ZJH 导出 HTML 报告按钮点击
     void onExportHtmlReport();
 
+    // 20260330 ZJH 导出 JSON 按钮点击
+    void onExportJson();
+
     // 20260322 ZJH 归一化模式切换
     // 参数: nMode - 0=计数, 1=行归一化, 2=列归一化
     void onNormModeChanged(int nMode);
@@ -117,7 +120,9 @@ private:
     QPushButton* m_pBtnRunEval;       // 20260322 ZJH 运行评估按钮
     QPushButton* m_pBtnClearResults;  // 20260322 ZJH 清除结果按钮
     QPushButton* m_pBtnExportCsv;     // 20260322 ZJH 导出 CSV 按钮
+    QPushButton* m_pBtnExportJson;    // 20260330 ZJH 导出 JSON 按钮
     QPushButton* m_pBtnExportHtml;    // 20260322 ZJH 导出 HTML 报告按钮
+    QComboBox*   m_pCboReportTemplate;  // 20260330 ZJH 报告模板下拉框（标准/详细/简洁）
 
     // 20260322 ZJH 前置检查标签（5 项）
     QLabel* m_pLblCheckTrained;   // 20260322 ZJH 模型已训练
@@ -143,10 +148,10 @@ private:
     ConfusionMatrixHeatmap* m_pHeatmap;      // 20260322 ZJH 混淆矩阵热力图
 
     // 20260322 ZJH 推理结果渲染图（样本预测 + 缺陷概率热力图）
-    QLabel* m_pLblInferTitle;         // 标题
-    QWidget* m_pInferGrid;            // 样本网格容器
-    QVector<QLabel*> m_vecInferThumbs;  // 推理缩略图列表
-    QLabel* m_pLblDefectMap;          // 缺陷概率热力图
+    QLabel* m_pLblInferTitle;         // 20260406 ZJH 推理结果渲染区域标题标签
+    QWidget* m_pInferGrid;            // 20260406 ZJH 推理样本网格容器（展示预测结果缩略图）
+    QVector<QLabel*> m_vecInferThumbs;  // 20260406 ZJH 推理缩略图标签列表（每个标签显示一张推理结果）
+    QLabel* m_pLblDefectMap;          // 20260406 ZJH 缺陷概率热力图标签（异常检测时展示逐像素缺陷概率）
 
     // 20260324 ZJH GradCAM 显示模式控件
     GradCAMOverlay* m_pGradCAMOverlay;    // 20260324 ZJH Grad-CAM 叠加控件
@@ -172,6 +177,19 @@ private:
     QLabel* m_pLblThroughput;   // 20260322 ZJH 吞吐量
 
     QTextEdit* m_pTxtLog;  // 20260322 ZJH 日志文本框
+
+    // 20260402 ZJH [OPT-3.9] 模型对比面板
+    QTableWidget* m_pComparisonTable;  // 20260402 ZJH 模型对比表格（模型名称|精度|推理延迟|模型大小|训练时间）
+    QPushButton*  m_pBtnClearComparison;  // 20260402 ZJH 清除对比记录按钮
+
+private slots:
+    // 20260402 ZJH 清除模型对比记录
+    void onClearComparison();
+
+private:
+    // 20260402 ZJH 追加一行模型对比记录（评估完成后自动调用）
+    void appendComparisonEntry(const QString& strModelName, double dAccuracy,
+                               double dLatencyMs, double dModelSizeMB, double dTrainTimeSec);
 
     // ===== 评估状态 =====
 

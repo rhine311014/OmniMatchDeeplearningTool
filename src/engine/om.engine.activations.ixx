@@ -1,15 +1,15 @@
 // 20260319 ZJH 激活函数模块 — Phase 2 Part 1
 // 实现 ReLU 等激活函数的 Module 封装
-module;
+module;  // 20260406 ZJH 全局模块片段声明，允许在模块单元中使用传统 #include
 
-export module om.engine.activations;
+export module om.engine.activations;  // 20260406 ZJH 导出模块声明：om.engine.activations 激活函数模块
 
 // 20260319 ZJH 导入依赖模块：张量类、张量运算、模块基类
 import om.engine.tensor;
 import om.engine.tensor_ops;
 import om.engine.module;
 
-export namespace om {
+export namespace om {  // 20260406 ZJH 导出命名空间 om，所有深度学习引擎组件统一归属此命名空间
 
 // 20260319 ZJH ReLU — 修正线性单元激活模块
 // 前向: out = max(0, input)，无可训练参数
@@ -54,6 +54,9 @@ private:
 // Transformer/ViT 中标准激活函数，比 ReLU 更平滑
 class GELU : public Module {
 public:
+    // 20260406 ZJH forward — 对输入逐元素执行 GELU 激活
+    // input: 任意形状的输入张量
+    // 返回: 与输入同形状的 GELU 激活输出张量
     Tensor forward(const Tensor& input) override {
         return tensorGELU(input);  // 20260320 ZJH 调用 tensor_ops 的 GELU 运算
     }
@@ -63,6 +66,9 @@ public:
 // SiLU(x) = x * sigmoid(x)，YOLOv5/v8 中常用
 class SiLU : public Module {
 public:
+    // 20260406 ZJH forward — 对输入逐元素执行 SiLU (Swish) 激活
+    // input: 任意形状的输入张量
+    // 返回: 与输入同形状的 SiLU 激活输出张量
     Tensor forward(const Tensor& input) override {
         return tensorSiLU(input);  // 20260320 ZJH 调用 tensor_ops 的 SiLU 运算
     }
@@ -72,9 +78,12 @@ public:
 // LSTM 核心激活函数，输出范围 [-1, 1]
 class Tanh : public Module {
 public:
+    // 20260406 ZJH forward — 对输入逐元素执行 Tanh 激活
+    // input: 任意形状的输入张量
+    // 返回: 与输入同形状的 Tanh 激活输出张量，值域 [-1, 1]
     Tensor forward(const Tensor& input) override {
         return tensorTanh(input);  // 20260321 ZJH 调用 tensor_ops 的 Tanh 运算
     }
 };
 
-}  // namespace om
+}  // namespace om  // 20260406 ZJH 结束 om 命名空间

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 100 100">
+<defs><linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1E4478"/><stop offset="100%" stop-color="#0E2240"/></linearGradient><linearGradient id="tr" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#4A9BE0"/><stop offset="100%" stop-color="#1A4A8A"/></linearGradient></defs>
+<rect x="2" y="2" width="96" height="96" rx="16" fill="url(#tr)"/><rect x="5" y="5" width="90" height="90" rx="13" fill="url(#tb)"/>
+<rect x="20" y="30" width="24" height="30" rx="4" fill="#1A3660" stroke="#7EAED0" stroke-width="1.5"/>
+<g fill="#4CB848"><circle cx="28" cy="38" r="2"/><circle cx="36" cy="38" r="2"/><circle cx="28" cy="46" r="2"/><circle cx="36" cy="46" r="2"/><circle cx="32" cy="54" r="2"/></g>
+<rect x="56" y="30" width="24" height="30" rx="4" fill="#1A3660" stroke="#7EAED0" stroke-width="1.5"/>
+<g fill="#5BBEEE"><circle cx="64" cy="38" r="2"/><circle cx="72" cy="38" r="2"/><circle cx="64" cy="46" r="2"/><circle cx="72" cy="46" r="2"/><circle cx="68" cy="54" r="2"/></g>
+<text x="50" y="24" text-anchor="middle" font-size="8" fill="#7EAED0" font-weight="600" font-family="monospace">RS232</text>
+<polyline points="20,74 30,74 30,68 40,68 40,74 50,74 50,68 60,68 60,74 70,74 70,68 80,68" fill="none" stroke="#4CB848" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

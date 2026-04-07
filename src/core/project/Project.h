@@ -59,6 +59,14 @@ public:
     // 参数: eType - 新的任务类型
     void setTaskType(om::TaskType eType);
 
+    // 20260403 ZJH 获取项目描述（用户在新建项目时输入的说明文字）
+    // 返回: 项目描述字符串
+    QString description() const;
+
+    // 20260403 ZJH 设置项目描述
+    // 参数: strDesc - 项目描述文字
+    void setDescription(const QString& strDesc);
+
     // 20260322 ZJH 获取项目工作流状态
     // 返回: 项目状态枚举值
     om::ProjectState state() const;
@@ -133,8 +141,9 @@ public:
     const ImageDataset* dataset() const;
 
 private:
-    QString m_strName;  // 20260322 ZJH 项目名称
-    QString m_strPath;  // 20260322 ZJH 项目根目录绝对路径
+    QString m_strName;         // 20260322 ZJH 项目名称
+    QString m_strPath;         // 20260322 ZJH 项目根目录绝对路径
+    QString m_strDescription;  // 20260403 ZJH 项目描述（用户新建时输入的说明文字）
 
     // 20260322 ZJH 项目任务类型（默认为分类）
     om::TaskType m_eTaskType = om::TaskType::Classification;

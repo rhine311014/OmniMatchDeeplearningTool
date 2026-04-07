@@ -3,14 +3,15 @@
 // 只需 OK（正常）图像训练，无需标注，无需外部预训练模型或 ONNX
 module;
 
-#include <vector>
-#include <string>
-#include <cmath>
-#include <fstream>
-#include <stdexcept>
-#include <algorithm>
-#include <memory>
-#include <numeric>
+// 20260406 ZJH 标准库头文件包含
+#include <vector>     // 20260406 ZJH 动态数组容器
+#include <string>     // 20260406 ZJH 字符串类型
+#include <cmath>      // 20260406 ZJH 数学函数 (sqrt)
+#include <fstream>    // 20260406 ZJH 文件流 (ofstream, ifstream)
+#include <stdexcept>  // 20260406 ZJH 异常类 (runtime_error, invalid_argument)
+#include <algorithm>  // 20260406 ZJH 算法函数
+#include <memory>     // 20260406 ZJH 智能指针 (shared_ptr)
+#include <numeric>    // 20260406 ZJH 数值算法
 
 export module om.engine.zeroshot_ad;
 
@@ -453,4 +454,4 @@ private:
     int m_nFeatW = 0;  // 20260322 ZJH 宽度
 };
 
-}  // namespace om
+}  // 20260406 ZJH namespace om 结束

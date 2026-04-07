@@ -114,28 +114,44 @@ ImagePage::ImagePage(QWidget* pParent)
             m_pAnnotCtrl, &AnnotationController::deleteSelectedAnnotation);
 
     // 20260322 ZJH 工具快捷键
+    // 20260406 ZJH V 键切换到选择工具
     QShortcut* pSelectKey = new QShortcut(QKeySequence(Qt::Key_V), this);
     connect(pSelectKey, &QShortcut::activated, this, [this]() {
-        m_pBtnSelect->setChecked(true);
-        onToolChanged(0);
+        m_pBtnSelect->setChecked(true);  // 20260406 ZJH 选中选择工具按钮
+        onToolChanged(0);                // 20260406 ZJH 通知工具切换为选择模式
     });
 
+    // 20260406 ZJH B 键切换到矩形标注工具
     QShortcut* pRectKey = new QShortcut(QKeySequence(Qt::Key_B), this);
     connect(pRectKey, &QShortcut::activated, this, [this]() {
-        m_pBtnRect->setChecked(true);
-        onToolChanged(1);
+        m_pBtnRect->setChecked(true);    // 20260406 ZJH 选中矩形工具按钮
+        onToolChanged(1);                // 20260406 ZJH 通知工具切换为矩形模式
     });
 
+    // 20260406 ZJH P 键切换到多边形标注工具
     QShortcut* pPolygonKey = new QShortcut(QKeySequence(Qt::Key_P), this);
     connect(pPolygonKey, &QShortcut::activated, this, [this]() {
-        m_pBtnPolygon->setChecked(true);
-        onToolChanged(2);
+        m_pBtnPolygon->setChecked(true);  // 20260406 ZJH 选中多边形工具按钮
+        onToolChanged(2);                  // 20260406 ZJH 通知工具切换为多边形模式
     });
 
+    // 20260406 ZJH D 键切换到画笔标注工具
     QShortcut* pBrushKey = new QShortcut(QKeySequence(Qt::Key_D), this);
     connect(pBrushKey, &QShortcut::activated, this, [this]() {
-        m_pBtnBrush->setChecked(true);
-        onToolChanged(3);
+        m_pBtnBrush->setChecked(true);    // 20260406 ZJH 选中画笔工具按钮
+        onToolChanged(3);                  // 20260406 ZJH 通知工具切换为画笔模式
+    });
+
+    // 20260330 ZJH Ctrl+C 复制选中标注到剪贴板
+    QShortcut* pCopyShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+C")), this);
+    connect(pCopyShortcut, &QShortcut::activated, this, [this]() {
+        m_pAnnotCtrl->copySelectedAnnotation();  // 20260330 ZJH 复制选中标注
+    });
+
+    // 20260330 ZJH Ctrl+V 粘贴标注（从剪贴板粘贴到当前图像，偏移 20px 避免重叠）
+    QShortcut* pPasteShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+V")), this);
+    connect(pPasteShortcut, &QShortcut::activated, this, [this]() {
+        m_pAnnotCtrl->pasteAnnotation(QPointF(20.0, 20.0));  // 20260330 ZJH 粘贴并偏移
     });
 }
 
@@ -238,27 +254,30 @@ void ImagePage::onProjectClosedImpl()
     // 20260322 ZJH 清空数据集
     m_pDataset = nullptr;
     m_nCurrentIndex = -1;
-    // 20260322 ZJH 清空 UI
-    m_pLabelCombo->clear();
-    m_pAnnotationList->clear();
-    m_pNavLabel->setText(QStringLiteral("0 / 0"));
-    m_pThumbnailLabel->clear();
-    m_pFileNameLabel->setText(QStringLiteral("-"));
-    m_pFileSizeLabel->setText(QStringLiteral("-"));
-    m_pFileBytesLabel->setText(QStringLiteral("-"));
-    m_pFileDepthLabel->setText(QStringLiteral("-"));
-    m_pMousePosLabel->setText(QStringLiteral("-"));
-    m_pPixelValueLabel->setText(QStringLiteral("-"));
+    // 20260322 ZJH 清空 UI 所有显示内容
+    m_pLabelCombo->clear();                                    // 20260406 ZJH 清空标签下拉框
+    m_pAnnotationList->clear();                                // 20260406 ZJH 清空标注列表
+    m_pNavLabel->setText(QStringLiteral("0 / 0"));             // 20260406 ZJH 导航索引归零
+    m_pThumbnailLabel->clear();                                // 20260406 ZJH 清空缩略图预览
+    m_pFileNameLabel->setText(QStringLiteral("-"));             // 20260406 ZJH 文件名重置
+    m_pFileSizeLabel->setText(QStringLiteral("-"));             // 20260406 ZJH 文件尺寸重置
+    m_pFileBytesLabel->setText(QStringLiteral("-"));            // 20260406 ZJH 文件大小重置
+    m_pFileDepthLabel->setText(QStringLiteral("-"));            // 20260406 ZJH 色深重置
+    m_pMousePosLabel->setText(QStringLiteral("-"));             // 20260406 ZJH 鼠标坐标重置
+    m_pPixelValueLabel->setText(QStringLiteral("-"));           // 20260406 ZJH 像素值重置
 }
 
 // ===== 图像加载与导航 =====
 
 // 20260322 ZJH 加载指定 UUID 的图像
-void ImagePage::loadImage(const QString& strUuid)
+void ImagePage::loadImage(const QString& strUuid, const QString& strAnnotationUuid)
 {
     if (!m_pDataset) {
         return;  // 20260322 ZJH 无数据集
     }
+
+    // 20260404 ZJH 记录待选中的标注 UUID（加载完成后在 onAsyncImageLoaded 中选中）
+    m_strPendingAnnotationUuid = strAnnotationUuid;
 
     // 20260322 ZJH 在数据集中查找图像索引
     const QVector<ImageEntry>& vecImages = m_pDataset->images();
@@ -391,6 +410,32 @@ void ImagePage::onAsyncImageLoaded()
 
     // 20260322 ZJH 刷新标注列表
     refreshAnnotationList();
+
+    // 20260404 ZJH 如果有待选中的标注 UUID（来自检查页双击跳转），自动选中并缩放定位
+    if (!m_strPendingAnnotationUuid.isEmpty() && m_pAnnotCtrl) {
+        // 20260404 ZJH 先选中标注（会触发 centerOn + 闪烁高亮）
+        m_pAnnotCtrl->selectAnnotationByUuid(m_strPendingAnnotationUuid);
+
+        // 20260404 ZJH 缩放视图到标注区域，让用户一眼看到标注位置
+        // 在全图15%缩放下标注太小看不见，需要 fitInView 到标注包围框
+        if (m_pGraphicsView && pMutableEntry) {
+            for (const Annotation& ann : pMutableEntry->vecAnnotations) {
+                if (ann.strUuid == m_strPendingAnnotationUuid && !ann.rectBounds.isEmpty()) {
+                    // 20260404 ZJH 标注区域加 50% padding，提供上下文（不要太紧）
+                    QRectF rcTarget = ann.rectBounds;
+                    double dPadW = rcTarget.width() * 0.5;   // 20260404 ZJH 50% 水平 padding
+                    double dPadH = rcTarget.height() * 0.5;  // 20260404 ZJH 50% 垂直 padding
+                    rcTarget.adjust(-dPadW, -dPadH, dPadW, dPadH);
+                    // 20260404 ZJH 使用 ZoomableGraphicsView::fitInView(QRectF) 缩放到标注区域
+                    // 正确同步 m_dZoomFactor 内部状态，确保滚轮缩放/百分比显示正常
+                    m_pGraphicsView->fitInView(rcTarget);
+                    break;
+                }
+            }
+        }
+
+        m_strPendingAnnotationUuid.clear();  // 20260404 ZJH 只选中一次，清除
+    }
 
     // 20260322 ZJH 更新右侧面板图像尺寸信息
     m_pFileSizeLabel->setText(QStringLiteral("%1 x %2").arg(image.width()).arg(image.height()));

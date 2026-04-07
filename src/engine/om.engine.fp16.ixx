@@ -213,14 +213,15 @@ bool hasInfOrNan(const Tensor& t) {
         return false;  // 20260321 ZJH 空张量无元素，不可能有 inf/nan
     }
 
-    // 20260321 ZJH 获取张量的连续版本，确保可以线性遍历
-    auto ct = t.contiguous();  // 20260321 ZJH 若已连续则返回自身，否则拷贝为连续
-    const float* pData = ct.floatDataPtr();  // 20260321 ZJH 获取数据只读指针
-    int nTotal = ct.numel();  // 20260321 ZJH 获取元素总数
+    // 20260407 ZJH [修复] GPU 张量必须先 D2H 拷贝到 CPU 再检查
+    // 旧: 直接用 floatDataPtr() 获取指针 → GPU 张量返回设备指针 → CPU 解引用崩溃
+    auto ct = t.contiguous();
+    Tensor cpuTensor = ct.isCuda() ? ct.cpu() : ct;  // 20260407 ZJH GPU→CPU 传输
+    const float* pData = cpuTensor.floatDataPtr();  // 20260407 ZJH 现在是 CPU 指针，安全读取
+    int nTotal = cpuTensor.numel();
 
     // 20260321 ZJH 逐元素检查是否为 inf 或 nan
     for (int i = 0; i < nTotal; ++i) {
-        // 20260321 ZJH std::isinf 检测正负无穷，std::isnan 检测非数值
         if (std::isinf(pData[i]) || std::isnan(pData[i])) {
             return true;  // 20260321 ZJH 发现异常值，立即返回
         }
@@ -339,16 +340,10 @@ public:
                 // 20260321 ZJH 发现溢出后仍继续处理剩余参数（但 step() 会跳过更新）
             }
 
-            // 20260321 ZJH 将梯度除以 scale（等效于乘以 1/scale）
-            // 直接操作梯度数据指针，避免创建新张量
-            auto cGrad = grad.contiguous();  // 20260321 ZJH 确保梯度连续
-            int nTotal = cGrad.numel();  // 20260321 ZJH 梯度元素总数
-            float* pGradData = cGrad.mutableFloatDataPtr();  // 20260321 ZJH 梯度可写指针
-
-            // 20260321 ZJH 逐元素乘以反缩放因子
-            for (int j = 0; j < nTotal; ++j) {
-                pGradData[j] *= fInvScale;  // 20260321 ZJH grad /= scale 等价于 grad *= (1/scale)
-            }
+            // 20260407 ZJH [修复] 梯度反缩放由调用方（EngineBridge）通过 GradAccumulator 执行
+            // fp16 模块没有导入 autograd，无法直接访问 GradAccumulator
+            // unscaleGrads 只负责 inf 检测，反缩放在 EngineBridge 侧用 tensorMulScalar 完成
+            (void)fInvScale;  // 20260407 ZJH inf 检测已完成，反缩放由调用方执行
         }
     }
 

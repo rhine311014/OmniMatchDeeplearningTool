@@ -528,6 +528,13 @@ AnnotationGraphicsItem* AnnotationController::createGraphicsItem(const Annotatio
     // 20260322 ZJH 根据标注类型设置几何数据
     if (annotation.eType == AnnotationType::Rect) {
         pItem->setAnnotationRect(annotation.rectBounds);
+    } else if (annotation.eType == AnnotationType::RotatedRect) {
+        // 20260402 ZJH 旋转矩形: 设置轴对齐包围框 + 旋转角度
+        // QGraphicsItem::setRotation 围绕 transformOriginPoint 旋转
+        pItem->setAnnotationRect(annotation.rectBounds);
+        QPointF ptCenter = annotation.rectBounds.center();  // 20260402 ZJH 旋转中心 = 矩形中心
+        pItem->setTransformOriginPoint(ptCenter - annotation.rectBounds.topLeft());
+        pItem->setRotation(static_cast<double>(annotation.fAngle));  // 20260402 ZJH 应用旋转角度
     } else if (annotation.eType == AnnotationType::Polygon) {
         pItem->setAnnotationPolygon(annotation.polygon);
     }
@@ -685,4 +692,85 @@ void AnnotationController::finishBrushAnnotation(const QPointF& ptCenter)
     // 20260324 ZJH 推入撤销堆栈（push 会立即调用 redo()，由命令的 redo 执行 addAnnotationDirect）
     auto* pCmd = new AddAnnotationCommand(this, anno);
     m_pUndoStack->push(pCmd);
+}
+
+// ===== 复制/粘贴标注 (Ctrl+C / Ctrl+V) =====
+
+// 20260330 ZJH 复制当前选中的标注到内部剪贴板
+bool AnnotationController::copySelectedAnnotation()
+{
+    // 20260330 ZJH 查找场景中的选中项
+    QList<QGraphicsItem*> vecSelected = m_pScene->selectedItems();
+    if (vecSelected.isEmpty()) {
+        m_bClipboardValid = false;  // 20260330 ZJH 无选中项，清空剪贴板
+        return false;
+    }
+
+    // 20260330 ZJH 取第一个选中的标注图形项
+    AnnotationGraphicsItem* pSelected = dynamic_cast<AnnotationGraphicsItem*>(vecSelected.first());
+    if (!pSelected) {
+        return false;  // 20260330 ZJH 选中项不是标注图形项
+    }
+
+    // 20260330 ZJH 通过 UUID 在 ImageEntry 中查找对应标注数据
+    QString strUuid = pSelected->uuid();
+    if (!m_pEntry) {
+        return false;  // 20260330 ZJH 无绑定图像
+    }
+
+    for (const Annotation& anno : m_pEntry->vecAnnotations) {
+        if (anno.strUuid == strUuid) {
+            // 20260330 ZJH 深拷贝标注数据到剪贴板
+            m_clipboardAnnotation = anno;
+            m_bClipboardValid = true;  // 20260330 ZJH 标记剪贴板有效
+            return true;
+        }
+    }
+
+    return false;  // 20260330 ZJH 未找到对应标注
+}
+
+// 20260330 ZJH 粘贴剪贴板中的标注到当前图像
+bool AnnotationController::pasteAnnotation(const QPointF& ptOffset)
+{
+    if (!m_bClipboardValid) {
+        return false;  // 20260330 ZJH 剪贴板为空
+    }
+
+    if (!m_pEntry) {
+        return false;  // 20260330 ZJH 无绑定图像
+    }
+
+    // 20260330 ZJH 创建新标注（基于剪贴板数据，生成新 UUID）
+    Annotation newAnno(m_clipboardAnnotation.eType);
+    newAnno.nLabelId = m_clipboardAnnotation.nLabelId;        // 20260330 ZJH 保持原标签
+    newAnno.strText = m_clipboardAnnotation.strText;          // 20260330 ZJH 保持原文本
+    newAnno.eSeverity = m_clipboardAnnotation.eSeverity;      // 20260330 ZJH 保持原严重度
+
+    // 20260330 ZJH 根据标注类型，对坐标施加偏移
+    if (m_clipboardAnnotation.eType == AnnotationType::Rect ||
+        m_clipboardAnnotation.eType == AnnotationType::Mask) {
+        // 20260330 ZJH 矩形/掩码: 平移外接矩形
+        newAnno.rectBounds = m_clipboardAnnotation.rectBounds.translated(ptOffset.x(), ptOffset.y());
+    } else if (m_clipboardAnnotation.eType == AnnotationType::Polygon) {
+        // 20260330 ZJH 多边形: 平移所有顶点
+        QPolygonF translatedPoly = m_clipboardAnnotation.polygon.translated(ptOffset.x(), ptOffset.y());
+        newAnno.polygon = translatedPoly;
+        newAnno.rectBounds = translatedPoly.boundingRect();
+    } else if (m_clipboardAnnotation.eType == AnnotationType::TextArea) {
+        // 20260330 ZJH 文字区域: 平移外接矩形
+        newAnno.rectBounds = m_clipboardAnnotation.rectBounds.translated(ptOffset.x(), ptOffset.y());
+    }
+
+    // 20260330 ZJH 通过撤销堆栈添加标注（支持 Ctrl+Z 撤销粘贴）
+    auto* pCmd = new AddAnnotationCommand(this, newAnno);
+    m_pUndoStack->push(pCmd);
+
+    return true;
+}
+
+// 20260330 ZJH 检查剪贴板是否有内容
+bool AnnotationController::hasClipboardAnnotation() const
+{
+    return m_bClipboardValid;  // 20260330 ZJH 返回剪贴板有效标志
 }

@@ -34,12 +34,14 @@ public:
 
     // ===== 项目操作 =====
 
-    // 20260322 ZJH 创建新项目
+    // 20260403 ZJH 创建新项目
     // 参数: strName - 项目名称
     //       eType   - 任务类型
     //       strPath - 项目存储路径（文件夹）
+    //       strDescription - 项目描述（可选，默认为空）
     // 返回: 新创建的 Project 指针（所有权转交给 Application）
-    Project* createProject(const QString& strName, om::TaskType eType, const QString& strPath);
+    Project* createProject(const QString& strName, om::TaskType eType, const QString& strPath,
+                           const QString& strDescription = QString());
 
     // 20260322 ZJH 打开已有项目
     // 参数: strFilePath - .dfproj 文件完整路径

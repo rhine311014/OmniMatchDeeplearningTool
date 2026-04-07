@@ -16,6 +16,8 @@
 #include <QThreadPool>       // 20260324 ZJH 线程池，用于异步加载缩略图
 #include <QAbstractItemView> // 20260324 ZJH 获取父视图用于触发 viewport update
 #include <QTimer>            // 20260324 ZJH 延迟触发视图更新
+#include <algorithm>         // 20260404 ZJH std::min（标注轮廓缩放）
+#include <cmath>             // 20260404 ZJH std::max（裁剪区域计算）
 
 // 20260322 ZJH 构造函数
 ThumbnailDelegate::ThumbnailDelegate(QObject* pParent)
@@ -65,40 +67,129 @@ void ThumbnailDelegate::paint(QPainter* pPainter,
 
     // 20260322 ZJH 3. 加载缩略图（使用 QPixmapCache 缓存）
     QString strFilePath = index.data(FilePathRole).toString();  // 20260322 ZJH 从模型获取文件路径
-    QString strCacheKey = QStringLiteral("thumb_%1_%2")
-        .arg(strFilePath)
-        .arg(m_nThumbSize);  // 20260322 ZJH 缓存键包含路径和大小，大小变化时重新加载
+
+    // 20260402 ZJH 检查是否为实例视图裁剪模式（Halcon 风格）
+    QRectF rectCrop = index.data(CropRectRole).toRectF();  // 20260402 ZJH 裁剪矩形（空 = 整图）
+    bool bCropMode = rectCrop.isValid() && !rectCrop.isEmpty();  // 20260402 ZJH 是否需要裁剪
+
+    // 20260402 ZJH 缓存键: 裁剪模式包含裁剪坐标，确保不同实例有不同缓存
+    QString strCacheKey;
+    if (bCropMode) {
+        strCacheKey = QStringLiteral("crop_%1_%2_%3_%4_%5_%6")
+            .arg(strFilePath)
+            .arg(static_cast<int>(rectCrop.x())).arg(static_cast<int>(rectCrop.y()))
+            .arg(static_cast<int>(rectCrop.width())).arg(static_cast<int>(rectCrop.height()))
+            .arg(m_nThumbSize);
+    } else {
+        strCacheKey = QStringLiteral("thumb_%1_%2")
+            .arg(strFilePath)
+            .arg(m_nThumbSize);  // 20260322 ZJH 缓存键包含路径和大小
+    }
 
     QPixmap pixThumb;  // 20260322 ZJH 缩略图位图
     if (!QPixmapCache::find(strCacheKey, &pixThumb)) {
         // 20260324 ZJH 缓存未命中：绘制灰色占位符，并异步加载图像
-        // 不在 paint() 中同步加载文件，避免阻塞 UI 线程
 
-        // 20260324 ZJH 绘制占位矩形
-        pPainter->setPen(QPen(QColor(71, 85, 105), 1));      // 20260324 ZJH 灰色边框
-        pPainter->setBrush(QColor(30, 34, 48));              // 20260324 ZJH 深色填充
-        pPainter->drawRect(rcThumbArea.adjusted(4, 4, -4, -4));
+        // 20260402 ZJH 裁剪模式: 同步加载裁剪区域（小区域快速加载不会阻塞）
+        if (bCropMode && !strFilePath.isEmpty()) {
+            QImage imgFull(strFilePath);  // 20260402 ZJH 加载原图
+            if (!imgFull.isNull()) {
+                // 20260402 ZJH 裁剪标注区域（带 10% padding 防止边缘截断）
+                int nPadX = static_cast<int>(rectCrop.width() * 0.1);   // 20260402 ZJH 10% 水平 padding
+                int nPadY = static_cast<int>(rectCrop.height() * 0.1);  // 20260402 ZJH 10% 垂直 padding
+                QRect rcCropInt(
+                    std::max(0, static_cast<int>(rectCrop.x()) - nPadX),
+                    std::max(0, static_cast<int>(rectCrop.y()) - nPadY),
+                    static_cast<int>(rectCrop.width()) + 2 * nPadX,
+                    static_cast<int>(rectCrop.height()) + 2 * nPadY
+                );
+                // 20260402 ZJH 裁剪到图像边界内
+                rcCropInt = rcCropInt.intersected(imgFull.rect());
+                QImage imgCropped = imgFull.copy(rcCropInt);  // 20260402 ZJH 裁剪
 
-        // 20260324 ZJH 在占位区域中央绘制加载中提示
-        pPainter->setPen(QColor(100, 116, 139));             // 20260324 ZJH 灰色文字
-        QFont fontPlaceholder = pPainter->font();
-        fontPlaceholder.setPixelSize(11);                    // 20260324 ZJH 11px 小字体
-        pPainter->setFont(fontPlaceholder);
-        pPainter->drawText(rcThumbArea, Qt::AlignCenter, QStringLiteral("..."));
-
-        // 20260324 ZJH 提交异步加载任务（如果尚未提交）
-        if (!strFilePath.isEmpty()) {
-            // 20260324 ZJH 从模型获取图像 UUID 和缩略图缓存目录用于磁盘缓存
-            QString strUuid     = index.data(UuidRole).toString();      // 20260324 ZJH 图像 UUID
-            QString strThumbDir = index.data(ThumbDirRole).toString();  // 20260324 ZJH 缩略图缓存目录路径
-            asyncLoadThumbnail(strFilePath, strCacheKey, m_nThumbSize, strUuid, strThumbDir);
+                // 20260402 ZJH 缩放到缩略图大小
+                QImage imgScaled = imgCropped.scaled(m_nThumbSize, m_nThumbSize,
+                    Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                pixThumb = QPixmap::fromImage(imgScaled);
+                QPixmapCache::insert(strCacheKey, pixThumb);  // 20260402 ZJH 缓存
+            }
         }
-    } else {
+
+        if (pixThumb.isNull()) {
+            // 20260324 ZJH 绘制占位矩形（裁剪模式加载失败或整图模式缓存未命中）
+            pPainter->setPen(QPen(QColor(71, 85, 105), 1));
+            pPainter->setBrush(QColor(30, 34, 48));
+            pPainter->drawRect(rcThumbArea.adjusted(4, 4, -4, -4));
+
+            pPainter->setPen(QColor(100, 116, 139));
+            QFont fontPlaceholder = pPainter->font();
+            fontPlaceholder.setPixelSize(11);
+            pPainter->setFont(fontPlaceholder);
+            pPainter->drawText(rcThumbArea, Qt::AlignCenter, QStringLiteral("..."));
+
+            // 20260324 ZJH 整图模式异步加载
+            if (!bCropMode && !strFilePath.isEmpty()) {
+                QString strUuid     = index.data(UuidRole).toString();
+                QString strThumbDir = index.data(ThumbDirRole).toString();
+                asyncLoadThumbnail(strFilePath, strCacheKey, m_nThumbSize, strUuid, strThumbDir);
+            }
+        }
+    }
+
+    if (!pixThumb.isNull()) {
         // 20260322 ZJH 4. 绘制缩略图（居中于缩略图区域）
-        // 20260322 ZJH 计算居中偏移
         int nOffsetX = rcThumbArea.left() + (nThumbAreaWidth - pixThumb.width()) / 2;
         int nOffsetY = rcThumbArea.top() + (nThumbAreaHeight - pixThumb.height()) / 2;
         pPainter->drawPixmap(nOffsetX, nOffsetY, pixThumb);  // 20260322 ZJH 绘制缩略图
+
+        // 20260404 ZJH 实例视图: 绘制标注轮廓+半透明填充（对标 Halcon 检查页彩色轮廓叠加）
+        if (bCropMode) {
+            int nLabelIdForBorder = index.data(LabelIdRole).toInt();
+            if (nLabelIdForBorder >= 0) {
+                QColor clrBorder = index.data(LabelColorRole).value<QColor>();
+                if (!clrBorder.isValid()) clrBorder = QColor(37, 99, 235);
+
+                // 20260404 ZJH 尝试获取标注多边形轮廓
+                QPolygonF polyAnnotation = index.data(AnnotationPolyRole).value<QPolygonF>();
+
+                if (!polyAnnotation.isEmpty()) {
+                    // 20260404 ZJH 将标注多边形从原图坐标变换到缩略图坐标
+                    // 需要: 1) 减去裁剪区域偏移  2) 按缩放比例缩放  3) 平移到绘制位置
+                    int nPadX = static_cast<int>(rectCrop.width() * 0.1);   // 20260404 ZJH 与裁剪 padding 一致
+                    int nPadY = static_cast<int>(rectCrop.height() * 0.1);
+                    // 20260404 ZJH 重建实际裁剪区域（与缓存加载时相同的计算）
+                    double dCropX = std::max(0.0, rectCrop.x() - nPadX);
+                    double dCropY = std::max(0.0, rectCrop.y() - nPadY);
+                    double dCropW = rectCrop.width() + 2.0 * nPadX;
+                    double dCropH = rectCrop.height() + 2.0 * nPadY;
+
+                    // 20260404 ZJH 计算缩放比（保持宽高比，取较小的缩放因子）
+                    double dScaleX = static_cast<double>(pixThumb.width()) / dCropW;
+                    double dScaleY = static_cast<double>(pixThumb.height()) / dCropH;
+                    double dScale = std::min(dScaleX, dScaleY);
+
+                    // 20260404 ZJH 变换多边形顶点: (imgX, imgY) → (thumbX, thumbY)
+                    QPolygonF polyTransformed;
+                    for (const QPointF& pt : polyAnnotation) {
+                        double tx = nOffsetX + (pt.x() - dCropX) * dScale;
+                        double ty = nOffsetY + (pt.y() - dCropY) * dScale;
+                        polyTransformed << QPointF(tx, ty);
+                    }
+
+                    // 20260404 ZJH 绘制半透明填充 + 轮廓线（Halcon 风格）
+                    QColor clrFill = clrBorder;
+                    clrFill.setAlpha(50);  // 20260404 ZJH 半透明填充（alpha=50，不遮挡图像细节）
+                    pPainter->setPen(QPen(clrBorder, 1.5));  // 20260404 ZJH 1.5px 轮廓线
+                    pPainter->setBrush(clrFill);
+                    pPainter->drawPolygon(polyTransformed);  // 20260404 ZJH 绘制闭合多边形
+                } else {
+                    // 20260404 ZJH 无多边形数据时退化为简单矩形边框
+                    pPainter->setPen(QPen(clrBorder, 2));
+                    pPainter->setBrush(Qt::NoBrush);
+                    pPainter->drawRect(nOffsetX, nOffsetY, pixThumb.width(), pixThumb.height());
+                }
+            }
+        }
     }
 
     // 20260322 ZJH 5. 左上角标签色块（仅在有标签时绘制）

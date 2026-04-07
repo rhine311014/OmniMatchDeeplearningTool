@@ -54,8 +54,8 @@ public:
 
 public slots:
     // 20260322 ZJH 加载指定 UUID 的图像到查看器
-    // 参数: strUuid - 图像 UUID
-    void loadImage(const QString& strUuid);
+    // 20260404 ZJH 新增 strAnnotationUuid: 可选，加载后自动选中该标注（检查页双击跳转用）
+    void loadImage(const QString& strUuid, const QString& strAnnotationUuid = QString());
 
     // 20260322 ZJH 按索引导航到图像
     // 参数: nIndex - 图像在数据集中的索引（0-based）
@@ -139,6 +139,7 @@ private:
     int m_nPendingIndex = -1;                            // 20260324 ZJH 正在异步加载的图像索引（用于判断结果是否过期）
     QString m_strPendingUuid;                            // 20260324 ZJH 正在异步加载的图像 UUID
     QString m_strPendingFilePath;                        // 20260324 ZJH 正在异步加载的图像文件路径
+    QString m_strPendingAnnotationUuid;                  // 20260404 ZJH 待选中的标注 UUID（检查页双击跳转用，加载完成后自动选中）
 
     // ===== 左侧面板 =====
     QComboBox* m_pLabelCombo;             // 20260322 ZJH 标签选择下拉框

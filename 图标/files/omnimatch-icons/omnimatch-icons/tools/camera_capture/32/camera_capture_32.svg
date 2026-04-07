@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 100 100">
+<defs><linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1E4478"/><stop offset="100%" stop-color="#0E2240"/></linearGradient><linearGradient id="tr" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#4A9BE0"/><stop offset="100%" stop-color="#1A4A8A"/></linearGradient></defs>
+<rect x="2" y="2" width="96" height="96" rx="16" fill="url(#tr)"/><rect x="5" y="5" width="90" height="90" rx="13" fill="url(#tb)"/>
+<rect x="20" y="34" width="52" height="40" rx="6" fill="none" stroke="#7EAED0" stroke-width="2"/>
+<circle cx="46" cy="54" r="12" fill="none" stroke="#7EAED0" stroke-width="2"/>
+<circle cx="46" cy="54" r="5" fill="#7EAED0"/>
+<rect x="34" y="26" width="18" height="10" rx="3" fill="none" stroke="#7EAED0" stroke-width="1.5"/>
+<circle cx="64" cy="40" r="2.5" fill="#4CB848"/>
+<line x1="76" y1="30" x2="76" y2="70" stroke="#4CB848" stroke-width="1.5" stroke-dasharray="3 2"/>
+<polygon points="76,28 72,34 80,34" fill="#4CB848"/>
+</svg>

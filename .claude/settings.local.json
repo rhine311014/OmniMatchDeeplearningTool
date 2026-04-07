@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Auxiliary/Build/**)",
+      "Bash(1 BEOF cmd //C '$\\(cygpath -w /tmp/build.bat\\)')"
+    ]
+  }
+}

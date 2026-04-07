@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 100 100">
+<defs><linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1E4478"/><stop offset="100%" stop-color="#0E2240"/></linearGradient><linearGradient id="tr" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#4A9BE0"/><stop offset="100%" stop-color="#1A4A8A"/></linearGradient></defs>
+<rect x="2" y="2" width="96" height="96" rx="16" fill="url(#tr)"/><rect x="5" y="5" width="90" height="90" rx="13" fill="url(#tb)"/>
+<rect x="18" y="18" width="26" height="26" rx="4" fill="#4CB848" opacity=".2" stroke="#4CB848" stroke-width="1.5"/>
+<rect x="56" y="18" width="26" height="26" rx="4" fill="#5BBEEE" opacity=".2" stroke="#5BBEEE" stroke-width="1.5"/>
+<rect x="18" y="56" width="26" height="26" rx="4" fill="#E8A63C" opacity=".2" stroke="#E8A63C" stroke-width="1.5"/>
+<rect x="56" y="56" width="26" height="26" rx="4" fill="#D06090" opacity=".2" stroke="#D06090" stroke-width="1.5"/>
+<text x="31" y="35" text-anchor="middle" font-size="11" fill="#4CB848" font-weight="700" font-family="Arial,sans-serif">A</text>
+<text x="69" y="35" text-anchor="middle" font-size="11" fill="#5BBEEE" font-weight="700" font-family="Arial,sans-serif">B</text>
+<text x="31" y="73" text-anchor="middle" font-size="11" fill="#E8A63C" font-weight="700" font-family="Arial,sans-serif">C</text>
+<text x="69" y="73" text-anchor="middle" font-size="11" fill="#D06090" font-weight="700" font-family="Arial,sans-serif">D</text>
+</svg>

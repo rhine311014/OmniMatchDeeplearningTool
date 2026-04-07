@@ -38,11 +38,21 @@ class MainWindow : public QMainWindow
     Q_OBJECT
 
 public:
-    // 20260322 ZJH 构造函数，初始化全部子组件并组装布局
-    explicit MainWindow(QWidget* pParent = nullptr);
+    // 20260403 ZJH 构造函数，仅创建窗口骨架（菜单/导航栏/堆叠/状态栏）
+    // 页面创建延迟到 initPage() 逐步调用，确保启动动画不卡顿
+    // 参数: bDeferPages - true 延迟页面创建（由外部逐步调用 initPage），false 立即创建所有页面
+    explicit MainWindow(bool bDeferPages = false, QWidget* pParent = nullptr);
 
     // 20260322 ZJH 默认析构，子控件由 Qt 对象树管理
     ~MainWindow() override = default;
+
+    // 20260403 ZJH 分步创建单个页面（启动期间由定时器逐步调用）
+    // 参数: nIndex - 页面索引 (0-7)
+    void initPage(int nIndex);
+
+    // 20260403 ZJH 所有页面创建完成后的最终初始化
+    // 连接信号、设置默认页面、初始化状态栏
+    void finalizeInit();
 
 protected:
     // 20260324 ZJH 窗口关闭事件拦截 — 检查未保存修改并提示用户

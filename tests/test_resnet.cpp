@@ -106,7 +106,7 @@ TEST(ResNetTest, ResNet18SaveLoad) {
     om::ResNet18 model1(10);
 
     // 20260319 ZJH 保存模型
-    std::string strPath = "test_resnet18_serialize.dfm";
+    std::string strPath = "test_resnet18_serialize.omm";
     om::ModelSerializer::save(model1, strPath);
 
     // 20260319 ZJH 创建相同结构的新 ResNet18

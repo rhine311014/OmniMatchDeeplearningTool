@@ -18,7 +18,13 @@ enum ThumbnailRoles {
     LabelNameRole  = Qt::UserRole + 5,  // 20260322 ZJH 标签名称 (QString)
     SplitTypeRole  = Qt::UserRole + 6,  // 20260322 ZJH 拆分类型 (int, 对应 om::SplitType)
     FileNameRole   = Qt::UserRole + 7,  // 20260322 ZJH 文件名 (QString, 不含路径)
-    ThumbDirRole   = Qt::UserRole + 100  // 20260324 ZJH 缩略图磁盘缓存目录路径 (QString)
+    ThumbDirRole   = Qt::UserRole + 100,  // 20260324 ZJH 缩略图磁盘缓存目录路径 (QString)
+    // 20260402 ZJH 实例视图专用 Role（对标 Halcon DL Tool 检查页实例裁剪显示）
+    CropRectRole   = Qt::UserRole + 101,  // 20260402 ZJH 裁剪矩形 (QRectF, 原图像素坐标)
+    AnnotationIdxRole = Qt::UserRole + 102,  // 20260402 ZJH 标注在 vecAnnotations 中的索引 (int)
+    ImageIndexRole = Qt::UserRole + 103,  // 20260402 ZJH 源图像在数据集中的索引 (int, 用于跳转)
+    // 20260404 ZJH 标注轮廓数据（对标 Halcon 检查页彩色轮廓叠加）
+    AnnotationPolyRole = Qt::UserRole + 104  // 20260404 ZJH 标注多边形 (QPolygonF, 原图像素坐标)
 };
 
 // 20260322 ZJH 缩略图绘制代理

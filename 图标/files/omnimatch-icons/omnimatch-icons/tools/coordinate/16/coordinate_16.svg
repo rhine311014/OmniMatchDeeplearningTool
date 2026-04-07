@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 100 100">
+<defs><linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1E4478"/><stop offset="100%" stop-color="#0E2240"/></linearGradient><linearGradient id="tr" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#4A9BE0"/><stop offset="100%" stop-color="#1A4A8A"/></linearGradient></defs>
+<rect x="2" y="2" width="96" height="96" rx="16" fill="url(#tr)"/><rect x="5" y="5" width="90" height="90" rx="13" fill="url(#tb)"/>
+<line x1="20" y1="76" x2="84" y2="76" stroke="#7EAED0" stroke-width="1.8" stroke-linecap="round"/>
+<line x1="20" y1="76" x2="20" y2="16" stroke="#7EAED0" stroke-width="1.8" stroke-linecap="round"/>
+<polygon points="84,76 78,72 78,80" fill="#7EAED0"/><polygon points="20,16 16,22 24,22" fill="#7EAED0"/>
+<text x="86" y="82" font-size="9" fill="#7EAED0" font-weight="600" font-family="Arial,sans-serif">X</text>
+<text x="14" y="14" font-size="9" fill="#7EAED0" font-weight="600" font-family="Arial,sans-serif">Y</text>
+<circle cx="20" cy="76" r="3" fill="#4CB848"/>
+<g stroke="#5BBEEE" stroke-width="0.5" opacity=".3">
+<line x1="36" y1="16" x2="36" y2="76"/><line x1="52" y1="16" x2="52" y2="76"/><line x1="68" y1="16" x2="68" y2="76"/>
+<line x1="20" y1="60" x2="84" y2="60"/><line x1="20" y1="44" x2="84" y2="44"/><line x1="20" y1="28" x2="84" y2="28"/>
+</g>
+<circle cx="52" cy="44" r="4" fill="#4CB848" opacity=".8"/>
+</svg>

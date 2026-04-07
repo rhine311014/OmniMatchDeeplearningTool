@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 100 100">
+<defs><linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1E4478"/><stop offset="100%" stop-color="#0E2240"/></linearGradient><linearGradient id="tr" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#4A9BE0"/><stop offset="100%" stop-color="#1A4A8A"/></linearGradient></defs>
+<rect x="2" y="2" width="96" height="96" rx="16" fill="url(#tr)"/><rect x="5" y="5" width="90" height="90" rx="13" fill="url(#tb)"/>
+<rect x="18" y="18" width="24" height="52" rx="3" fill="#7EAED0" opacity=".2" stroke="#7EAED0" stroke-width="1"/>
+<rect x="18" y="18" width="24" height="26" fill="#7EAED0" opacity=".6" rx="3"/>
+<rect x="56" y="18" width="24" height="52" rx="3" fill="#fff" opacity=".85"/>
+<rect x="56" y="44" width="24" height="26" rx="3" fill="#0E2240"/>
+<line x1="14" y1="44" x2="84" y2="44" stroke="#E8593C" stroke-width="1.2" stroke-dasharray="4 2" opacity=".6"/>
+<polygon points="46,40 52,44 46,48" fill="#4CB848"/>
+</svg>

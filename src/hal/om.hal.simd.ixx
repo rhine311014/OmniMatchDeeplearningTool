@@ -70,6 +70,13 @@ public:
     //       pC — 输出矩阵指针 [M×N]
     //       nM — A 的行数，nK — 公共维度，nN — B 的列数
     static void matmulAVX2(const float* pA, const float* pB, float* pC, int nM, int nK, int nN) {
+        // 20260404 ZJH 防御性校验：空指针或零维度直接返回，防止访问冲突崩溃
+        if (!pA || !pB || !pC || nM <= 0 || nK <= 0 || nN <= 0) {
+            if (pC && nM > 0 && nN > 0) {
+                std::memset(pC, 0, static_cast<size_t>(nM) * nN * sizeof(float));
+            }
+            return;
+        }
         // 20260321 ZJH 先将输出矩阵 C 全部清零，后续用累加方式填充
         std::memset(pC, 0, static_cast<size_t>(nM) * nN * sizeof(float));
 

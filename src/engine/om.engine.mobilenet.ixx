@@ -4,20 +4,20 @@
 // Small 变体: 轻量级分类网络，适合边缘部署和移动端推理
 module;
 
-#include <vector>
-#include <string>
-#include <memory>
-#include <cmath>
+#include <vector>   // 20260406 ZJH std::vector 用于参数列表和阶段列表
+#include <string>   // 20260406 ZJH std::string 用于模块命名
+#include <memory>   // 20260406 ZJH std::unique_ptr 用于子模块管理
+#include <cmath>    // 20260406 ZJH 数学函数（预留）
 
-export module om.engine.mobilenet;
+export module om.engine.mobilenet;  // 20260406 ZJH 导出 MobileNet 模块接口
 
 // 20260322 ZJH 导入依赖模块
-import om.engine.tensor;
-import om.engine.tensor_ops;
-import om.engine.module;
-import om.engine.conv;
-import om.engine.linear;
-import om.engine.activations;
+import om.engine.tensor;       // 20260406 ZJH Tensor 数据结构
+import om.engine.tensor_ops;   // 20260406 ZJH tensorReLU/tensorClip/tensorAdd 等运算
+import om.engine.module;       // 20260406 ZJH Module 基类、BatchNorm2d
+import om.engine.conv;         // 20260406 ZJH Conv2d、AdaptiveAvgPool2d
+import om.engine.linear;       // 20260406 ZJH Linear 全连接层、Flatten
+import om.engine.activations;  // 20260406 ZJH ReLU 等激活函数
 
 export namespace om {
 

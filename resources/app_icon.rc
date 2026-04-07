@@ -1,0 +1,4 @@
+// 20260403 ZJH Windows 应用图标资源文件
+// IDI_ICON1 定义 exe 文件的图标（资源管理器/任务栏/标题栏显示）
+// 序号 1 是 Windows 默认读取的应用图标
+IDI_ICON1 ICON "icons/app_icon.ico"

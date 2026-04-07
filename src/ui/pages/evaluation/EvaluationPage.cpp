@@ -71,54 +71,59 @@ static const QString s_strControlStyle = QStringLiteral(
 
 // 20260322 ZJH 构造函数
 EvaluationPage::EvaluationPage(QWidget* pParent)
-    : BasePage(pParent)
-    , m_pCboDataScope(nullptr)
-    , m_pSpnConfThreshold(nullptr)
-    , m_pSpnIouThreshold(nullptr)
-    , m_pBtnRunEval(nullptr)
-    , m_pBtnClearResults(nullptr)
-    , m_pBtnExportCsv(nullptr)
-    , m_pBtnExportHtml(nullptr)
-    , m_pLblCheckTrained(nullptr)
-    , m_pLblCheckTestSet(nullptr)
-    , m_pLblCheckLabeled(nullptr)
-    , m_pLblCheckModel(nullptr)
-    , m_pLblCheckEngine(nullptr)
-    , m_pProgressBar(nullptr)
-    , m_pLblStatus(nullptr)
-    , m_pCardAccuracy(nullptr)
-    , m_pCardPrecision(nullptr)
-    , m_pCardRecall(nullptr)
-    , m_pLblCardValue1(nullptr)
-    , m_pLblCardValue2(nullptr)
-    , m_pLblCardValue3(nullptr)
-    , m_pTblMetrics(nullptr)
-    , m_pHeatmap(nullptr)
-    , m_pGradCAMOverlay(nullptr)
-    , m_pCboGradCAMMode(nullptr)
-    , m_pSliderThreshold(nullptr)
-    , m_pLblThresholdValue(nullptr)
-    , m_pBtnNormCount(nullptr)
-    , m_pBtnNormRow(nullptr)
-    , m_pBtnNormCol(nullptr)
-    , m_pLblDatasetName(nullptr)
-    , m_pLblImageCount(nullptr)
-    , m_pLblLabelCount(nullptr)
-    , m_pLblAvgLatency(nullptr)
-    , m_pLblP95Latency(nullptr)
-    , m_pLblThroughput(nullptr)
-    , m_pTxtLog(nullptr)
-    , m_pSimTimer(nullptr)
-    , m_nSimProgress(0)
-    , m_nSimTotal(100)
+    : BasePage(pParent)                    // 20260406 ZJH 初始化页面基类
+    , m_pCboDataScope(nullptr)             // 20260406 ZJH 数据范围下拉框初始为空
+    , m_pSpnConfThreshold(nullptr)         // 20260406 ZJH 置信度阈值微调框初始为空
+    , m_pSpnIouThreshold(nullptr)          // 20260406 ZJH IoU 阈值微调框初始为空
+    , m_pBtnRunEval(nullptr)               // 20260406 ZJH 运行评估按钮初始为空
+    , m_pBtnClearResults(nullptr)          // 20260406 ZJH 清除结果按钮初始为空
+    , m_pBtnExportCsv(nullptr)             // 20260406 ZJH 导出 CSV 按钮初始为空
+    , m_pBtnExportJson(nullptr)            // 20260406 ZJH 导出 JSON 按钮初始为空
+    , m_pBtnExportHtml(nullptr)            // 20260406 ZJH 导出 HTML 报告按钮初始为空
+    , m_pCboReportTemplate(nullptr)        // 20260406 ZJH 报告模板下拉框初始为空
+    , m_pLblCheckTrained(nullptr)          // 20260406 ZJH 前置检查-模型已训练标签初始为空
+    , m_pLblCheckTestSet(nullptr)          // 20260406 ZJH 前置检查-测试集存在标签初始为空
+    , m_pLblCheckLabeled(nullptr)          // 20260406 ZJH 前置检查-测试集已标注标签初始为空
+    , m_pLblCheckModel(nullptr)            // 20260406 ZJH 前置检查-模型文件存在标签初始为空
+    , m_pLblCheckEngine(nullptr)           // 20260406 ZJH 前置检查-推理引擎就绪标签初始为空
+    , m_pProgressBar(nullptr)              // 20260406 ZJH 评估进度条初始为空
+    , m_pLblStatus(nullptr)                // 20260406 ZJH 状态文字标签初始为空
+    , m_pCardAccuracy(nullptr)             // 20260406 ZJH 准确率指标卡片初始为空
+    , m_pCardPrecision(nullptr)            // 20260406 ZJH 精确率指标卡片初始为空
+    , m_pCardRecall(nullptr)               // 20260406 ZJH 召回率指标卡片初始为空
+    , m_pLblCardValue1(nullptr)            // 20260406 ZJH 准确率数值标签初始为空
+    , m_pLblCardValue2(nullptr)            // 20260406 ZJH 精确率数值标签初始为空
+    , m_pLblCardValue3(nullptr)            // 20260406 ZJH 召回率数值标签初始为空
+    , m_pTblMetrics(nullptr)               // 20260406 ZJH 详细指标表格初始为空
+    , m_pHeatmap(nullptr)                  // 20260406 ZJH 混淆矩阵热力图初始为空
+    , m_pGradCAMOverlay(nullptr)           // 20260406 ZJH Grad-CAM 叠加控件初始为空
+    , m_pCboGradCAMMode(nullptr)           // 20260406 ZJH GradCAM 显示模式下拉框初始为空
+    , m_pSliderThreshold(nullptr)          // 20260406 ZJH 二值化阈值滑块初始为空
+    , m_pLblThresholdValue(nullptr)        // 20260406 ZJH 阈值数值标签初始为空
+    , m_pBtnNormCount(nullptr)             // 20260406 ZJH 归一化-计数按钮初始为空
+    , m_pBtnNormRow(nullptr)               // 20260406 ZJH 归一化-行按钮初始为空
+    , m_pBtnNormCol(nullptr)               // 20260406 ZJH 归一化-列按钮初始为空
+    , m_pLblDatasetName(nullptr)           // 20260406 ZJH 数据集名称标签初始为空
+    , m_pLblImageCount(nullptr)            // 20260406 ZJH 图像数标签初始为空
+    , m_pLblLabelCount(nullptr)            // 20260406 ZJH 标签数标签初始为空
+    , m_pLblAvgLatency(nullptr)            // 20260406 ZJH 平均延迟标签初始为空
+    , m_pLblP95Latency(nullptr)            // 20260406 ZJH P95 延迟标签初始为空
+    , m_pLblThroughput(nullptr)            // 20260406 ZJH 吞吐量标签初始为空
+    , m_pTxtLog(nullptr)                   // 20260406 ZJH 日志文本框初始为空
+    , m_pComparisonTable(nullptr)          // 20260406 ZJH 模型对比表格初始为空
+    , m_pBtnClearComparison(nullptr)       // 20260406 ZJH 清除对比记录按钮初始为空
+    , m_pSimTimer(nullptr)                 // 20260406 ZJH 模拟评估定时器初始为空
+    , m_nSimProgress(0)                    // 20260406 ZJH 模拟评估当前进度初始为 0
+    , m_nSimTotal(100)                     // 20260406 ZJH 模拟评估总数初始为 100
 {
+    // 20260406 ZJH 创建模拟评估定时器，间隔 30ms 触发一次进度更新
     m_pSimTimer = new QTimer(this);
-    m_pSimTimer->setInterval(30);
-    connect(m_pSimTimer, &QTimer::timeout, this, &EvaluationPage::onSimulationTick);
+    m_pSimTimer->setInterval(30);  // 20260406 ZJH 每 30ms 更新一次模拟进度
+    connect(m_pSimTimer, &QTimer::timeout, this, &EvaluationPage::onSimulationTick);  // 20260406 ZJH 连接定时器信号到模拟进度槽
 
-    QWidget* pLeft   = createLeftPanel();
-    QWidget* pCenter = createCenterPanel();
-    QWidget* pRight  = createRightPanel();
+    QWidget* pLeft   = createLeftPanel();    // 20260406 ZJH 创建左面板（评估配置+操作+前置检查）
+    QWidget* pCenter = createCenterPanel();  // 20260406 ZJH 创建中央面板（进度+指标卡片+详细表+混淆矩阵）
+    QWidget* pRight  = createRightPanel();   // 20260406 ZJH 创建右面板（数据信息+性能+日志）
 
     // 20260322 ZJH 设置面板宽度
     setLeftPanelWidth(280);   // 20260322 ZJH 左面板 280px
@@ -225,6 +230,21 @@ void EvaluationPage::onSimulationTick()
                   .arg(m_lastResult.dAccuracy * 100, 0, 'f', 1)
                   .arg(m_lastResult.dF1Score, 0, 'f', 3));
 
+        // 20260402 ZJH [OPT-3.9] 评估完成后自动追加模型对比记录
+        {
+            // 20260402 ZJH 从项目获取模型名称（如不可用则使用占位符）
+            QString strModelName = QStringLiteral("Unknown");
+            if (m_pProject) {
+                strModelName = om::modelArchitectureToString(m_pProject->trainingConfig().eArchitecture);
+            }
+            // 20260402 ZJH 使用评估结果和模拟性能数据填充对比行
+            double dLatencyMs = 5.0 + QRandomGenerator::global()->bounded(150) / 10.0;  // 20260402 ZJH 模拟延迟 5~20ms
+            double dModelSizeMB = 10.0 + QRandomGenerator::global()->bounded(400) / 10.0;  // 20260402 ZJH 模拟大小 10~50MB
+            double dTrainTimeSec = 30.0 + QRandomGenerator::global()->bounded(270);  // 20260402 ZJH 模拟训练时间 30~300s
+            appendComparisonEntry(strModelName, m_lastResult.dAccuracy,
+                                  dLatencyMs, dModelSizeMB, dTrainTimeSec);
+        }
+
         // 20260324 ZJH 通过 notify 方法发射信号，避免外部直接 emit
         Application::instance()->notifyEvaluationCompleted();
     }
@@ -301,6 +321,67 @@ void EvaluationPage::onExportCsv()
 
     file.close();
     appendLog(QStringLiteral("[%1] CSV 已导出: %2")
+              .arg(QDateTime::currentDateTime().toString("HH:mm:ss"))
+              .arg(strPath));
+
+    QMessageBox::information(this, QStringLiteral("导出成功"),
+                             QStringLiteral("评估结果已导出到:\n%1").arg(strPath));
+}
+
+// 20260330 ZJH 导出 JSON
+void EvaluationPage::onExportJson()
+{
+    // 20260330 ZJH 弹出文件保存对话框
+    QString strPath = QFileDialog::getSaveFileName(this,
+        QStringLiteral("导出评估结果 JSON"),
+        QStringLiteral("evaluation_result.json"),
+        QStringLiteral("JSON 文件 (*.json)"));
+
+    if (strPath.isEmpty()) {
+        return;  // 20260330 ZJH 用户取消
+    }
+
+    QFile file(strPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, QStringLiteral("导出失败"),
+                             QStringLiteral("无法写入文件: %1").arg(strPath));
+        return;  // 20260330 ZJH 文件打开失败
+    }
+
+    QTextStream stream(&file);
+    // 20260330 ZJH 构建 JSON 内容
+    stream << "{\n";
+    stream << "  \"accuracy\": " << m_lastResult.dAccuracy << ",\n";
+    stream << "  \"f1_score\": " << m_lastResult.dF1Score << ",\n";
+    stream << "  \"precision\": " << m_lastResult.dPrecision << ",\n";
+    stream << "  \"recall\": " << m_lastResult.dRecall << ",\n";
+    stream << "  \"report_template\": \"" << m_pCboReportTemplate->currentText() << "\",\n";
+    stream << "  \"classes\": [\n";
+
+    // 20260330 ZJH 写入每行指标数据
+    for (int r = 0; r < m_pTblMetrics->rowCount(); ++r) {
+        stream << "    {";
+        for (int c = 0; c < m_pTblMetrics->columnCount(); ++c) {
+            if (c > 0) stream << ", ";
+            QTableWidgetItem* pItem = m_pTblMetrics->item(r, c);
+            QString strVal = pItem ? pItem->text() : "";
+            // 20260330 ZJH 第 0 列为类名（字符串），其余为数值
+            if (c == 0) {
+                stream << "\"class\": \"" << strVal << "\"";
+            } else {
+                stream << "\"col" << c << "\": " << strVal;
+            }
+        }
+        stream << "}";
+        if (r < m_pTblMetrics->rowCount() - 1) stream << ",";
+        stream << "\n";
+    }
+
+    stream << "  ]\n";
+    stream << "}\n";
+
+    file.close();
+    appendLog(QStringLiteral("[%1] JSON 已导出: %2")
               .arg(QDateTime::currentDateTime().toString("HH:mm:ss"))
               .arg(strPath));
 
@@ -458,7 +539,16 @@ QWidget* EvaluationPage::createLeftPanel()
     connect(m_pBtnExportCsv, &QPushButton::clicked, this, &EvaluationPage::onExportCsv);
     pActionLayout->addWidget(m_pBtnExportCsv);
 
-    // 20260322 ZJH 导出 HTML 报告按钮
+    // 20260330 ZJH 导出 JSON 按钮
+    m_pBtnExportJson = new QPushButton(QStringLiteral("导出 JSON"));
+    m_pBtnExportJson->setStyleSheet(QStringLiteral(
+        "QPushButton { background-color: #334155; color: #e2e8f0; border: 1px solid #475569;"
+        "  border-radius: 6px; padding: 6px 12px; }"
+        "QPushButton:hover { background-color: #475569; }"));
+    connect(m_pBtnExportJson, &QPushButton::clicked, this, &EvaluationPage::onExportJson);
+    pActionLayout->addWidget(m_pBtnExportJson);
+
+    // 20260322 ZJH 导出 HTML 报告按��
     m_pBtnExportHtml = new QPushButton(QStringLiteral("导出 HTML 报告"));
     m_pBtnExportHtml->setStyleSheet(QStringLiteral(
         "QPushButton { background-color: #334155; color: #e2e8f0; border: 1px solid #475569;"
@@ -466,6 +556,17 @@ QWidget* EvaluationPage::createLeftPanel()
         "QPushButton:hover { background-color: #475569; }"));
     connect(m_pBtnExportHtml, &QPushButton::clicked, this, &EvaluationPage::onExportHtmlReport);
     pActionLayout->addWidget(m_pBtnExportHtml);
+
+    // 20260330 ZJH 报告模板下拉框
+    QFormLayout* pReportForm = new QFormLayout();
+    m_pCboReportTemplate = new QComboBox();
+    m_pCboReportTemplate->addItems({
+        QStringLiteral("标准报告"),
+        QStringLiteral("详细报告"),
+        QStringLiteral("简洁报告")
+    });
+    pReportForm->addRow(QStringLiteral("报告模板:"), m_pCboReportTemplate);
+    pActionLayout->addLayout(pReportForm);
 
     pLayout->addWidget(pGrpAction);
 
@@ -681,6 +782,46 @@ QWidget* EvaluationPage::createCenterPanel()
     m_pLblDefectMap->setVisible(false);  // 20260324 ZJH 隐藏原始 QLabel，使用 GradCAMOverlay 替代
     pLayout->addWidget(m_pLblDefectMap);
 
+    // 20260402 ZJH ===== [OPT-3.9] 模型对比面板 =====
+    // 每次评估完成后自动追加一行，方便用户对比不同模型的性能差异
+    QLabel* pLblCompTitle = new QLabel(QStringLiteral("模型对比"));
+    pLblCompTitle->setStyleSheet(QStringLiteral(
+        "QLabel { color: #e2e8f0; font-size: 14px; font-weight: bold; }"));
+    pLayout->addWidget(pLblCompTitle);
+
+    // 20260402 ZJH 对比表格: 5 列（模型名称|精度|推理延迟|模型大小|训练时间）
+    m_pComparisonTable = new QTableWidget();
+    m_pComparisonTable->setColumnCount(5);
+    m_pComparisonTable->setHorizontalHeaderLabels({
+        QStringLiteral("模型名称"),
+        QStringLiteral("精度 (%)"),
+        QStringLiteral("推理延迟 (ms)"),
+        QStringLiteral("模型大小 (MB)"),
+        QStringLiteral("训练时间 (s)")
+    });
+    m_pComparisonTable->horizontalHeader()->setStretchLastSection(true);
+    m_pComparisonTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    m_pComparisonTable->setEditTriggers(QAbstractItemView::NoEditTriggers);  // 20260402 ZJH 禁止编辑
+    m_pComparisonTable->setAlternatingRowColors(true);   // 20260402 ZJH 交替行颜色
+    m_pComparisonTable->setMaximumHeight(160);           // 20260402 ZJH 限制最大高度
+    m_pComparisonTable->setStyleSheet(QStringLiteral(
+        "QTableWidget { background: #1a1d24; color: #e2e8f0; border: 1px solid #2a2d35;"
+        "  gridline-color: #333842; border-radius: 4px; }"
+        "QTableWidget::item { padding: 4px; }"
+        "QTableWidget::item:alternate { background: #1e2230; }"
+        "QHeaderView::section { background: #2a2d35; color: #94a3b8; border: none;"
+        "  padding: 6px; font-weight: bold; }"));
+    pLayout->addWidget(m_pComparisonTable);
+
+    // 20260402 ZJH 清除对比记录按钮
+    m_pBtnClearComparison = new QPushButton(QStringLiteral("清除对比记录"));
+    m_pBtnClearComparison->setStyleSheet(QStringLiteral(
+        "QPushButton { background-color: #334155; color: #e2e8f0; border: 1px solid #475569;"
+        "  border-radius: 4px; padding: 4px 12px; font-size: 12px; }"
+        "QPushButton:hover { background-color: #475569; }"));
+    connect(m_pBtnClearComparison, &QPushButton::clicked, this, &EvaluationPage::onClearComparison);
+    pLayout->addWidget(m_pBtnClearComparison);
+
     // 20260324 ZJH 连接显示模式下拉框信号
     connect(m_pCboGradCAMMode, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int nIndex) {
@@ -874,12 +1015,27 @@ EvaluationResult EvaluationPage::generateMockResult()
                       ? 2 * result.dPrecision * result.dRecall / (result.dPrecision + result.dRecall)
                       : 0;
 
-    // 20260322 ZJH 其他指标模拟
-    result.dMeanAP = result.dAccuracy * 0.95 + pRng->bounded(0, 50) / 1000.0;
-    result.dMIoU = result.dAccuracy * 0.9 + pRng->bounded(0, 50) / 1000.0;
-    result.dAUC = result.dAccuracy * 0.98 + pRng->bounded(0, 20) / 1000.0;
+    // 20260330 ZJH 从混淆矩阵精确计算 mIoU（替代旧的模拟值）
+    // mIoU = mean(IoU_c)，IoU_c = TP_c / (TP_c + FP_c + FN_c) = diag / (rowSum + colSum - diag)
+    // 对标 MVTec 分割评估的标准 mIoU 指标
+    {
+        double dSumIoU = 0.0;
+        int nValidClasses = 0;
+        for (int i = 0; i < nN; ++i) {
+            double dRowSum = 0, dColSum = 0;
+            for (int j = 0; j < nN; ++j) { dRowSum += result.matConfusion[i][j]; dColSum += result.matConfusion[j][i]; }
+            double dTP = result.matConfusion[i][i];
+            double dDenom = dRowSum + dColSum - dTP;  // 20260330 ZJH TP+FP+FN
+            if (dDenom > 0) { dSumIoU += dTP / dDenom; ++nValidClasses; }
+        }
+        result.dMIoU = (nValidClasses > 0) ? dSumIoU / nValidClasses : 0.0;
+    }
+    // 20260330 ZJH mAP 用 P/R 近似（简化版，精确版需要 P-R 曲线下面积）
+    result.dMeanAP = result.dPrecision;
+    // 20260330 ZJH AUC 用 (P+R)/2 近似（精确版需 ROC 曲线积分）
+    result.dAUC = (result.dPrecision + result.dRecall) / 2.0;
 
-    // 20260322 ZJH 性能模拟
+    // 20260322 ZJH 性能模拟（后续接入真实推理计时替代）
     result.dAvgLatencyMs = 5.0 + pRng->bounded(0, 200) / 10.0;
     result.dThroughputFPS = 1000.0 / result.dAvgLatencyMs;
     result.dTotalTimeSeconds = nTotal * result.dAvgLatencyMs / 1000.0;
@@ -1063,4 +1219,43 @@ void EvaluationPage::appendLog(const QString& strMsg)
     if (m_pTxtLog) {
         m_pTxtLog->append(strMsg);  // 20260322 ZJH 追加到日志文本框
     }
+}
+
+// 20260402 ZJH [OPT-3.9] 清除模型对比记录
+void EvaluationPage::onClearComparison()
+{
+    if (m_pComparisonTable) {
+        m_pComparisonTable->setRowCount(0);  // 20260402 ZJH 清空所有行
+    }
+    appendLog(QStringLiteral("[%1] 模型对比记录已清除")
+              .arg(QDateTime::currentDateTime().toString("HH:mm:ss")));
+}
+
+// 20260402 ZJH [OPT-3.9] 追加一行模型对比记录
+// 参数: strModelName - 模型名称（如 "ResNet18"）
+//       dAccuracy - 精度（0~1）
+//       dLatencyMs - 推理延迟（毫秒）
+//       dModelSizeMB - 模型大小（MB）
+//       dTrainTimeSec - 训练总时间（秒）
+void EvaluationPage::appendComparisonEntry(const QString& strModelName, double dAccuracy,
+                                            double dLatencyMs, double dModelSizeMB, double dTrainTimeSec)
+{
+    if (!m_pComparisonTable) return;  // 20260402 ZJH 安全检查
+
+    int nRow = m_pComparisonTable->rowCount();  // 20260402 ZJH 当前行数
+    m_pComparisonTable->insertRow(nRow);         // 20260402 ZJH 插入新行
+
+    // 20260402 ZJH 填充各列数据
+    m_pComparisonTable->setItem(nRow, 0, new QTableWidgetItem(strModelName));
+    m_pComparisonTable->setItem(nRow, 1, new QTableWidgetItem(
+        QString::number(dAccuracy * 100.0, 'f', 2)));  // 20260402 ZJH 精度百分比
+    m_pComparisonTable->setItem(nRow, 2, new QTableWidgetItem(
+        QString::number(dLatencyMs, 'f', 2)));           // 20260402 ZJH 推理延迟 ms
+    m_pComparisonTable->setItem(nRow, 3, new QTableWidgetItem(
+        QString::number(dModelSizeMB, 'f', 1)));         // 20260402 ZJH 模型大小 MB
+    m_pComparisonTable->setItem(nRow, 4, new QTableWidgetItem(
+        QString::number(dTrainTimeSec, 'f', 1)));        // 20260402 ZJH 训练时间 s
+
+    // 20260402 ZJH 滚动到最新行
+    m_pComparisonTable->scrollToBottom();
 }

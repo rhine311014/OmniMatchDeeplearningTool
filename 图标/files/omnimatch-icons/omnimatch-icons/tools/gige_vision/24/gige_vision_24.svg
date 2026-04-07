@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 100 100">
+<defs><linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1E4478"/><stop offset="100%" stop-color="#0E2240"/></linearGradient><linearGradient id="tr" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#4A9BE0"/><stop offset="100%" stop-color="#1A4A8A"/></linearGradient></defs>
+<rect x="2" y="2" width="96" height="96" rx="16" fill="url(#tr)"/><rect x="5" y="5" width="90" height="90" rx="13" fill="url(#tb)"/>
+<rect x="30" y="18" width="40" height="20" rx="4" fill="#1A3660" stroke="#7EAED0" stroke-width="1.5"/>
+<text x="50" y="32" text-anchor="middle" font-size="10" fill="#fff" font-weight="700" font-family="Arial,sans-serif">GigE</text>
+<line x1="50" y1="38" x2="50" y2="50" stroke="#4CB848" stroke-width="2"/>
+<circle cx="50" cy="58" r="8" fill="none" stroke="#4CB848" stroke-width="1.5"/>
+<line x1="50" y1="66" x2="30" y2="80" stroke="#7EAED0" stroke-width="1.2"/><circle cx="30" cy="80" r="3" fill="#7EAED0"/>
+<line x1="50" y1="66" x2="50" y2="82" stroke="#7EAED0" stroke-width="1.2"/><circle cx="50" cy="82" r="3" fill="#7EAED0"/>
+<line x1="50" y1="66" x2="70" y2="80" stroke="#7EAED0" stroke-width="1.2"/><circle cx="70" cy="80" r="3" fill="#7EAED0"/>
+</svg>

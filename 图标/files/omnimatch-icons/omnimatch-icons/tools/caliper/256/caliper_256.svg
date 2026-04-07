@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 100 100">
+<defs><linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1E4478"/><stop offset="100%" stop-color="#0E2240"/></linearGradient><linearGradient id="tr" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#4A9BE0"/><stop offset="100%" stop-color="#1A4A8A"/></linearGradient></defs>
+<rect x="2" y="2" width="96" height="96" rx="16" fill="url(#tr)"/><rect x="5" y="5" width="90" height="90" rx="13" fill="url(#tb)"/>
+<line x1="22" y1="20" x2="22" y2="70" stroke="#5BBEEE" stroke-width="2" stroke-linecap="round"/>
+<line x1="70" y1="20" x2="70" y2="70" stroke="#5BBEEE" stroke-width="2" stroke-linecap="round"/>
+<line x1="22" y1="45" x2="70" y2="45" stroke="#5BBEEE" stroke-width="1.2" stroke-dasharray="4 2"/>
+<polygon points="28,45 22,41 22,49" fill="#5BBEEE"/><polygon points="64,45 70,41 70,49" fill="#5BBEEE"/>
+<rect x="30" y="32" width="32" height="14" rx="4" fill="#1A3660" stroke="#4CB848" stroke-width="1.2"/>
+<text x="46" y="43" text-anchor="middle" font-size="10" fill="#4CB848" font-weight="700" font-family="monospace">42.5</text>
+</svg>

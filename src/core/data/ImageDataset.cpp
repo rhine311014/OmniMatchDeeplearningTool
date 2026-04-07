@@ -498,13 +498,32 @@ void ImageDataset::autoSplit(float fTrainRatio, float fValRatio, bool bStratifie
                 // 20260328 ZJH 有图像级标签: 按标签分组（分类模型标准路径）
                 nGroupKey = m_vecImages[i].nLabelId;
             } else if (!m_vecImages[i].vecAnnotations.isEmpty()) {
-                // 20260328 ZJH 无图像标签但有标注: 归为"有标注"组(key=9999)
-                // 确保分割/检测项目的已标注图像集中分配到训练集和验证集
-                nGroupKey = 9999;
+                // 20260405 ZJH [修复] 无图像标签但有标注: 按主标签分组（出现次数最多的标签）
+                // 旧逻辑: 所有标注图像统一归入 key=9999 → 无法按标签分层采样
+                // 新逻辑: 统计每张图各标签出现次数，取最多的作为分组依据
+                // 效果: 异物为主的图像和脏污为主的图像能按比例均匀分配到 train/val/test
+                QMap<int, int> mapAnnoCount;  // 20260405 ZJH labelId → 出现次数
+                for (const auto& anno : m_vecImages[i].vecAnnotations) {
+                    if (anno.nLabelId >= 0) ++mapAnnoCount[anno.nLabelId];
+                }
+                if (!mapAnnoCount.isEmpty()) {
+                    // 20260405 ZJH 取出现次数最多的标签作为分组键
+                    nGroupKey = mapAnnoCount.begin().key();
+                    int nMaxCount = mapAnnoCount.begin().value();
+                    for (auto it = mapAnnoCount.begin(); it != mapAnnoCount.end(); ++it) {
+                        if (it.value() > nMaxCount) {
+                            nMaxCount = it.value();
+                            nGroupKey = it.key();
+                        }
+                    }
+                } else {
+                    nGroupKey = 9999;  // 20260405 ZJH fallback: 标注无有效标签时仍归入通用组
+                }
             } else {
-                // 20260328 ZJH 无标签也无标注: 归为"无标注"组(key=-1)
-                // 作为纯背景样本，按比例分配到各子集
-                nGroupKey = -1;
+                // 20260402 ZJH [修复] 无标签也无标注: 不参与拆分，保持 Unassigned
+                // 对标 Halcon: 未标注图像不应分配到训练/验证/测试集
+                m_vecImages[i].eSplit = om::SplitType::Unassigned;  // 20260402 ZJH 强制保持未分配
+                continue;  // 20260402 ZJH 跳过，不加入任何分组
             }
             mapLabelToIndices[nGroupKey].append(i);
         }
@@ -555,10 +574,16 @@ void ImageDataset::autoSplit(float fTrainRatio, float fValRatio, bool bStratifie
         }
     } else {
         // 20260322 ZJH 非分层模式：全部图像混合随机拆分
-        // 生成索引列表并随机打乱
-        QVector<int> vecIndices(m_vecImages.size());  // 20260322 ZJH 索引列表
-        for (int i = 0; i < vecIndices.size(); ++i) {
-            vecIndices[i] = i;  // 20260322 ZJH 填充顺序索引
+        // 20260402 ZJH [修复] 仅拆分已标注图像，未标注图保持 Unassigned
+        QVector<int> vecIndices;
+        vecIndices.reserve(m_vecImages.size());
+        for (int i = 0; i < m_vecImages.size(); ++i) {
+            bool bHasLabel = (m_vecImages[i].nLabelId >= 0) || !m_vecImages[i].vecAnnotations.isEmpty();
+            if (bHasLabel) {
+                vecIndices.append(i);  // 20260402 ZJH 仅已标注图参与拆分
+            } else {
+                m_vecImages[i].eSplit = om::SplitType::Unassigned;  // 20260402 ZJH 未标注保持未分配
+            }
         }
 
         // 20260322 ZJH 随机打乱（Fisher-Yates 洗牌）
@@ -641,21 +666,25 @@ int ImageDataset::unlabeledCount() const
 }
 
 // 20260322 ZJH 获取标签分布统计（labelId -> 使用次数）
+// 20260401 ZJH [修复] 消除重复计数：优先按标注区域计数，无标注时按图像级标签计数
+// 修复前: 图像级标签和标注标签同时累加 → 一张含3个缺陷的图被计4次（1图像+3标注）
+// 修复后: 有标注的图只按标注数量计，无标注的图按图像级标签计 → 真实反映缺陷数量
 QMap<int, int> ImageDataset::labelDistribution() const
 {
     QMap<int, int> mapDistribution;  // 20260322 ZJH 标签 ID -> 使用计数
 
-    // 20260322 ZJH 遍历所有图像，统计图像级标签
     for (const auto& entry : m_vecImages) {
-        if (entry.nLabelId >= 0) {
-            // 20260322 ZJH 有图像级标签，累加计数
-            mapDistribution[entry.nLabelId]++;
-        }
-        // 20260322 ZJH 同时统计对象级标注中的标签
-        for (const auto& annotation : entry.vecAnnotations) {
-            if (annotation.nLabelId >= 0) {
-                mapDistribution[annotation.nLabelId]++;  // 20260322 ZJH 累加标注标签计数
+        if (!entry.vecAnnotations.isEmpty()) {
+            // 20260401 ZJH 有标注区域 → 按每个标注独立计数（分割/检测任务）
+            // 一张图 3 个缺陷标注 = 3 次计数，真实反映缺陷数量
+            for (const auto& annotation : entry.vecAnnotations) {
+                if (annotation.nLabelId >= 0) {
+                    mapDistribution[annotation.nLabelId]++;
+                }
             }
+        } else if (entry.nLabelId >= 0) {
+            // 20260401 ZJH 无标注区域、仅有图像级标签 → 按图像计数（分类任务）
+            mapDistribution[entry.nLabelId]++;
         }
     }
 

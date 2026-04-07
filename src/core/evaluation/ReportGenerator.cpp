@@ -253,7 +253,9 @@ QString ReportGenerator::buildMetricCards(const EvaluationResult& result)
     vecParts << ("  <div class=\"card green\"><div class=\"value\">" +
                 QString::number(result.dF1Score * 100, 'f', 1) + "%</div><div class=\"label\">F1 Score</div></div>\n");
     vecParts << ("  <div class=\"card purple\"><div class=\"value\">" +
-                QString::number(result.dAUC * 100, 'f', 1) + "%</div><div class=\"label\">AUC</div></div>\n");
+                QString::number(result.dRecall * 100, 'f', 1) + "%</div><div class=\"label\">Recall</div></div>\n");
+    vecParts << ("  <div class=\"card blue\"><div class=\"value\">" +
+                QString::number(result.dMIoU * 100, 'f', 1) + "%</div><div class=\"label\">mIoU</div></div>\n");
     vecParts << QStringLiteral("</div>\n");
     return vecParts.join(QString());  // 20260324 ZJH 一次性拼接
 }

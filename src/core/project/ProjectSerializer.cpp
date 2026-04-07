@@ -57,6 +57,16 @@ static QJsonObject annotationToJson(const Annotation& annotation)
         obj["text"] = annotation.strText;  // 20260322 ZJH OCR 文本
     }
 
+    // 20260330 ZJH 序列化缺陷严重度（对标海康 VisionTrain 缺陷分级）
+    if (annotation.eSeverity != DefectSeverity::None) {
+        obj["severity"] = static_cast<int>(annotation.eSeverity);
+    }
+
+    // 20260402 ZJH 序列化旋转角度（仅 RotatedRect 类型或角度非零时保存）
+    if (std::abs(annotation.fAngle) > 0.01f) {
+        obj["angle"] = static_cast<double>(annotation.fAngle);
+    }
+
     return obj;  // 20260322 ZJH 返回标注 JSON 对象
 }
 
@@ -68,7 +78,7 @@ static Annotation annotationFromJson(const QJsonObject& obj)
     // 20260322 ZJH 根据类型创建标注
     // 20260324 ZJH 验证标注类型枚举值范围，防止非法 JSON 数据导致未定义行为
     int nTypeVal = obj["type"].toInt();  // 20260324 ZJH 读取标注类型整数值
-    if (nTypeVal < 0 || nTypeVal > 3) {
+    if (nTypeVal < 0 || nTypeVal > 4) {  // 20260402 ZJH 扩展到 4 (RotatedRect)
         // 20260324 ZJH 无效标注类型，使用 Rect 作为安全默认值
         qDebug() << "[ProjectSerializer] annotationFromJson: 无效标注类型" << nTypeVal << "，使用默认 Rect";
         nTypeVal = 0;
@@ -108,6 +118,16 @@ static Annotation annotationFromJson(const QJsonObject& obj)
         annotation.strText = obj["text"].toString();  // 20260322 ZJH OCR 文本
     }
 
+    // 20260330 ZJH 恢复缺陷严重度（向后兼容：旧文件无此字段默认 None）
+    if (obj.contains("severity")) {
+        annotation.eSeverity = static_cast<DefectSeverity>(obj["severity"].toInt(0));
+    }
+
+    // 20260402 ZJH 恢复旋转角度（向后兼容：旧文件无此字段默认 0.0 = 轴对齐）
+    if (obj.contains("angle")) {
+        annotation.fAngle = static_cast<float>(obj["angle"].toDouble(0.0));
+    }
+
     return annotation;  // 20260322 ZJH 返回恢复的标注
 }
 
@@ -133,6 +153,11 @@ bool ProjectSerializer::save(const Project* pProject, const QString& strFilePath
     root["taskType"] = static_cast<int>(pProject->taskType());          // 20260322 ZJH 任务类型（枚举转 int）
     root["state"]    = static_cast<int>(pProject->state());             // 20260322 ZJH 项目状态（枚举转 int）
     root["path"]     = pProject->path();                                // 20260322 ZJH 项目路径
+
+    // 20260403 ZJH 序列化项目描述（仅非空时写入，向后兼容旧格式）
+    if (!pProject->description().isEmpty()) {
+        root["description"] = pProject->description();                 // 20260403 ZJH 项目描述
+    }
 
     // 20260322 ZJH 序列化标签列表
     const ImageDataset* pDataset = pProject->dataset();  // 20260322 ZJH 获取数据集
@@ -195,8 +220,10 @@ bool ProjectSerializer::save(const Project* pProject, const QString& strFilePath
 
         // 20260324 ZJH 框架与模型
         cfgObj["framework"]    = static_cast<int>(cfg.eFramework);     // 20260324 ZJH 训练框架枚举
+        cfgObj["modelCapability"] = static_cast<int>(cfg.eModelCapability);  // 20260330 ZJH 模型能力等级
         cfgObj["architecture"] = static_cast<int>(cfg.eArchitecture);  // 20260324 ZJH 模型架构枚举
         cfgObj["device"]       = static_cast<int>(cfg.eDevice);        // 20260324 ZJH 设备类型枚举
+        cfgObj["anomalyMode"]  = static_cast<int>(cfg.eAnomalyMode);   // 20260330 ZJH 异常检测训练模式
         cfgObj["optimizer"]    = static_cast<int>(cfg.eOptimizer);     // 20260324 ZJH 优化器枚举
         cfgObj["scheduler"]    = static_cast<int>(cfg.eScheduler);     // 20260324 ZJH 调度器枚举
 
@@ -204,8 +231,21 @@ bool ProjectSerializer::save(const Project* pProject, const QString& strFilePath
         cfgObj["learningRate"] = cfg.dLearningRate;  // 20260324 ZJH 学习率
         cfgObj["batchSize"]    = cfg.nBatchSize;     // 20260324 ZJH 批量大小
         cfgObj["epochs"]       = cfg.nEpochs;        // 20260324 ZJH 训练轮次
+        cfgObj["resolutionPreset"] = static_cast<int>(cfg.eResolutionPreset);  // 20260330 ZJH 分辨率预设
         cfgObj["inputSize"]    = cfg.nInputSize;      // 20260324 ZJH 输入尺寸
         cfgObj["patience"]     = cfg.nPatience;       // 20260324 ZJH 早停耐心值
+
+        // 20260331 ZJH 迁移学习参数（骨干冻结 + 分层学习率）
+        cfgObj["freezeEpochs"]          = cfg.nFreezeEpochs;           // 20260331 ZJH 骨干冻结轮数
+        cfgObj["backboneLrMultiplier"]  = cfg.dBackboneLrMultiplier;   // 20260331 ZJH 骨干 LR 倍率
+        cfgObj["cropSize"]              = cfg.nCropSize;               // 20260401 ZJH Crop 尺寸
+
+        // 20260330 ZJH 预训练模型与标识
+        cfgObj["pretrainedModelPath"] = cfg.strPretrainedModelPath;  // 20260330 ZJH 预训练模型路径
+        cfgObj["modelTag"]            = cfg.strModelTag;              // 20260330 ZJH 模型标识
+
+        // 20260330 ZJH 数据增强预设
+        cfgObj["augPreset"]    = static_cast<int>(cfg.eAugPreset);   // 20260330 ZJH 增强预设模式
 
         // 20260324 ZJH 数据增强（基础）
         cfgObj["augmentation"]   = cfg.bAugmentation;    // 20260324 ZJH 启用增强标志
@@ -401,9 +441,14 @@ std::unique_ptr<Project> ProjectSerializer::load(const QString& strFilePath)
     // 20260322 ZJH 恢复项目元数据
     pProject->setName(root["name"].toString());  // 20260322 ZJH 项目名称
 
+    // 20260403 ZJH 恢复项目描述（可选字段，旧项目文件可能不存在此字段）
+    if (root.contains("description")) {
+        pProject->setDescription(root["description"].toString());  // 20260403 ZJH 项目描述
+    }
+
     // 20260324 ZJH 验证 TaskType 枚举值范围（0-7），防止非法 JSON 数据导致未定义行为
     int nTaskTypeVal = root["taskType"].toInt();  // 20260324 ZJH 读取任务类型整数值
-    if (nTaskTypeVal < 0 || nTaskTypeVal > 7) {
+    if (nTaskTypeVal < 0 || nTaskTypeVal > 9) {
         qDebug() << "[ProjectSerializer] load: 无效任务类型" << nTaskTypeVal;  // 20260324 ZJH 非法枚举日志
         return nullptr;  // 20260324 ZJH 任务类型非法，拒绝加载
     }
@@ -500,8 +545,14 @@ std::unique_ptr<Project> ProjectSerializer::load(const QString& strFilePath)
 
         // 20260324 ZJH 框架与模型
         cfg.eFramework    = static_cast<om::TrainingFramework>(cfgObj["framework"].toInt(static_cast<int>(cfg.eFramework)));
+        // 20260330 ZJH 模型能力等级（兼容旧版：不存在则使用默认 Normal）
+        if (cfgObj.contains("modelCapability"))
+            cfg.eModelCapability = static_cast<om::ModelCapability>(cfgObj["modelCapability"].toInt(static_cast<int>(cfg.eModelCapability)));
         cfg.eArchitecture = static_cast<om::ModelArchitecture>(cfgObj["architecture"].toInt(static_cast<int>(cfg.eArchitecture)));
         cfg.eDevice       = static_cast<om::DeviceType>(cfgObj["device"].toInt(static_cast<int>(cfg.eDevice)));
+        // 20260330 ZJH 异常检测训练模式（兼容旧版：不存在则使用默认 Fast）
+        if (cfgObj.contains("anomalyMode"))
+            cfg.eAnomalyMode = static_cast<om::AnomalyTrainingMode>(cfgObj["anomalyMode"].toInt(static_cast<int>(cfg.eAnomalyMode)));
         cfg.eOptimizer    = static_cast<om::OptimizerType>(cfgObj["optimizer"].toInt(static_cast<int>(cfg.eOptimizer)));
         cfg.eScheduler    = static_cast<om::SchedulerType>(cfgObj["scheduler"].toInt(static_cast<int>(cfg.eScheduler)));
 
@@ -509,8 +560,26 @@ std::unique_ptr<Project> ProjectSerializer::load(const QString& strFilePath)
         cfg.dLearningRate = cfgObj["learningRate"].toDouble(cfg.dLearningRate);
         cfg.nBatchSize    = cfgObj["batchSize"].toInt(cfg.nBatchSize);
         cfg.nEpochs       = cfgObj["epochs"].toInt(cfg.nEpochs);
+        // 20260330 ZJH 分辨率预设（兼容旧版：不存在则使用默认）
+        if (cfgObj.contains("resolutionPreset"))
+            cfg.eResolutionPreset = static_cast<om::InputResolutionPreset>(cfgObj["resolutionPreset"].toInt(static_cast<int>(cfg.eResolutionPreset)));
         cfg.nInputSize    = cfgObj["inputSize"].toInt(cfg.nInputSize);
         cfg.nPatience     = cfgObj["patience"].toInt(cfg.nPatience);
+
+        // 20260331 ZJH 迁移学习参数（兼容旧版：不存在则使用默认值）
+        cfg.nFreezeEpochs = cfgObj["freezeEpochs"].toInt(cfg.nFreezeEpochs);
+        cfg.dBackboneLrMultiplier = cfgObj["backboneLrMultiplier"].toDouble(cfg.dBackboneLrMultiplier);
+        cfg.nCropSize = cfgObj["cropSize"].toInt(cfg.nCropSize);  // 20260401 ZJH Crop 尺寸
+
+        // 20260330 ZJH 预训练模型与标识（兼容旧版：不存在则为空）
+        if (cfgObj.contains("pretrainedModelPath"))
+            cfg.strPretrainedModelPath = cfgObj["pretrainedModelPath"].toString();
+        if (cfgObj.contains("modelTag"))
+            cfg.strModelTag = cfgObj["modelTag"].toString();
+
+        // 20260330 ZJH 数据增强预设（兼容旧版：不存在则使用默认 Default）
+        if (cfgObj.contains("augPreset"))
+            cfg.eAugPreset = static_cast<om::AugmentationPreset>(cfgObj["augPreset"].toInt(static_cast<int>(cfg.eAugPreset)));
 
         // 20260324 ZJH 数据增强（基础）
         cfg.bAugmentation  = cfgObj["augmentation"].toBool(cfg.bAugmentation);

@@ -54,6 +54,18 @@ void Project::setTaskType(om::TaskType eType)
     m_eTaskType = eType;  // 20260322 ZJH 更新任务类型
 }
 
+// 20260403 ZJH 获取项目描述
+QString Project::description() const
+{
+    return m_strDescription;  // 20260403 ZJH 返回项目描述
+}
+
+// 20260403 ZJH 设置项目描述
+void Project::setDescription(const QString& strDesc)
+{
+    m_strDescription = strDesc;  // 20260403 ZJH 更新项目描述
+}
+
 // 20260322 ZJH 获取项目工作流状态
 om::ProjectState Project::state() const
 {

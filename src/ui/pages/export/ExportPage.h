@@ -19,6 +19,8 @@
 #include <QTableWidget>      // 20260322 ZJH 表格
 #include <QFrame>            // 20260322 ZJH 卡片容器
 #include <QTimer>            // 20260322 ZJH 模拟导出计时器
+#include <QThread>           // 20260402 ZJH TensorRT 异步构建线程
+#include <QProgressBar>      // 20260402 ZJH TensorRT 构建进度条
 
 // 20260322 ZJH 模型导出页面
 // 提供模型格式导出配置、导出执行、结果展示和导出历史
@@ -65,6 +67,10 @@ private slots:
     // 20260322 ZJH 模拟导出进度更新（定时器触发）
     void onExportSimTick();
 
+    // 20260402 ZJH 一键 TensorRT 优化按钮点击
+    // 流程: 检查 ONNX 文件 → 异步构建 TensorRT → 显示进度 → 完成后显示延迟对比
+    void onOptimizeTensorRT();
+
 private:
     // ===== UI 创建辅助方法 =====
 
@@ -97,7 +103,10 @@ private:
 
     // ===== 左面板控件 =====
 
-    QComboBox* m_pCboFormat;       // 20260322 ZJH 导出格式下拉框（ONNX/TensorRT/OpenVINO/DFM）
+    QComboBox* m_pCboFormat;       // 20260330 ZJH 导出格式下拉框（ONNX/TensorRT/OpenVINO/OMM）
+    QComboBox* m_pCboBackend;      // 20260330 ZJH 推理后端下拉框（ONNX Runtime/TensorRT/OpenVINO/原生引擎）
+    QCheckBox* m_pChkEncrypt;      // 20260330 ZJH 模型加密复选框
+    QLineEdit* m_pEdtPassword;     // 20260330 ZJH 加密密码输入框（最大 24 字符，密码回显模式）
     QLineEdit* m_pEdtModelName;    // 20260322 ZJH 模型名称输入框
     QComboBox* m_pCboPrecision;    // 20260322 ZJH 精度下拉框（FP32/FP16/INT8）
     QCheckBox* m_pChkDynBatch;     // 20260322 ZJH 动态批量复选框
@@ -144,4 +153,18 @@ private:
     QTimer* m_pSimTimer;       // 20260322 ZJH 模拟导出定时器
     int     m_nSimProgress;    // 20260322 ZJH 模拟导出当前进度
     int     m_nSimTotal;       // 20260322 ZJH 模拟导出总数
+
+    // 20260402 ZJH ===== TensorRT 一键优化 =====
+    QPushButton* m_pBtnOptimizeTRT = nullptr;   // 20260402 ZJH TensorRT 优化按钮
+    QComboBox*   m_pCboTRTPrecision = nullptr;  // 20260402 ZJH TRT 精度选择（FP16/INT8/FP32）
+    QLabel*      m_pLblTRTStatus = nullptr;     // 20260402 ZJH TRT 优化状态标签
+    QProgressBar* m_pTRTProgressBar = nullptr;  // 20260402 ZJH TRT 构建进度条
+
+    // 20260402 ZJH [OPT-3.9] 一键部署包导出
+    QPushButton* m_pBtnExportDeployPkg = nullptr;  // 20260402 ZJH 导出部署包按钮
+
+private slots:
+    // 20260402 ZJH [OPT-3.9] 一键导出部署包
+    // 打包内容: 模型文件(.onnx) + inference_config.json + README.txt
+    void onExportDeployPackage();
 };

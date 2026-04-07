@@ -481,13 +481,33 @@ void TrainingSession::runTrainingLoopImpl()
             // 背景 patch 不以标注为中心，用于平衡正负样本比例
             // 训练集: min(标注patch数, 3) 个背景; 验证集: 1 个背景
             if (!entry.vecAnnotations.isEmpty()) {
-                int nBgPatches = bIsTrain ? std::min(static_cast<int>(vecPatches.size()), 3) : 1;  // 20260329 ZJH 背景 patch 数量
+                int nBgPatches = bIsTrain ? std::min(static_cast<int>(vecPatches.size()), 3) : 1;
                 for (int bg = 0; bg < nBgPatches; ++bg) {
-                    // 20260401 ZJH 在原图内随机选取背景 crop 位置（使用 nCropSize）
-                    int nBgX = QRandomGenerator::global()->bounded(std::max(1, nOrigW - nCropSize));
-                    int nBgY = QRandomGenerator::global()->bounded(std::max(1, nOrigH - nCropSize));
+                    // 20260407 ZJH [修复] 背景 patch 排除缺陷区域，避免标签污染
+                    // 旧: 随机位置可能与缺陷标注重叠 → 图像含缺陷但标签为背景 → 错误训练信号
+                    // 新: 最多重试 10 次，跳过与任何标注 IoU > 0.1 的位置
+                    int nBgX = 0, nBgY = 0;
+                    bool bValidBg = false;
+                    for (int nRetry = 0; nRetry < 10; ++nRetry) {
+                        nBgX = QRandomGenerator::global()->bounded(std::max(1, nOrigW - nCropSize));
+                        nBgY = QRandomGenerator::global()->bounded(std::max(1, nOrigH - nCropSize));
+                        QRect bgRect(nBgX, nBgY, nCropSize, nCropSize);
+                        bValidBg = true;
+                        for (const Annotation& anno : entry.vecAnnotations) {
+                            if (anno.nLabelId < 0) continue;
+                            QRect annoRect = anno.rectBounds.toRect();
+                            QRect inter = bgRect.intersected(annoRect);
+                            if (!inter.isEmpty()) {
+                                // 20260407 ZJH 计算 IoU：交集面积 / 标注面积
+                                float fIoU = static_cast<float>(inter.width() * inter.height())
+                                    / static_cast<float>(std::max(1, annoRect.width() * annoRect.height()));
+                                if (fIoU > 0.1f) { bValidBg = false; break; }
+                            }
+                        }
+                        if (bValidBg) break;
+                    }
                     vecPatches.append(QRect(nBgX, nBgY, nCropSize, nCropSize));
-                    vecPatchLabels.append(0);  // 20260330 ZJH 背景 patch 使用类别 0（背景类），而非图像级标签
+                    vecPatchLabels.append(0);
                 }
             }
 

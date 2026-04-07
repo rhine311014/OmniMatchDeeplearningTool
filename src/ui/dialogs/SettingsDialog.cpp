@@ -4,6 +4,7 @@
 #include "ui/dialogs/SettingsDialog.h"  // 20260322 ZJH 类声明
 #include "app/ThemeManager.h"           // 20260322 ZJH 主题管理器
 #include "app/Application.h"            // 20260322 ZJH 全局事件总线
+#include "core/i18n/TranslationManager.h"  // 20260330 ZJH 国际化管理器（语言切换）
 
 #include <QVBoxLayout>       // 20260322 ZJH 垂直布局
 #include <QFormLayout>       // 20260322 ZJH 表单布局
@@ -151,10 +152,14 @@ QWidget* SettingsDialog::createGeneralTab()
     pForm->setSpacing(12);
     pForm->setLabelAlignment(Qt::AlignRight);
 
-    // 20260322 ZJH 语言选择
+    // 20260330 ZJH 语言选择（扩展为 4 种语言）
     m_pCmbLanguage = new QComboBox(pTab);
-    m_pCmbLanguage->addItem(QStringLiteral("简体中文"), QStringLiteral("zh_CN"));
-    m_pCmbLanguage->addItem(QStringLiteral("English"),  QStringLiteral("en_US"));
+    m_pCmbLanguage->addItem(QStringLiteral("简体中文"), static_cast<int>(AppLanguage::Chinese));
+    m_pCmbLanguage->addItem(QStringLiteral("English"),  static_cast<int>(AppLanguage::English));
+    m_pCmbLanguage->addItem(QStringLiteral("日本語"),   static_cast<int>(AppLanguage::Japanese));
+    m_pCmbLanguage->addItem(QStringLiteral("Deutsch"),  static_cast<int>(AppLanguage::German));
+    // 20260330 ZJH 初始化为当前语言
+    m_pCmbLanguage->setCurrentIndex(static_cast<int>(TranslationManager::instance().currentLanguage()));
     pForm->addRow(QStringLiteral("语言:"), m_pCmbLanguage);
 
     // 20260322 ZJH 自动保存间隔（分钟）
@@ -299,6 +304,16 @@ void SettingsDialog::applySettings()
         auto* pThemeMgr = OmniMatch::ThemeManager::instance();
         if (pThemeMgr->currentTheme() != eTheme) {
             pThemeMgr->applyTheme(eTheme);  // 20260322 ZJH 切换主题
+        }
+    }
+
+    // 20260330 ZJH 2. 应用语言设置
+    if (m_pCmbLanguage) {
+        int nLangValue = m_pCmbLanguage->currentData().toInt();  // 20260330 ZJH 获取语言枚举值
+        auto eLang = static_cast<AppLanguage>(nLangValue);
+        auto& transMgr = TranslationManager::instance();
+        if (transMgr.currentLanguage() != eLang) {
+            transMgr.setLanguage(eLang);  // 20260330 ZJH 切换语言（触发 languageChanged 信号）
         }
     }
 

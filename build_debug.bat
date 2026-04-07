@@ -1,5 +1,5 @@
 @echo off
-call "E:\DevelopmentTools\VisualStudio2026\Community\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1
+call "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1
 cd /d "E:\DevelopmentTools\OmniMatchDeeplearningTool"
 cmake --preset qt6-debug
 if errorlevel 1 (

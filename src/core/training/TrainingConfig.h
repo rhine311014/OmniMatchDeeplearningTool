@@ -188,6 +188,18 @@ struct TrainingConfig
     // 20260330 ZJH 剪枝比例（范围 0.1~0.8，表示移除权重的比例）
     double dPruneRatio = 0.3;
 
+    // ===== 增量训练 (Continual Learning) =====
+
+    // 20260402 ZJH [OPT-2.5] 是否启用增量训练模式
+    // 勾选后: (1) 自动加载现有模型权重作为起点 (2) 使用 EWC 正则化防止灾难性遗忘
+    // 适用场景: 生产线新增缺陷类型，不想从头重新训练整个模型
+    bool bContinualLearning = false;
+
+    // 20260402 ZJH EWC 正则化系数 λ（Elastic Weight Consolidation）
+    // λ 越大，对旧任务参数的惩罚越强，旧知识保留越好，但新任务学习能力受限
+    // 典型值 100~10000，工业场景推荐 1000
+    double dEwcLambda = 1000.0;
+
     // ===== 导出 =====
 
     // 20260322 ZJH 训练完成后是否自动导出 ONNX 模型

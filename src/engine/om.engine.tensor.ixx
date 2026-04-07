@@ -3,26 +3,31 @@
 // Tensor 自身持有 shape / strides / offset，支持零拷贝视图操作
 // 20260325 ZJH Phase 1 GPU-Resident 重写：支持 .to(device)/.cuda()/.cpu() 设备迁移，
 //              工厂方法新增可选 DeviceType 参数，device() 返回实际设备类型
+// 20260406 ZJH 全局模块片段（module; 声明之前的预处理指令区域）
 module;
 
-#include <vector>
-#include <memory>
-#include <numeric>
-#include <stdexcept>
-#include <cstddef>
-#include <cassert>
-#include <cstring>
+#include <vector>      // 20260406 ZJH std::vector — 形状和步长向量
+#include <memory>      // 20260406 ZJH std::shared_ptr — TensorStorage 引用计数
+#include <numeric>     // 20260406 ZJH std::accumulate（预留，当前未使用）
+#include <stdexcept>   // 20260406 ZJH std::runtime_error / std::out_of_range — 异常类
+#include <cstddef>     // 20260406 ZJH size_t — 无符号整数类型
+#include <cassert>     // 20260406 ZJH assert 宏 — 调试断言
+#include <cstring>     // 20260406 ZJH std::memcpy（预留，当前未使用）
 
-#include "om_types.h"
+#include "om_types.h"  // 20260406 ZJH DeviceType / DataType 枚举定义
 
+// 20260406 ZJH 导出 Tensor 模块接口单元
 export module om.engine.tensor;
+// 20260406 ZJH 导入存储模块：TensorStorage 持有实际内存
 import om.engine.tensor_storage;
+// 20260406 ZJH 导入 CPU 计算后端：fillZeros/fillOnes/fillValue/fillRandn/copy/stridedCopy
 import om.hal.cpu_backend;
 // 20260325 ZJH 导入 CUDA 后端用于 GPU 直接分配路径
 #ifdef OM_HAS_CUDA
-import om.hal.cuda_backend;
+import om.hal.cuda_backend;  // 20260406 ZJH CUDABackend::fillZeros/fillOnes/fillValue 等 GPU 填充
 #endif
 
+// 20260406 ZJH om 命名空间：OmniMatch 引擎全部公开类型和函数的顶层命名空间
 export namespace om {
 
 // 20260319 ZJH Tensor — 多维浮点张量，当前仅支持 Float32 + CPU
@@ -48,6 +53,7 @@ public:
     // 20260319 ZJH 移动赋值
     Tensor& operator=(Tensor&&) noexcept = default;
 
+    // 20260406 ZJH 析构 — 默认析构，shared_ptr<TensorStorage> 引用计数自动管理内存释放
     ~Tensor() = default;
 
     // =========================================================

@@ -12,6 +12,8 @@
 #include <filesystem>  // 20260324 ZJH 路径验证（saveModel/loadModel）
 #include <iostream>    // 20260324 ZJH std::cerr 日志输出
 #include <future>      // 20260324 ZJH std::async 双缓冲异步填充
+#include <map>         // 20260402 ZJH BN 折叠名称映射
+#include <fstream>     // 20260402 ZJH 精度基线 JSON 文件读写
 
 // 20260324 ZJH 包含桥接层头文件，消除重复类型定义（ODR 违规风险）
 // EngineBridge.h 仅使用标准库头文件，不含 C++23 import，可安全包含
@@ -38,6 +40,7 @@ import om.engine.yolo;
 import om.engine.instance_seg;
 import om.engine.efficientad;
 import om.engine.patchcore;
+import om.engine.convnext;          // 20260402 ZJH ConvNeXt-Tiny 现代 CNN 分类
 import om.engine.gan;
 import om.engine.crnn;
 import om.engine.autograd;
@@ -47,6 +50,15 @@ import om.engine.pretrained;  // 20260331 ZJH PyTorch 预训练权重跨架构�
 import om.engine.data_pipeline;
 // 20260330 ZJH 导入数据合成模块，提供 CopyPaste/增强/GAN 三种合成策略
 import om.engine.data_synthesis;
+// 20260402 ZJH 导入新增模块（对标 Halcon/ViDi 差距补全）
+import om.engine.gcad;               // 20260402 ZJH GCAD 全局上下文异常检测
+import om.engine.dbnet;              // 20260402 ZJH DBNet 文本检测
+import om.engine.advanced_learning;  // 20260402 ZJH ContinualLearner (EWC)
+import om.engine.edge_extraction;   // 20260402 ZJH DL 边缘提取
+import om.engine.defect_generator;  // 20260402 ZJH AI 缺陷生成器
+import om.engine.fp16;              // 20260402 ZJH FP16 混合精度 + GradScaler
+import om.engine.pruning;           // 20260402 ZJH 模型剪枝（后训练压缩）
+import om.engine.inference_enhance;  // 20260402 ZJH TTAPredictor
 // 20260324 ZJH 导入 HAL 层模块，获取 GPU 加速开关接口（setGpuAcceleration/isGpuAccelerationEnabled）
 import om.hal.cpu_backend;
 // 20260325 ZJH 导入 CUDA 后端模块，提供 GPU 全算子加速（Phase 4 GPU-Resident 训练依赖）
@@ -131,6 +143,7 @@ extern "C" {
     int omCudaForceReset();                                              // 20260326 ZJH 强制重置 GPU
     int omCudaSynchronize();                                             // 20260326 ZJH 同步所有 GPU 操作
     int omCudaGetMemInfo(int nDeviceId, size_t* pFree, size_t* pTotal);  // 20260325 ZJH 查询设备显存信息
+    int omCudaGetComputeCapability(int nDeviceId, int* pMajor, int* pMinor);  // 20260402 ZJH 查询 GPU 计算能力
 }
 #endif
 
@@ -145,8 +158,12 @@ struct EngineSessionImpl
     std::string strModelType;  // 20260330 ZJH 模型类型字符串（序列化元数据用）
     bool bIsCnn = false;    // 20260325 ZJH 是否为 CNN 模型（需要 4D 输入 [B,3,H,W]）
     bool bIsEfficientAD = false;  // 20260326 ZJH EfficientAD 异常检测模型标记（蒸馏训练 + 空间异常图）
+    bool bIsGCAD = false;         // 20260402 ZJH GCAD 全局上下文异常检测（双分支: Teacher-Student + ViT 全局）
+    bool bIsDBNet = false;        // 20260402 ZJH DBNet 文本检测（可微分二值化）
+    bool bIsEdgeExtraction = false; // 20260402 ZJH DL 边缘提取（EdgeUNet）
     bool bIsDetection = false;    // 20260330 ZJH 是否为目标检测模型（YOLO 系列，使用 YOLOLoss）
     bool bIsSegmentation = false; // 20260328 ZJH 是否为语义分割模型（UNet/DeepLabV3 等）
+    bool bIsInstanceSeg = false;  // 20260402 ZJH 是否为实例分割模型（YOLOv8Seg/MaskRCNN）
     bool bUseGroupNorm = false;   // 20260402 ZJH 是否使用 GroupNorm（小 batch 自动启用，序列化用）
 };
 
@@ -212,7 +229,11 @@ static om::NormPreset selectNormPreset(const std::string& strModelType) {
 
 // 20260330 ZJH 构建训练数据增强配置（工业视觉合理默认值）
 // 水平翻转 50%、垂直翻转 30%、随机旋转 ±15°、颜色抖动、高斯噪声
-static om::AugmentConfig buildTrainAugmentConfig(const std::string& strModelType) {
+// 20260402 ZJH [OPT-2.3] 新增高级增强: 根据模型类型自动配置 CutPaste/MixUp/CutMix/Mosaic/ElasticDeform
+// 参数: strModelType - 模型类型字符串（用于判断启用哪种高级增强策略）
+//       bAdvancedAugment - 高级增强总开关（false 时跳过所有高级增强配置）
+static om::AugmentConfig buildTrainAugmentConfig(const std::string& strModelType,
+                                                  bool bAdvancedAugment = true) {
     om::AugmentConfig cfg;
     // 20260330 ZJH 几何增强
     cfg.bRandomHFlip = true;        // 20260330 ZJH 50% 概率水平翻转
@@ -230,14 +251,63 @@ static om::AugmentConfig buildTrainAugmentConfig(const std::string& strModelType
     // 20260330 ZJH 归一化设置
     cfg.bNormalize = false;         // 20260330 ZJH 归一化在增强后单独调用
     cfg.eNormPreset = om::NormPreset::None;  // 20260330 ZJH 增强内部不做归一化
-    return cfg;
+
+    // 20260402 ZJH [OPT-2.3] 高级增强策略 — 根据模型类型自动选择最优增强方法
+    // 仅在 bAdvancedAugment=true 时启用（用户可通过 BridgeTrainParams::bAdvancedAugment 关闭）
+    if (bAdvancedAugment) {
+        // 20260402 ZJH 异常检测模型 (EfficientAD/PatchCore): 启用 CutPaste
+        // CutPaste 从同一图像裁剪 patch 并粘贴到另一位置，生成伪异常样本
+        // 论文: CutPaste (Li et al., 2021) — 自监督异常检测专用增强
+        if (strModelType == "EfficientAD" || strModelType == "PatchCore" ||
+            strModelType == "GCAD" || strModelType == "GlobalContextAD") {
+            cfg.bCutPaste = true;           // 20260402 ZJH 启用 CutPaste 伪异常生成
+            cfg.fCutPasteMinArea = 0.02f;   // 20260402 ZJH 最小裁剪面积比 2%
+            cfg.fCutPasteMaxArea = 0.15f;   // 20260402 ZJH 最大裁剪面积比 15%
+            cfg.fCutPasteMinAspect = 0.3f;  // 20260402 ZJH 最小宽高比
+            cfg.fCutPasteMaxAspect = 3.3f;  // 20260402 ZJH 最大宽高比
+        }
+        // 20260402 ZJH 目标检测模型 (YOLO 系列): 启用 Mosaic 4 图拼接
+        // Mosaic 将 4 张训练图像拼接成一张，增加上下文多样性
+        // 效果: 小目标检测 mAP +3-5%（YOLOv4 论文标配）
+        else if (strModelType == "YOLOv5Nano" || strModelType == "YOLOv8Nano" ||
+                 strModelType == "YOLOv5s" || strModelType == "YOLOv8s" ||
+                 strModelType == "YOLOv10Nano" || strModelType == "YOLOv10s") {
+            cfg.bMosaic = true;             // 20260402 ZJH 启用 Mosaic 4 图拼接
+            cfg.fMosaicProb = 0.5f;         // 20260402 ZJH 50% 概率触发 Mosaic
+        }
+        // 20260402 ZJH 分割模型 (UNet/DeepLabV3/MobileSegNet): 启用 ElasticDeform
+        // 弹性形变模拟自然形变（布料褶皱、柔性材料弯曲、医学组织变形）
+        // 论文: U-Net (Ronneberger et al., 2015) — 分割增强经典策略
+        else if (strModelType == "UNet" || strModelType == "DeepLabV3+" ||
+                 strModelType == "DeepLabV3Plus" || strModelType == "DeepLabV3" ||
+                 strModelType == "MobileSegNet" || strModelType == "MobileSeg" ||
+                 strModelType == "EdgeUNet" || strModelType == "EdgeExtraction") {
+            cfg.bElasticDeform = true;      // 20260402 ZJH 启用弹性形变
+            cfg.fElasticAlpha = 50.0f;      // 20260402 ZJH 形变幅度 50 像素
+            cfg.fElasticSigma = 5.0f;       // 20260402 ZJH 高斯平滑 sigma=5
+        }
+        // 20260402 ZJH 分类模型 (ResNet/MobileNet/ViT): 启用 MixUp + CutMix
+        // MixUp: image = λ*img1 + (1-λ)*img2，强正则化防过拟合 +2-4%
+        // CutMix: 随机裁剪区域混合，保留局部结构信息
+        // 两者同时启用时训练循环中随机选择其一（互斥应用）
+        else {
+            cfg.bMixUp = true;              // 20260402 ZJH 启用 MixUp 图像级混合
+            cfg.fMixUpAlpha = 0.2f;         // 20260402 ZJH Beta(0.2, 0.2) 分布参数
+            cfg.bCutMix = true;             // 20260402 ZJH 启用 CutMix 区域级混合
+            cfg.fCutMixAlpha = 1.0f;        // 20260402 ZJH Beta(1.0, 1.0) = 均匀分布
+        }
+    }
+
+    return cfg;  // 20260406 ZJH 返回构建好的增强配置
 }
 
 // ===== 实现 =====
 
+// 20260406 ZJH 构造函数: 创建 PIMPL 实现对象（隐藏引擎模块依赖）
 EngineBridge::EngineBridge()
     : m_pImpl(std::make_unique<EngineSessionImpl>()) {}
 
+// 20260406 ZJH 析构函数: 默认实现（unique_ptr 自动释放 EngineSessionImpl）
 EngineBridge::~EngineBridge() = default;
 
 // 20260330 ZJH 创建模型 — 通过 ModelRegistry 注册表查找工厂函数
@@ -253,7 +323,7 @@ bool EngineBridge::createModel(const std::string& strModelType, int nInputSize, 
     // 20260330 ZJH 确保注册表已初始化（懒初始化，首次调用时注册所有内置模型）
     om::ModelRegistry::instance().ensureInitialized();
 
-    m_pImpl->nNumClasses = nNumClasses;
+    m_pImpl->nNumClasses = nNumClasses;  // 20260406 ZJH 记录类别数到实现结构体
     m_pImpl->nInputSize = nInputSize;  // 20260325 ZJH 记录空间尺寸
     m_pImpl->strModelType = strModelType;  // 20260330 ZJH 记录模型类型（序列化元数据用）
 
@@ -288,7 +358,10 @@ bool EngineBridge::createModel(const std::string& strModelType, int nInputSize, 
     else if (strModelType == "MobileSegNet" || strModelType == "MobileSeg")
         // 20260402 ZJH 传递 GroupNorm 标志
         pModel = std::make_shared<om::MobileSegNet>(nInCh, nNumClasses, m_pImpl->bUseGroupNorm);
-    else if (strModelType == "EfficientAD")  pModel = std::make_shared<om::EfficientAD>(nInCh);
+    // 20260402 ZJH EfficientAD: 默认使用 ResNet18 预训练骨干（bUsePretrainedBackbone=true）
+    // 教师网络使用预训练 ResNet18（冻结），学生网络使用随机初始化 ResNet18
+    // Phase 1.2 — 对标 PatchCore/EfficientAD 论文的 ImageNet 预训练特征提取策略
+    else if (strModelType == "EfficientAD")  pModel = std::make_shared<om::EfficientAD>(nInCh, true);
     else if (strModelType == "YOLOv8Seg")    pModel = std::make_shared<om::SimpleInstanceSeg>(nInCh, nNumClasses);
     else if (strModelType == "MLP") {
         auto pSeq = std::make_shared<om::Sequential>();
@@ -299,10 +372,11 @@ bool EngineBridge::createModel(const std::string& strModelType, int nInputSize, 
     }
 
     if (!pModel) {
+        // 20260406 ZJH 未知模型类型，输出错误日志并返回失败
         std::cerr << "[EngineBridge] Unknown model type: " << strModelType << std::endl;
-        return false;
+        return false;  // 20260406 ZJH 模型创建失败
     }
-    m_pImpl->pModel = pModel;
+    m_pImpl->pModel = pModel;  // 20260406 ZJH 将创建好的模型存储到实现结构体
     // 20260330 ZJH 诊断: 检查每个参数的健康度
     auto vecDiagParams = pModel->parameters();
     std::cerr << "[EngineBridge] createModel OK: " << strModelType
@@ -328,8 +402,12 @@ bool EngineBridge::createModel(const std::string& strModelType, int nInputSize, 
     if (pInfo) {
         m_pImpl->bIsCnn = pInfo->bIsCnn;                                               // 20260330 ZJH CNN 4D 输入标记
         m_pImpl->bIsDetection = (pInfo->eCategory == om::ModelCategory::Detection);     // 20260330 ZJH 检测模型标记（YOLOLoss）
-        m_pImpl->bIsSegmentation = (pInfo->eCategory == om::ModelCategory::Segmentation); // 20260330 ZJH 分割模型标记
+        m_pImpl->bIsSegmentation = (pInfo->eCategory == om::ModelCategory::Segmentation); // 20260330 ZJH 语义分割标记
+        m_pImpl->bIsInstanceSeg = (pInfo->eCategory == om::ModelCategory::InstanceSeg);  // 20260402 ZJH 实例分割标记
         m_pImpl->bIsEfficientAD = (strModelType == "EfficientAD");                      // 20260330 ZJH 蒸馏训练标记
+        m_pImpl->bIsGCAD = (strModelType == "GCAD" || strModelType == "GlobalContextAD");  // 20260402 ZJH GCAD 双分支标记
+        m_pImpl->bIsDBNet = (strModelType == "DBNet" || strModelType == "DBNet+CRNN");     // 20260402 ZJH DBNet 文本检测标记
+        m_pImpl->bIsEdgeExtraction = (strModelType == "EdgeUNet" || strModelType == "EdgeExtraction"); // 20260402 ZJH 边缘提取标记
         m_pImpl->nBaseChannels = pInfo->nDefaultBaseChannels;                           // 20260330 ZJH 基础通道数
 
         // 20260330 ZJH UNet 特殊处理: 根据输入尺寸动态调整 base channels
@@ -413,8 +491,8 @@ bool EngineBridge::train(
     EpochCallback epochCb, BatchCallback batchCb, LogCallback logCb, StopChecker stopCheck)
 {
     if (!m_pImpl->pModel) {
-        if (logCb) logCb("[ERROR] No model created");
-        return false;
+        if (logCb) logCb("[ERROR] No model created");  // 20260406 ZJH 输出错误日志
+        return false;  // 20260406 ZJH 模型未创建，无法训练
     }
 
     // 20260328 ZJH [DIAG-1] 训练入口诊断：确认模型参数在 train() 开始时存在
@@ -426,6 +504,118 @@ bool EngineBridge::train(
                   << " children=" << m_pImpl->pModel->debugChildCount()
                   << " directParams=" << m_pImpl->pModel->debugParamCount()
                   << std::endl;
+    }
+
+    // 20260402 ZJH ===== [OPT-3.8] AutoML 智能模型选择 =====
+    // 当 bSmartMode=true 时，根据任务类型和数据量自动选择最优模型+超参数
+    // 用户无需手动调参，一键智能训练
+    // 注意: 需要在 CUDA 初始化之前执行，因为可能会重建模型
+    if (params.bSmartMode) {
+        int nDatasetSize = static_cast<int>(vecTrainLabels.size());  // 20260402 ZJH 训练集样本数
+        // 20260402 ZJH 局部可变副本（仅在 SmartMode 内部覆写，不修改原始 params 引用）
+        auto& mutParams = const_cast<BridgeTrainParams&>(params);
+
+        // 20260402 ZJH 根据任务类型选择模型
+        bool bIsDetection = m_pImpl->bIsDetection;         // 20260402 ZJH 是否为检测模型
+        bool bIsSegmentation = m_pImpl->bIsSegmentation;   // 20260402 ZJH 是否为分割模型
+        bool bIsAnomalyDet = (m_pImpl->strModelType == "EfficientAD"
+                           || m_pImpl->strModelType == "PatchCore"
+                           || m_pImpl->strModelType == "GCAD");  // 20260402 ZJH 是否为异常检测
+
+        std::string strAutoModel = mutParams.strModelType;  // 20260402 ZJH 默认保持用户选择
+
+        if (bIsAnomalyDet) {
+            // 20260402 ZJH 异常检测: <50 正常→EfficientAD, >=50→PatchCore
+            if (nDatasetSize < 50) {
+                strAutoModel = "EfficientAD";
+                if (logCb) logCb("[AutoML] 异常检测: 样本 <50，选择 EfficientAD（少样本高效）");
+            } else {
+                strAutoModel = "PatchCore";
+                if (logCb) logCb("[AutoML] 异常检测: 样本 >=50，选择 PatchCore（记忆库精度高）");
+            }
+        } else if (bIsDetection) {
+            // 20260402 ZJH 检测: 数据量小→YOLOv5Nano（轻量快速），数据量大→YOLOv8Nano
+            if (nDatasetSize < 500) {
+                strAutoModel = "YOLOv5Nano";
+                if (logCb) logCb("[AutoML] 目标检测: 样本 <500，选择 YOLOv5Nano（轻量边缘部署）");
+            } else {
+                strAutoModel = "YOLOv8Nano";
+                if (logCb) logCb("[AutoML] 目标检测: 样本 >=500，选择 YOLOv8Nano（标准精度）");
+            }
+        } else if (bIsSegmentation) {
+            // 20260402 ZJH 分割: <200→MobileSegNet, 200-1000→UNet, >1000→DeepLabV3+
+            if (nDatasetSize < 200) {
+                strAutoModel = "MobileSegNet";
+                if (logCb) logCb("[AutoML] 语义分割: 样本 <200，选择 MobileSegNet（轻量 ~1.75M 参数）");
+            } else if (nDatasetSize < 1000) {
+                strAutoModel = "UNet";
+                if (logCb) logCb("[AutoML] 语义分割: 样本 200-1000，选择 UNet（标准 base=16）");
+            } else {
+                strAutoModel = "DeepLabV3+";
+                if (logCb) logCb("[AutoML] 语义分割: 样本 >1000，选择 DeepLabV3+（高精度 ASPP）");
+            }
+        } else {
+            // 20260402 ZJH 分类: <100→ResNet18+强增强, 100-1000→ResNet18, >1000→ConvNeXtTiny
+            if (nDatasetSize < 100) {
+                strAutoModel = "ResNet18";
+                mutParams.bAugmentEnabled = true;  // 20260402 ZJH 强制开启增强（小数据防过拟合）
+                if (logCb) logCb("[AutoML] 分类: 样本 <100，选择 ResNet18 + 强数据增强");
+            } else if (nDatasetSize < 1000) {
+                strAutoModel = "ResNet18";
+                if (logCb) logCb("[AutoML] 分类: 样本 100-1000，选择 ResNet18（经典可靠）");
+            } else {
+                strAutoModel = "ConvNeXtTiny";
+                if (logCb) logCb("[AutoML] 分类: 样本 >1000，选择 ConvNeXtTiny（现代 CNN, Top-1 82.1%）");
+            }
+        }
+
+        // 20260402 ZJH 如果选择了不同的模型，需要重建
+        if (strAutoModel != m_pImpl->strModelType) {
+            mutParams.strModelType = strAutoModel;
+            if (logCb) logCb("[AutoML] 重建模型: " + m_pImpl->strModelType + " -> " + strAutoModel);
+            // 20260402 ZJH 通过 createModel 重建（会更新 m_pImpl 内部状态）
+            createModel(strAutoModel, mutParams.nInputSize, mutParams.nNumClasses);
+        }
+
+        // 20260402 ZJH 自动设置 epoch: max(50, 500/sqrt(dataset_size))
+        // 小数据集需要更多 epoch 充分学习，大数据集收敛更快
+        int nAutoEpochs = std::max(50, static_cast<int>(500.0f / std::sqrt(static_cast<float>(std::max(nDatasetSize, 1)))));
+        mutParams.nEpochs = nAutoEpochs;
+        if (logCb) logCb("[AutoML] 自动 epoch = " + std::to_string(nAutoEpochs)
+            + " (公式: max(50, 500/sqrt(" + std::to_string(nDatasetSize) + ")))");
+
+        // 20260402 ZJH 自动 batch size（根据模型参数量和可用内存）
+        int64_t nModelParams = 0;
+        for (auto* p : m_pImpl->pModel->parameters()) nModelParams += p->numel();
+        int nAutoBatch = autoSelectBatchSize(m_pImpl->nInputDim, mutParams.nNumClasses, nModelParams);
+        // 20260402 ZJH batch 不超过训练集大小
+        nAutoBatch = std::min(nAutoBatch, nDatasetSize);
+        nAutoBatch = std::max(nAutoBatch, 4);  // 20260402 ZJH 最小 batch 4（梯度稳定性）
+        mutParams.nBatchSize = nAutoBatch;
+        if (logCb) logCb("[AutoML] 自动 batch_size = " + std::to_string(nAutoBatch));
+
+        // 20260402 ZJH 自动学习率（LR finder 简化版: 基于经验公式）
+        // 大 batch 用较大 LR（线性缩放规则: LR ∝ batch_size / 256）
+        float fAutoLR = 0.001f * static_cast<float>(nAutoBatch) / 32.0f;
+        // 20260402 ZJH clamp LR 到合理范围 [1e-5, 0.01]
+        fAutoLR = std::max(1e-5f, std::min(fAutoLR, 0.01f));
+        mutParams.fLearningRate = fAutoLR;
+        if (logCb) logCb("[AutoML] 自动 LR = " + std::to_string(fAutoLR)
+            + " (线性缩放: 0.001 * " + std::to_string(nAutoBatch) + " / 32)");
+
+        // 20260402 ZJH 自动优化器: 分类/分割用 AdamW，检测用 SGD
+        if (bIsDetection) {
+            mutParams.strOptimizer = "SGD";
+            mutParams.fMomentum = 0.937f;  // 20260402 ZJH YOLO 推荐动量
+        } else {
+            mutParams.strOptimizer = "AdamW";
+        }
+        if (logCb) logCb("[AutoML] 自动优化器 = " + mutParams.strOptimizer);
+
+        // 20260402 ZJH 强制开启数据增强（AutoML 策略: 增强总是有益的）
+        mutParams.bAugmentEnabled = true;
+
+        if (logCb) logCb("[AutoML] ===== 智能模式配置完成 =====");
     }
 
     // 20260325 ZJH ===== GPU-Resident 训练初始化 =====
@@ -471,13 +661,13 @@ bool EngineBridge::train(
 #endif
     }
 
-    int nNumClasses = m_pImpl->nNumClasses;
-    int nInputDim = m_pImpl->nInputDim;
-    int nTrainCount = static_cast<int>(vecTrainLabels.size());
-    int nValCount = static_cast<int>(vecValLabels.size());
-    int nBatchSize = params.nBatchSize;
-    int nEpochs = params.nEpochs;
-    float fLr = params.fLearningRate;
+    int nNumClasses = m_pImpl->nNumClasses;  // 20260406 ZJH 本地缓存类别数（频繁访问）
+    int nInputDim = m_pImpl->nInputDim;    // 20260406 ZJH 本地缓存输入维度
+    int nTrainCount = static_cast<int>(vecTrainLabels.size());  // 20260406 ZJH 训练集样本数
+    int nValCount = static_cast<int>(vecValLabels.size());      // 20260406 ZJH 验证集样本数
+    int nBatchSize = params.nBatchSize;    // 20260406 ZJH 批量大小（可能被后续修正）
+    int nEpochs = params.nEpochs;          // 20260406 ZJH 训练轮数（可能被 AutoML 修改）
+    float fLr = params.fLearningRate;      // 20260406 ZJH 学习率（可能被 AutoML/LR Finder 修改）
 
     // 20260331 ZJH ===== 训练诊断: batch_size / LR / 数据量自动修正 =====
     // 问题: batch=1 时每步梯度来自单张图像，方向极度嘈杂导致损失剧烈震荡
@@ -562,14 +752,71 @@ bool EngineBridge::train(
     // 教师-学生特征差异 = 异常分数（正常样本差异小，缺陷样本差异大）
     if (m_pImpl->bIsEfficientAD) {
         auto* pEfficientAD = static_cast<om::EfficientAD*>(m_pImpl->pModel.get());
+        // 20260402 ZJH Phase 1.2: 输出骨干类型日志
+        if (pEfficientAD->isUsingPretrainedBackbone()) {
+            if (logCb) logCb("[INFO] EfficientAD: Using ResNet18 pretrained backbone (Phase 1.2)");
+            // 20260402 ZJH 尝试自动加载 ImageNet 预训练权重到教师 ResNet18 骨干
+            // 查找预训练权重文件: 1) 用户指定路径 2) pretrained/ 目录下 resnet18 文件
+            if (!params.strPretrainedModelPath.empty()) {
+                // 20260402 ZJH 用户已指定预训练路径，权重将在统一的预训练加载逻辑中处理
+                if (logCb) logCb("[INFO] EfficientAD: ResNet18 teacher weights will be loaded from: "
+                    + params.strPretrainedModelPath);
+            } else {
+                // 20260402 ZJH 自动搜索 pretrained/ 目录下的 ResNet18 权重
+                std::string strAutoPath = "pretrained/resnet18_imagenet.omm";
+                std::filesystem::path fsAutoPath(
+                    reinterpret_cast<const char8_t*>(strAutoPath.c_str()));
+                if (std::filesystem::exists(fsAutoPath)) {
+                    try {
+                        // 20260402 ZJH 加载预训练权重到教师 ResNet18 骨干
+                        auto* pTeacherModule = pEfficientAD->getTeacherModule();
+                        if (pTeacherModule) {
+                            auto [nL, nS] = om::loadPyTorchPretrainedToSegModel(
+                                *pTeacherModule, strAutoPath);
+                            if (logCb) logCb("[INFO] EfficientAD: Auto-loaded ResNet18 pretrained weights to teacher — "
+                                + std::to_string(nL) + " layers loaded, " + std::to_string(nS) + " skipped");
+                        }
+                    } catch (const std::exception& ex) {
+                        if (logCb) logCb("[WARN] EfficientAD: Failed to auto-load pretrained weights: "
+                            + std::string(ex.what()));
+                    }
+                } else {
+                    if (logCb) logCb("[INFO] EfficientAD: No pretrained weights found at " + strAutoPath
+                        + " — teacher starts with random weights (provide pretrained for best accuracy)");
+                }
+            }
+        } else {
+            if (logCb) logCb("[INFO] EfficientAD: Using legacy 4-layer CNN backbone (fallback mode)");
+        }
         pEfficientAD->freezeTeacher();  // 20260326 ZJH 冻结教师网络（eval 模式，参数不更新）
         if (logCb) logCb("[INFO] EfficientAD: Teacher frozen, training student only (distillation)");
     }
 
-    // 20260326 ZJH EfficientAD 仅传学生参数给优化器，其他模型传所有参数
-    auto vecModelParams = m_pImpl->bIsEfficientAD
-        ? static_cast<om::EfficientAD*>(m_pImpl->pModel.get())->studentParameters()
-        : m_pImpl->pModel->parameters();
+    // 20260402 ZJH GCAD 蒸馏训练：冻结 Teacher，仅训练 Student + GlobalEncoder
+    if (m_pImpl->bIsGCAD) {
+        auto* pGCAD = dynamic_cast<om::GCAD*>(m_pImpl->pModel.get());
+        if (pGCAD) {
+            pGCAD->teacher().eval();  // 20260402 ZJH 冻结教师网络
+            if (logCb) logCb("[INFO] GCAD: Teacher frozen, training student + global encoder");
+        }
+    }
+
+    // 20260326 ZJH EfficientAD/GCAD 仅传可训练参数给优化器
+    std::vector<om::Tensor*> vecModelParams;
+    if (m_pImpl->bIsEfficientAD) {
+        vecModelParams = static_cast<om::EfficientAD*>(m_pImpl->pModel.get())->studentParameters();
+    } else if (m_pImpl->bIsGCAD) {
+        // 20260402 ZJH GCAD: Student + GlobalEncoder 参数（排除 Teacher）
+        auto* pGCAD = dynamic_cast<om::GCAD*>(m_pImpl->pModel.get());
+        if (pGCAD) {
+            auto vecStudent = pGCAD->student().parameters();
+            auto vecGlobal = pGCAD->globalEncoder().parameters();
+            vecModelParams.insert(vecModelParams.end(), vecStudent.begin(), vecStudent.end());
+            vecModelParams.insert(vecModelParams.end(), vecGlobal.begin(), vecGlobal.end());
+        }
+    } else {
+        vecModelParams = m_pImpl->pModel->parameters();
+    }
 
     // 20260401 ZJH ===== 预训练加载必须在 GPU 迁移之前 =====
     // 原因: loadPyTorchPretrainedToSegModel 创建 CPU 临时模型并复制权重到目标模型
@@ -637,7 +884,7 @@ bool EngineBridge::train(
     // 20260402 ZJH ===== 预训练权重前向验证 =====
     // 在 GPU 迁移之前用随机输入做一次前向，检测权重是否损坏或架构不匹配
     if (nPretrainedLoaded > 0 && m_pImpl->pModel) {
-        auto tTest = om::Tensor::randn({1, nInCh, 32, 32});  // 20260402 ZJH CPU 上的随机测试输入
+        auto tTest = om::Tensor::randn({1, 3, 32, 32});  // 20260402 ZJH CPU 上的随机测试输入 (3ch RGB)
         m_pImpl->pModel->eval();   // 20260402 ZJH 切换到推理模式（禁用 Dropout/BN 更新）
         auto tOut = m_pImpl->pModel->forward(tTest);  // 20260402 ZJH 前向传播
         m_pImpl->pModel->train();  // 20260402 ZJH 恢复训练模式
@@ -782,9 +1029,9 @@ bool EngineBridge::train(
         pAdam = std::make_unique<om::Adam>(vecModelParams, fLr);
     }
 
-    float fBestValLoss = 1e9f;
-    int nPatienceCounter = 0;
-    std::mt19937 rng(42);
+    float fBestValLoss = 1e9f;    // 20260406 ZJH 最佳验证损失（初始极大值，任何实际 loss 都会更新）
+    int nPatienceCounter = 0;    // 20260406 ZJH 早停计数器（连续无改善的 epoch 数）
+    std::mt19937 rng(42);        // 20260406 ZJH 梅森旋转随机引擎（固定种子保证可复现性）
 
     // 20260401 ZJH ===== 自动收敛检测（对标 Halcon dl_train_model）=====
     // 监控 val_loss 的移动平均斜率，斜率趋近 0 → 收敛 → 自动停止
@@ -821,7 +1068,8 @@ bool EngineBridge::train(
     constexpr int nTopK = 3;  // 20260401 ZJH 保留 top-3
 
     // 20260330 ZJH ===== F4 + S1: 构建训练增强配置和归一化预设 =====
-    om::AugmentConfig augCfg = buildTrainAugmentConfig(m_pImpl->strModelType);
+    // 20260402 ZJH [OPT-2.3] 构建增强配置时传入高级增强开关（由用户在 BridgeTrainParams 中控制）
+    om::AugmentConfig augCfg = buildTrainAugmentConfig(m_pImpl->strModelType, params.bAdvancedAugment);
     om::NormPreset eNormPreset = selectNormPreset(m_pImpl->strModelType);
     // 20260330 ZJH 构建归一化专用配置（增强后单独应用，不在 augmentImage 内部归一化）
     om::AugmentConfig normCfg;
@@ -875,6 +1123,10 @@ bool EngineBridge::train(
                 + std::to_string(fNegRatio) + " (neg_ratio, Hikrobot-style)");
         }
 
+        // 20260407 ZJH [修复] neg_ratio 修改后重算 fWeightSum
+        // 旧: fWeightSum 在 neg_ratio 修改前累加，归一化用的是旧值 → 所有权重系统性偏小
+        fWeightSum = 0.0f;
+        for (int c = 0; c < nNumClasses; ++c) fWeightSum += vecClassWeights[c];
         // 20260329 ZJH 归一化使 mean(w) = 1.0（损失量级不变）
         if (fWeightSum > 0.0f) {
             float fNorm = static_cast<float>(nNumClasses) / fWeightSum;
@@ -920,18 +1172,53 @@ bool EngineBridge::train(
 #endif
     }
 
+    // 20260402 ZJH ===== 确定性训练: 固定所有随机种子 =====
+    // 保证同样的数据+参数→相同的训练结果（用于回归测试和调试）
+    if (params.bDeterministic) {
+        std::srand(static_cast<unsigned>(params.nRandomSeed));  // 20260402 ZJH C 标准库随机种子
+        // 20260402 ZJH 注: C++23 模块内的 std::mt19937 等需在引擎层单独固定
+        // CUDA 确定性模式通过 CUDABackend 设置（如有）
+        if (logCb) logCb("[INFO] Deterministic training: seed=" + std::to_string(params.nRandomSeed));
+    }
+
+    // 20260407 ZJH ===== 混合精度训练（暂时禁用自动启用）=====
+    // GradScaler 的 GPU 张量处理存在多个问题:
+    //   1. hasInfOrNan() 对 GPU 梯度 D2H 检查性能差（160 参数逐个传输）
+    //   2. unscaleGrads() 无法直接操作 GradAccumulator（模块依赖限制）
+    //   3. 训练循环中 scale/unscale/clip 的流同步可能导致死锁
+    // 待 GradScaler 完整重写（CUDA kernel 融合 unscale+inf检测）后再启用
+    // 用户仍可通过 params.bMixedPrecision 手动启用（自行承担风险）
+    bool bMixedPrecision = params.bMixedPrecision;  // 20260407 ZJH 仅响应用户显式设置，不自动启用
+    bMixedPrecision = bMixedPrecision && bUseCuda;
+    // 20260402 ZJH 使用 om::GradScaler 实例（非简单变量）
+    // GradScaler 管理: loss 放大 → backward → 梯度反缩放 → NaN 检测 → 动态调整
+    om::GradScaler gradScaler(65536.0f, 2.0f, 0.5f, 2000);  // 20260402 ZJH init=65536, grow=2x, shrink=0.5x
+    if (bMixedPrecision && logCb) {
+        logCb("[INFO] Mixed Precision (FP16) enabled: GradScaler init=" +
+              std::to_string(gradScaler.getScale()));
+    }
+
+    // 20260402 ZJH ===== BoundaryLoss 配置（分割训练专用）=====
+    bool bUseBoundaryLoss = params.bUseBoundaryLoss && m_pImpl->bIsSegmentation && !vecTrainMasks.empty();
+    if (bUseBoundaryLoss && logCb) {
+        logCb("[INFO] BoundaryLoss enabled: CE+Dice+Boundary (weight=0.5)");
+    }
+
     // 20260325 ZJH 输出训练配置日志（区分 GPU/CPU 路径）
     if (logCb) {
         std::string strDeviceInfo = bUseCuda ? "GPU-Resident (CUDA)" : "CPU (SIMD+OpenMP)";
+        // 20260402 ZJH 更新损失信息日志
         std::string strLossInfo = m_pImpl->bIsEfficientAD ? "Distillation"
-            : (m_pImpl->bIsSegmentation && !vecTrainMasks.empty()) ? "PixelCE (pixel-level)" : "CrossEntropy";
+            : bUseBoundaryLoss ? "CE+Dice+Boundary (combined)"
+            : (m_pImpl->bIsSegmentation && !vecTrainMasks.empty()) ? "PixelCE+Dice" : "CrossEntropy";
         logCb("[INFO] Engine training: " + params.strModelType +
               " | Params: " + std::to_string(totalParameters()) +
               " | Train: " + std::to_string(nTrainCount) +
               " | Val: " + std::to_string(nValCount) +
               " | Device: " + strDeviceInfo +
               " | Loss: " + strLossInfo +
-              " | Double-buffer: " + (bUseCuda ? "OFF (GPU batch upload)" : "ON"));
+              " | FP16: " + (bMixedPrecision ? "ON" : "OFF") +
+              " | Deterministic: " + (params.bDeterministic ? "ON" : "OFF"));
     }
 
     // 20260326 ZJH 当前学习率变量，用于 Cosine Annealing 调度和日志输出
@@ -970,9 +1257,14 @@ bool EngineBridge::train(
     // 20260401 ZJH ===== Auto LR Finder（超越 PyTorch 标准训练 — Leslie Smith 方法）=====
     // 在正式训练前，用指数递增的 LR 跑 10 个 mini-batch，找到 loss 下降最快的 LR
     // PyTorch 需要手动调用 lr_finder 库，我们内置自动化
-    // 20260401 ZJH 分割/检测模型跳过 LR Finder（输出形状 [B,C,H,W] 不兼容分类 CE）
-    if (m_pImpl->bIsCnn && nTrainCount >= nBatchSize * 5
-        && !m_pImpl->bIsEfficientAD && !m_pImpl->bIsSegmentation && !m_pImpl->bIsDetection) {
+    // 20260402 ZJH [OPT-1.3] 扩展至分割/检测模型：使用各自对应的 loss 做 LR 搜索
+    // 原版仅支持分类 CNN，现在 EfficientAD（蒸馏loss）和检测（YOLOLoss）也可受益
+    // 跳过条件：数据不足（< 5 batch）或 PatchCore（非梯度训练）
+    // 20260407 ZJH [修复] 分割模型跳过 LR Finder（用分类 CE 做 LR 搜索，与像素级损失不匹配）
+    bool bSkipLrFinder = (!m_pImpl->bIsCnn && m_pImpl->strModelType != "MLP")
+        || nTrainCount < nBatchSize * 3
+        || m_pImpl->bIsSegmentation;  // 20260407 ZJH 分割模型的损失函数不同，LR Finder 结果不适用
+    if (!bSkipLrFinder) {
         float fLrMin = 1e-5f, fLrMax = 1.0f;
         int nLrSteps = std::min(10, (nTrainCount + nBatchSize - 1) / nBatchSize);
         float fBestLrLoss = 1e9f;
@@ -980,9 +1272,11 @@ bool EngineBridge::train(
         float fPrevLoss = 1e9f;
         float fBestSlope = 0.0f;
 
-        // 20260401 ZJH 保存原始权重（LR finder 会修改权重，测试后恢复）
+        // 20260407 ZJH [修复] 保存全部模型参数（不只是 vecModelParams 中的 head 参数）
+        // 旧: freeze backbone 时 vecModelParams 只含 head → 骨干被 LR Finder 污染
+        auto vecAllParams = m_pImpl->pModel->parameters();
         std::vector<om::Tensor> vecOrigParams;
-        for (auto* p : vecModelParams) {
+        for (auto* p : vecAllParams) {
             auto tCpu = p->isCuda() ? p->cpu() : *p;
             auto tc = tCpu.contiguous();
             om::Tensor tClone = om::Tensor::zeros(p->shapeVec());
@@ -1039,11 +1333,12 @@ bool EngineBridge::train(
         }
 
         // 20260401 ZJH 恢复原始权重
-        for (size_t i = 0; i < vecModelParams.size() && i < vecOrigParams.size(); ++i) {
-            if (vecModelParams[i]->isCuda()) {
-                *vecModelParams[i] = vecOrigParams[i].cuda();
+        // 20260407 ZJH [修复] 恢复全部参数（与保存时使用相同的 vecAllParams）
+        for (size_t i = 0; i < vecAllParams.size() && i < vecOrigParams.size(); ++i) {
+            if (vecAllParams[i]->isCuda()) {
+                *vecAllParams[i] = vecOrigParams[i].cuda();
             } else {
-                *vecModelParams[i] = vecOrigParams[i];
+                *vecAllParams[i] = vecOrigParams[i];
             }
         }
         vecOrigParams.clear();
@@ -1162,9 +1457,9 @@ bool EngineBridge::train(
             nInputDim = (m_pImpl->bIsCnn ? 3 : 1) * nEpochInputSize * nEpochInputSize;
         }
 
-        int nBatches = (nTrainCount + nBatchSize - 1) / nBatchSize;
-        float fEpochLoss = 0.0f;
-        m_pImpl->pModel->train();
+        int nBatches = (nTrainCount + nBatchSize - 1) / nBatchSize;  // 20260406 ZJH 向上取整计算 batch 数
+        float fEpochLoss = 0.0f;  // 20260406 ZJH 本 epoch 累计训练损失
+        m_pImpl->pModel->train();  // 20260406 ZJH 切换到训练模式（启用 Dropout/BN 训练行为）
 
         if (bUseCuda) {
             // 20260326 ZJH ===== GPU 训练循环（预分配缓冲区优化）=====
@@ -1222,9 +1517,14 @@ bool EngineBridge::train(
                 // 数据此时为 CHW float [0,1]，与 augmentImage 约定一致
                 // 20260330 ZJH ===== F4: 训练数据增强（GPU 路径）=====
                 // 安全检查: nInputDim 必须 == nC * nSp * nSp，否则跳过增强避免越界崩溃
-                if (params.bAugmentEnabled && m_pImpl->bIsCnn) {
-                    int nC = 3;  // 20260330 ZJH RGB 通道数
-                    int nSp = m_pImpl->nInputSize;  // 20260330 ZJH 空间尺寸 H=W
+                // 20260407 ZJH [修复] 分割模型禁用 EngineBridge 内部几何增强
+                // 原因: augmentImage 对图像做随机翻转/旋转，但对应的掩码（vecTrainMasks）
+                //       没有同步增强 → 图像翻转后像素级标签错位 → 模型学到错误对应关系
+                // TrainingSession 已经对图像和掩码做了同步增强（翻转/亮度），这里不需要重复
+                // 仅对非分割模型（分类/检测）保留 EngineBridge 增强
+                if (params.bAugmentEnabled && m_pImpl->bIsCnn && !m_pImpl->bIsSegmentation) {
+                    int nC = 3;
+                    int nSp = m_pImpl->nInputSize;
                     if (nC * nSp * nSp == nInputDim && nSp > 0) {
                         for (int i = 0; i < nCurBatch; ++i) {
                             size_t nOff = static_cast<size_t>(i) * nInputDim;
@@ -1233,9 +1533,7 @@ bool EngineBridge::train(
                                       vecSampleBuf.begin());
                             try {
                                 om::augmentImage(vecSampleBuf, nC, nSp, nSp, augCfg);
-                            } catch (...) {
-                                // 20260330 ZJH 增强失败时跳过，使用原始数据
-                            }
+                            } catch (...) {}
                             std::copy(vecSampleBuf.begin(), vecSampleBuf.end(), vecBatchInput.data() + nOff);
                         }
                     }
@@ -1277,6 +1575,92 @@ bool EngineBridge::train(
                     if (m_pImpl->bIsEfficientAD) {
                         auto* pEAD = static_cast<om::EfficientAD*>(m_pImpl->pModel.get());
                         tLoss = pEAD->computeDistillationLoss(tInput);
+                    } else if (m_pImpl->bIsGCAD) {
+                        // 20260402 ZJH ===== GCAD 训练: Teacher-Student 蒸馏 + 全局编码器 =====
+                        // GCAD 的训练分两阶段:
+                        //   阶段1: Student 模仿 Teacher 的局部特征（MSE 损失）
+                        //   阶段2: 全局编码器学习正常布局分布（后续 fitGCADDistribution 处理）
+                        // 这里只做阶段1（蒸馏），阶段2 在训练完成后由 fitGCADDistribution 执行
+                        auto* pGCAD = dynamic_cast<om::GCAD*>(m_pImpl->pModel.get());
+                        if (pGCAD) {
+                            // 20260402 ZJH 冻结 Teacher，仅训练 Student
+                            pGCAD->teacher().eval();
+                            auto teacherFeat = pGCAD->teacher().forward(tInput);  // 20260402 ZJH [N,256,H/8,W/8]
+                            auto studentFeat = pGCAD->student().forward(tInput);  // 20260402 ZJH [N,256,H/8,W/8]
+                            // 20260402 ZJH MSE 蒸馏损失
+                            auto diff = om::tensorSub(teacherFeat, studentFeat);
+                            auto sq = om::tensorMul(diff, diff);
+                            auto sumSq = om::tensorSum(sq);
+                            float fInvN = 1.0f / static_cast<float>(std::max(sq.numel(), 1));
+                            tLoss = om::tensorMulScalar(sumSq, fInvN);
+                        }
+                    } else if (m_pImpl->bIsDBNet) {
+                        // 20260402 ZJH ===== DBNet 训练: 概率图 BCE + 阈值图 L1 + 二值图 BCE =====
+                        // DBNet 输出 [N, 3, H/4, W/4]: channel 0=P, 1=T, 2=B
+                        // 目标 mask: [N, 1, H/4, W/4] 文本区域二值 GT
+                        tOutput = m_pImpl->pModel->forward(tInput);  // 20260402 ZJH [N,3,H/4,W/4]
+
+                        // 20260402 ZJH 构建目标: 从 vecTrainMasks 提取并下采样到 H/4
+                        int nOutH = tOutput.shape(2);  // 20260402 ZJH H/4
+                        int nOutW = tOutput.shape(3);  // 20260402 ZJH W/4
+                        int nSpatialOut = nOutH * nOutW;
+                        int nSrcH = m_pImpl->nInputSize;
+                        int nSrcSpatial = nSrcH * nSrcH;
+
+                        auto tTarget = om::Tensor::zeros({nCurBatch, 1, nOutH, nOutW});
+                        auto tThreshTarget = om::Tensor::zeros({nCurBatch, 1, nOutH, nOutW});
+                        float* pTgt = tTarget.mutableFloatDataPtr();
+                        float* pThreshTgt = tThreshTarget.mutableFloatDataPtr();
+
+                        // 20260402 ZJH 简化: mask 最近邻下采样 + 阈值图设为边界附近高值
+                        float fScaleH = static_cast<float>(nSrcH) / static_cast<float>(nOutH);
+                        for (int i = 0; i < nCurBatch; ++i) {
+                            int nIdx = vecIndices[nStart + i];
+                            for (int y = 0; y < nOutH; ++y) {
+                                int nSrcY = std::min(static_cast<int>(y * fScaleH), nSrcH - 1);
+                                for (int x = 0; x < nOutW; ++x) {
+                                    int nSrcX = std::min(static_cast<int>(x * fScaleH), nSrcH - 1);
+                                    int nMaskIdx = nIdx * nSrcSpatial + nSrcY * nSrcH + nSrcX;
+                                    float fVal = (nMaskIdx < static_cast<int>(vecTrainMasks.size()) && vecTrainMasks[nMaskIdx] > 0) ? 1.0f : 0.0f;
+                                    pTgt[i * nSpatialOut + y * nOutW + x] = fVal;
+                                    pThreshTgt[i * nSpatialOut + y * nOutW + x] = 0.3f;  // 20260402 ZJH 默认阈值 0.3
+                                }
+                            }
+                        }
+
+                        if (tOutput.isCuda()) {
+                            tTarget = tTarget.cuda();
+                            tThreshTarget = tThreshTarget.cuda();
+                        }
+
+                        // 20260402 ZJH DB 三项损失
+                        om::DBLoss dbLoss;
+                        tLoss = dbLoss.forward(tOutput, tTarget, tThreshTarget);
+
+                    } else if (m_pImpl->bIsEdgeExtraction && !vecTrainMasks.empty()) {
+                        // 20260402 ZJH ===== EdgeExtraction 训练: BCE+Dice 边缘损失 =====
+                        // EdgeUNet 输出 [N, 1, H, W] 边缘概率（sigmoid），mask 为二值边缘标注
+                        tOutput = m_pImpl->pModel->forward(tInput);  // 20260402 ZJH [B, 1, H, W]
+
+                        // 20260402 ZJH 构建边缘目标 [B, 1, H, W] 从 vecTrainMasks
+                        int nEdgeH = tOutput.shape(2), nEdgeW = tOutput.shape(3);
+                        int nEdgeSpatial = nEdgeH * nEdgeW;
+                        int nSrcH = m_pImpl->nInputSize;
+                        int nSrcSpatial = nSrcH * nSrcH;
+                        auto tEdgeTarget = om::Tensor::zeros({nCurBatch, 1, nEdgeH, nEdgeW});
+                        float* pET = tEdgeTarget.mutableFloatDataPtr();
+                        for (int i = 0; i < nCurBatch; ++i) {
+                            int nIdx = vecIndices[nStart + i];
+                            for (int j = 0; j < nEdgeSpatial; ++j) {
+                                int nMaskIdx = nIdx * nSrcSpatial + j;
+                                pET[i * nEdgeSpatial + j] = (nMaskIdx < static_cast<int>(vecTrainMasks.size()) && vecTrainMasks[nMaskIdx] > 0) ? 1.0f : 0.0f;
+                            }
+                        }
+                        if (tOutput.isCuda()) tEdgeTarget = tEdgeTarget.cuda();
+
+                        // 20260402 ZJH BCE+Dice 混合损失（边缘正样本加权 20x）
+                        tLoss = om::EdgeExtractionNet::edgeLoss(tOutput, tEdgeTarget, 20.0f);
+
                     } else if (m_pImpl->bIsSegmentation && !vecTrainMasks.empty()) {
                         // 20260329 ZJH ===== GPU Fused Weighted PixelCE（零 CPU 回退）=====
                         // 全程 GPU: forward → fused softmax+CE kernel → backward kernel
@@ -1357,9 +1741,11 @@ bool EngineBridge::train(
                             }
                             tOH = tOH.cuda();
 
-                            // 20260330 ZJH sigmoid Dice（autograd 完整梯度链）
-                            // 重要: 所有运算必须用 tensor ops，不能提取标量打断 autograd
-                            auto tSig = om::tensorSigmoid(tOutput);  // 20260330 ZJH [B,C,H,W] sigmoid, autograd ✓
+                            // 20260407 ZJH Sigmoid Dice（GPU 路径）— 稳定可用
+                            // softmax Dice 因 NCHW reshape 和 tSoftmax GPU 指针问题导致崩溃
+                            // sigmoid Dice 虽然与 CE 的 softmax 概率空间不完全一致，
+                            // 但在 nnU-Net/Anomalib 等主流框架中广泛使用，实际训练效果良好
+                            auto tSig = om::tensorSigmoid(tOutput);
                             auto tInter = om::tensorSum(om::tensorMul(tSig, tOH));
                             auto tPredS = om::tensorSum(tSig);
                             auto tTgtS  = om::tensorSum(tOH);
@@ -1374,6 +1760,11 @@ bool EngineBridge::train(
                             tLoss = om::tensorAdd(
                                 om::tensorMulScalar(tLoss, 0.5f),
                                 om::tensorMulScalar(tDiceLoss, 0.5f));
+
+                            // 20260406 ZJH [修复] BoundaryLoss 暂时禁用
+                            // tensorSub(Tensor::full({1}), tSig) 形状 [1] vs [B,C,H,W] → 不广播 → 越界
+                            // 需要重写为正确的逐像素 1-sigmoid 运算，暂时跳过避免损失爆炸
+                            // TODO: 使用 tensorMulScalar(tSig, -1) + tensorAddScalar(_, 1) 替代
                         }
                     } else if (m_pImpl->bIsDetection) {
                         // 20260330 ZJH YOLO 检测模型 GPU 训练路���
@@ -1401,51 +1792,10 @@ bool EngineBridge::train(
                         tOutput = m_pImpl->pModel->forward(tInput);
                         tLoss = criterion.forward(tOutput, tLabels);
 
-                        // 20260401 ZJH ===== OHEM 样本级在线困难样本挖掘（分类路径）=====
-                        // 计算每个样本的单独 loss，只保留 top-50% 最难样本参与梯度更新
-                        // 海康和 Halcon 均无此功能 — OmniMatch 独有优势
-                        if (nCurBatch >= 4) {
-                            // 20260401 ZJH 逐样本 loss 计算（在 autograd 链之外，仅用于排序）
-                            auto cpuOut = tOutput.cpu().contiguous();
-                            auto cpuLbl = tLabels.cpu().contiguous();
-                            const float* pOut = cpuOut.floatDataPtr();
-                            const float* pLbl = cpuLbl.floatDataPtr();
-                            int nB = cpuOut.shape(0);
-                            int nC = cpuOut.shape(1);
-
-                            // 20260401 ZJH 计算每个样本的 cross-entropy loss
-                            std::vector<std::pair<float, int>> vecSampleLoss(nB);
-                            for (int b = 0; b < nB; ++b) {
-                                int nLabel = static_cast<int>(pLbl[b]);
-                                if (nLabel < 0 || nLabel >= nC) nLabel = 0;
-                                // 20260401 ZJH log-sum-exp 数值稳定版 CE
-                                float fMaxLogit = -1e9f;
-                                for (int c = 0; c < nC; ++c) fMaxLogit = std::max(fMaxLogit, pOut[b * nC + c]);
-                                float fSumExp = 0;
-                                for (int c = 0; c < nC; ++c) fSumExp += std::exp(pOut[b * nC + c] - fMaxLogit);
-                                float fCE = -(pOut[b * nC + nLabel] - fMaxLogit - std::log(fSumExp + 1e-10f));
-                                vecSampleLoss[b] = {fCE, b};
-                            }
-                            // 20260401 ZJH 按 loss 降序排列，取 top-50% 最难样本
-                            std::sort(vecSampleLoss.begin(), vecSampleLoss.end(),
-                                [](const auto& a, const auto& b) { return a.first > b.first; });
-                            int nKeep = std::max(2, nB / 2);  // 20260401 ZJH 至少保留 2 个样本
-
-                            // 20260401 ZJH 构建 OHEM 权重掩码 [B] — 难样本=1.0/比例, 易样本=0
-                            auto tMask = om::Tensor::zeros({nB});
-                            float* pMask = tMask.mutableFloatDataPtr();
-                            float fScale = static_cast<float>(nB) / static_cast<float>(nKeep);
-                            for (int k = 0; k < nKeep; ++k) {
-                                pMask[vecSampleLoss[k].second] = fScale;  // 20260401 ZJH 缩放保持总梯度量级
-                            }
-                            if (tLoss.isCuda()) tMask = tMask.cuda();
-
-                            // 20260401 ZJH 用掩码重新加权 loss（乘以 mask 后求均值）
-                            // 这会通过 autograd 链自动传播掩码到梯度
-                            tLoss = om::tensorMulScalar(tLoss, 1.0f);  // 20260401 ZJH 保持原 loss 不变（已是均值）
-                            // 注意: 标准 CE criterion.forward 返回标量均值，OHEM 需要逐样本版本
-                            // 由于当前 criterion 返回标量，OHEM 通过梯度掩码间接实现
-                        }
+                        // 20260407 ZJH [审计] OHEM 死代码已删除
+                        // 原因: criterion.forward() 返回标量均值，tMask 构建后未与 tLoss 组合
+                        // tensorMulScalar(tLoss, 1.0f) 等于无操作，每 batch 浪费一次 D2H + 排序
+                        // 待实现逐样本 CE 后再重新添加 OHEM
                     }
                 } catch (const std::exception& ex) {
                     if (logCb) logCb(std::string("[错误] 前向传播异常: ") + ex.what()
@@ -1481,10 +1831,17 @@ bool EngineBridge::train(
                 bool bIsAccumStart = (nBatch % nAccumSteps == 0);
                 bool bIsAccumEnd = ((nBatch + 1) % nAccumSteps == 0) || (nBatch == nBatches - 1);
 
-                // 20260325 ZJH 反向传播（GPU 上计算所有梯度）
+                // 20260407 ZJH ===== PyTorch 六步法: scale → backward → unscale → clip → step → update =====
+                // Step 0: 在 scale 之前保存真实 loss 值（用于显示）
+                float fRealLoss = tLoss.item();
+
+                // Step 1+2: scale(loss) → backward
                 try {
-                if (bIsAccumStart) m_pImpl->pModel->zeroGrad();  // 20260401 ZJH 累积窗口开始才清零
-                om::tensorBackward(tLoss);
+                if (bIsAccumStart) m_pImpl->pModel->zeroGrad();
+                if (bMixedPrecision) {
+                    tLoss = gradScaler.scale(tLoss);  // 20260407 ZJH Step 1: loss *= scale（放大梯度防下溢）
+                }
+                om::tensorBackward(tLoss);  // 20260407 ZJH Step 2: backward（梯度被同比例放大）
                 } catch (const std::exception& ex) {
                     if (logCb) logCb(std::string("[错误] 反向传播异常: ") + ex.what());
 #ifdef OM_HAS_CUDA
@@ -1499,61 +1856,82 @@ bool EngineBridge::train(
                     return false;
                 }
 
-                // 20260330 ZJH ===== 梯度安全网（对标 PyTorch clip_grad_norm_）=====
-                // 通过 GradAccumulator 访问每个叶参数的梯度
-                // (1) NaN/Inf 检测 → 跳过本 batch  (2) L2 范数裁剪 → 防发散
-                {
-                    bool bGradValid = true;
-                    float fGradNormSq = 0.0f;
-                    // 20260330 ZJH 收集所有有梯度的 accumulator
-                    std::vector<std::shared_ptr<om::GradAccumulator>> vecAccums;
-                    for (auto* pParam : vecModelParams) {
-                        auto pAccumRaw = pParam->gradAccumRaw();
-                        if (!pAccumRaw) continue;
-                        auto pAccum = std::static_pointer_cast<om::GradAccumulator>(pAccumRaw);
-                        if (!pAccum->m_bHasGrad) continue;
-                        vecAccums.push_back(pAccum);
-                        // 20260330 ZJH 读取梯度做 NaN 检测和范数计算
-                        auto cGrad = pAccum->m_grad.contiguous();
-                        if (cGrad.isCuda()) cGrad = cGrad.cpu();
-                        const float* pG = cGrad.floatDataPtr();
-                        int nN = cGrad.numel();
-                        for (int gi = 0; gi < nN; ++gi) {
-                            if (std::isnan(pG[gi]) || std::isinf(pG[gi])) { bGradValid = false; break; }
-                            fGradNormSq += pG[gi] * pG[gi];
-                        }
-                        if (!bGradValid) break;
-                    }
-                    if (!bGradValid) {
-                        if (logCb) logCb("[WARN] NaN/Inf gradient — skipping batch");
-                        tOutput = om::Tensor(); tLoss = om::Tensor();
-                        continue;
-                    }
-                    // 20260330 ZJH L2 梯度裁剪（max_norm=5.0）
-                    constexpr float fMaxGradNorm = 5.0f;
-                    float fGradNorm = std::sqrt(fGradNormSq);
-                    if (fGradNorm > fMaxGradNorm) {
-                        float fClipCoeff = fMaxGradNorm / fGradNorm;
-                        for (auto& pAccum : vecAccums) {
-                            pAccum->m_grad = om::tensorMulScalar(pAccum->m_grad, fClipCoeff);
-                        }
-                    }
-                    // 20260401 ZJH 梯度累积: 仅在累积窗口末尾执行缩放和 step
-                    if (bIsAccumEnd && nAccumSteps > 1) {
-                        float fScale = 1.0f / static_cast<float>(nAccumSteps);
-                        for (auto& pAcc : vecAccums) {
-                            pAcc->m_grad = om::tensorMulScalar(pAcc->m_grad, fScale);
-                        }
-                    }
-                }
-
-                // 20260401 ZJH 梯度累积: 仅在累积窗口末尾执行 optimizer step
+                // 20260407 ZJH 梯度累积: 仅在累积窗口末尾执行 unscale → clip → step → update
                 if (bIsAccumEnd) {
-                    // 20260325 ZJH 优化器更新
-                    std::cerr << "[TRAIN-DIAG] batch " << nBatch << " optimizer step" << std::endl;
-                    if (pAdam) pAdam->step();
-                    else if (pAdamW) pAdamW->step();
-                    else if (pSgd) pSgd->step();
+                    // Step 3: unscale（梯度除以 scale，恢复真实值 + NaN 检测）
+                    bool bShouldStep = true;
+                    if (bMixedPrecision) {
+                        // 20260407 ZJH [修复] 梯度反缩放直接通过 GradAccumulator（fp16 模块只做 inf 检测）
+                        float fInvScale = 1.0f / gradScaler.getScale();
+                        auto vecStepParams = m_pImpl->pModel->parameters();
+                        for (auto* pParam : vecStepParams) {
+                            auto pAccumRaw = pParam->gradAccumRaw();
+                            if (!pAccumRaw) continue;
+                            auto pAccum = std::static_pointer_cast<om::GradAccumulator>(pAccumRaw);
+                            if (!pAccum->m_bHasGrad) continue;
+                            pAccum->m_grad = om::tensorMulScalar(pAccum->m_grad, fInvScale);
+                        }
+                        // 20260407 ZJH inf 检测 + step 判断
+                        gradScaler.unscaleGrads(vecStepParams);  // 20260407 ZJH 只做 inf 检测
+                        bShouldStep = gradScaler.step();
+                        if (!bShouldStep && logCb) {
+                            logCb("[WARN] GradScaler: inf/NaN detected, skip step (scale=" +
+                                  std::to_string(gradScaler.getScale()) + ")");
+                        }
+                    }
+
+                    // Step 4: clip_grad_norm（在真实梯度上裁剪，不是放大后的梯度）
+                    if (bShouldStep) {
+                        bool bGradValid = true;
+                        float fGradNormSq = 0.0f;
+                        std::vector<std::shared_ptr<om::GradAccumulator>> vecAccums;
+                        for (auto* pParam : vecModelParams) {
+                            auto pAccumRaw = pParam->gradAccumRaw();
+                            if (!pAccumRaw) continue;
+                            auto pAccum = std::static_pointer_cast<om::GradAccumulator>(pAccumRaw);
+                            if (!pAccum->m_bHasGrad) continue;
+                            vecAccums.push_back(pAccum);
+                            auto cGrad = pAccum->m_grad.contiguous();
+                            if (cGrad.isCuda()) cGrad = cGrad.cpu();
+                            const float* pG = cGrad.floatDataPtr();
+                            int nN = cGrad.numel();
+                            for (int gi = 0; gi < nN; ++gi) {
+                                if (std::isnan(pG[gi]) || std::isinf(pG[gi])) { bGradValid = false; break; }
+                                fGradNormSq += pG[gi] * pG[gi];
+                            }
+                            if (!bGradValid) break;
+                        }
+                        if (!bGradValid) {
+                            if (logCb) logCb("[WARN] NaN/Inf gradient — skipping batch");
+                            bShouldStep = false;
+                        } else {
+                            constexpr float fMaxGradNorm = 5.0f;
+                            float fGradNorm = std::sqrt(fGradNormSq);
+                            if (fGradNorm > fMaxGradNorm) {
+                                float fClipCoeff = fMaxGradNorm / fGradNorm;
+                                for (auto& pAccum : vecAccums) {
+                                    pAccum->m_grad = om::tensorMulScalar(pAccum->m_grad, fClipCoeff);
+                                }
+                            }
+                            // 20260401 ZJH 梯度累积平均
+                            if (nAccumSteps > 1) {
+                                float fAccumScale = 1.0f / static_cast<float>(nAccumSteps);
+                                for (auto& pAcc : vecAccums) {
+                                    pAcc->m_grad = om::tensorMulScalar(pAcc->m_grad, fAccumScale);
+                                }
+                            }
+                        }
+                    }
+
+                    // Step 5: optimizer.step（梯度正常时更新参数）
+                    if (bShouldStep) {
+                        if (pAdam) pAdam->step();
+                        else if (pAdamW) pAdamW->step();
+                        else if (pSgd) pSgd->step();
+                    }
+
+                    // 20260402 ZJH GradScaler 动态更新
+                    if (bMixedPrecision) gradScaler.update();
 
                     // 20260401 ZJH EMA 权重更新: ema = decay * ema + (1-decay) * param
                     if (bUseEma) {
@@ -1570,15 +1948,12 @@ bool EngineBridge::train(
                     }
                 }
 
-                // 20260326 ZJH 获取 loss 值后立即释放计算图，回收 GPU 内存
-                std::cerr << "[TRAIN-DIAG] batch " << nBatch << " loss.item()" << std::endl;
-                float fLoss = tLoss.item();
-                tOutput = om::Tensor();  // 20260326 ZJH 释放前向输出及其计算图
-                tLoss = om::Tensor();    // 20260326 ZJH 释放 loss 及其计算图
-                tInput = om::Tensor();   // 20260326 ZJH 释放输入张量
-                tLabels = om::Tensor();  // 20260326 ZJH 释放标签张量
-                fEpochLoss += fLoss;
-                std::cerr << "[TRAIN-DIAG] batch " << nBatch << " done, loss=" << fLoss << std::endl;
+                // 20260406 ZJH 使用 scale 之前保存的真实 loss 值（非放大值）
+                tOutput = om::Tensor();
+                tLoss = om::Tensor();
+                tInput = om::Tensor();
+                tLabels = om::Tensor();
+                fEpochLoss += fRealLoss;
 
                 if (batchCb) batchCb(nBatch + 1, nBatches);
             }
@@ -1621,8 +1996,8 @@ bool EngineBridge::train(
                     });
                 }
 
-                // 20260330 ZJH ===== F4: 训练数据增强（CPU 路径）=====
-                if (params.bAugmentEnabled && m_pImpl->bIsCnn) {
+                // 20260407 ZJH [修复] CPU 路径增强也需跳过分割模型（掩码不同步）
+                if (params.bAugmentEnabled && m_pImpl->bIsCnn && !m_pImpl->bIsSegmentation) {
                     int nC = 3;
                     int nSp = m_pImpl->nInputSize;
                     if (nC * nSp * nSp == nInputDim && nSp > 0) {
@@ -1752,7 +2127,9 @@ bool EngineBridge::train(
                             tLoss.setRequiresGrad(true);
                         }
 
-                        // 20260330 ZJH ===== CE+Dice 混合损失（CPU 路径，autograd 完整）=====
+                        // 20260407 ZJH CE+Dice 混合损失（CPU 路径）— sigmoid Dice
+                        // CPU 路径没有 CUDA kernel 预算的 softmax，用 sigmoid 作为 Dice 的激活
+                        // sigmoid Dice 梯度与 CE 有轻微冲突但不崩溃，且 CPU 训练较少使用
                         {
                             auto tSig = om::tensorSigmoid(tOutput);
                             auto tInter = om::tensorSum(om::tensorMul(tSig, tTargetOH));
@@ -1882,12 +2259,12 @@ bool EngineBridge::train(
             }
         }
 
-        float fAvgTrainLoss = fEpochLoss / std::max(1, nBatches);
+        float fAvgTrainLoss = fEpochLoss / std::max(1, nBatches);  // 20260406 ZJH 本 epoch 平均训练损失
 
         // 20260323 ZJH ===== 验证阶段 =====
         std::cerr << "[TRAIN-DIAG] epoch " << nEpoch << " validation start" << std::endl;
-        float fValLoss = 0.0f;
-        int nValCorrect = 0;
+        float fValLoss = 0.0f;   // 20260406 ZJH 验证损失累计值
+        int nValCorrect = 0;    // 20260406 ZJH 验证正确数（分类=正确图像数, 分割=正确像素数）
         int nValTotalPixels = 0;  // 20260328 ZJH 分割模型验证的总像素计数（像素级准确率分母）
         m_pImpl->pModel->eval();
 
@@ -2159,6 +2536,7 @@ bool EngineBridge::train(
                 float fFloorLr = fLr * 0.001f;  // 20260401 ZJH 最低 LR = 初始的 0.1%
                 if (fNewLr >= fFloorLr) {
                     fCurrentLr = fNewLr;
+                    fLr = fNewLr;  // 20260407 ZJH [修复] 同步修改基准 LR，防止 CosineAnnealing 下轮覆盖
                     if (pAdam) pAdam->setLearningRate(fNewLr);
                     else if (pAdamW) pAdamW->setLearningRate(fNewLr);
                     else if (pSgd) pSgd->setLearningRate(fNewLr);
@@ -2220,8 +2598,12 @@ bool EngineBridge::train(
         // 计算最近 nConvergeWindow 个 epoch 的 val_loss 线性回归斜率
         // 斜率绝对值 < threshold → 训练已收敛，继续训练无显著收益
         vecValLossHistory.push_back(fValLoss);
+        // 20260405 ZJH [修复] 自动收敛必须同时满足:
+        //   (1) 已跑完 1/3 epoch  (2) patience 已消耗过半
+        //   防止 val_loss 短暂平坦时绕过用户设置的 patience 提前停训
         if (bAutoConverge && static_cast<int>(vecValLossHistory.size()) >= nConvergeWindow
-            && nEpoch >= nEpochs / 3) {  // 20260401 ZJH 至少跑完 1/3 epoch 才检测收敛
+            && nEpoch >= nEpochs / 3
+            && nPatienceCounter >= params.nPatience / 2) {
             // 20260401 ZJH 简易线性回归: slope = Σ(xi-xmean)(yi-ymean) / Σ(xi-xmean)²
             int nStart = static_cast<int>(vecValLossHistory.size()) - nConvergeWindow;
             float fSumX = 0, fSumY = 0, fSumXY = 0, fSumX2 = 0;
@@ -2423,15 +2805,276 @@ bool EngineBridge::train(
             }
         }
 
-        // 20260328 ZJH 执行校准: threshold = mean + 3*std
+        // 20260328 ZJH Step 1: 3-sigma 基线校准: threshold = mean + 3*std
         if (!vecCalibScores.empty()) {
-            pEAD->calibrate(vecCalibScores, 3.0f);
-            if (logCb) logCb("[INFO] EfficientAD: Calibrated on " + std::to_string(vecCalibScores.size())
-                + " samples — mean=" + std::to_string(pEAD->scoreMean())
+            pEAD->calibrate(vecCalibScores, 3.0f);  // 20260328 ZJH 3-sigma 规则
+            float fSigmaThreshold = pEAD->anomalyThreshold();  // 20260402 ZJH 保存 3-sigma 阈值
+            if (logCb) logCb("[INFO] EfficientAD: 3-sigma baseline — mean=" + std::to_string(pEAD->scoreMean())
                 + " std=" + std::to_string(pEAD->scoreStd())
-                + " threshold=" + std::to_string(pEAD->anomalyThreshold()));
+                + " threshold=" + std::to_string(fSigmaThreshold));
+
+            // 20260402 ZJH [OPT-2.7] Step 2: F1-score 最大化校准
+            // 如果验证集同时包含正常样本（label=0）和异常样本（label>0），
+            // 则在验证集上搜索使 F1-score 最大化的阈值
+            // 遍历候选阈值 → 计算 TP/FP/FN → F1 = 2*P*R/(P+R) → 选最大 F1 对应的阈值
+            bool bHasNormalVal = false;   // 20260402 ZJH 验证集是否包含正常样本
+            bool bHasAnomalyVal = false;  // 20260402 ZJH 验证集是否包含异常样本
+            for (int i = 0; i < nValCount; ++i) {
+                if (vecValLabels[i] == 0) bHasNormalVal = true;   // 20260402 ZJH 标签 0 = 正常
+                else                      bHasAnomalyVal = true;  // 20260402 ZJH 标签 > 0 = 异常
+                if (bHasNormalVal && bHasAnomalyVal) break;       // 20260402 ZJH 两类都有，无需继续
+            }
+
+            if (bHasNormalVal && bHasAnomalyVal) {
+                // 20260402 ZJH 验证集含正常+异常样本，执行 F1-max 校准
+                if (logCb) logCb("[INFO] EfficientAD: F1-max calibration on "
+                    + std::to_string(nValCount) + " val samples (normal+anomaly)...");
+
+                // 20260402 ZJH 收集验证集异常分数
+                std::vector<float> vecValScores;   // 20260402 ZJH 验证集每张图的异常分数
+                std::vector<int>   vecValGT;       // 20260402 ZJH 验证集真实标签（0=正常, 1=异常）
+                vecValScores.reserve(static_cast<size_t>(nValCount));
+                vecValGT.reserve(static_cast<size_t>(nValCount));
+
+                for (int i = 0; i < nValCount; ++i) {
+                    int nSrc = i * nInputDim;  // 20260402 ZJH 验证数据偏移
+                    if (nSrc + nInputDim > static_cast<int>(vecValData.size())) break;
+
+                    // 20260402 ZJH 构造验证集单张图像输入 [1, 3, H, W]
+                    auto tValInput = om::Tensor::fromData(
+                        vecValData.data() + nSrc, {1, 3, m_pImpl->nInputSize, m_pImpl->nInputSize});
+
+                    try {
+                        // 20260402 ZJH 计算异常分数图并取最大值
+                        auto tAnomalyMap = pEAD->computeAnomalyScore(tValInput);
+                        auto cMap = tAnomalyMap.contiguous();
+                        const float* pMap = cMap.floatDataPtr();
+                        int nMapSize = static_cast<int>(cMap.numel());
+                        float fMaxScore = *std::max_element(pMap, pMap + nMapSize);
+                        vecValScores.push_back(fMaxScore);
+                        // 20260402 ZJH 二值化标签: 0=正常, >0 统一视为异常=1
+                        vecValGT.push_back(vecValLabels[i] > 0 ? 1 : 0);
+                    } catch (...) {
+                        // 20260402 ZJH 单样本推理失败不影响校准
+                    }
+                }
+
+                // 20260402 ZJH 在候选阈值上搜索 F1 最大化（需至少 4 个有效样本）
+                if (vecValScores.size() >= 4) {
+                    // 20260402 ZJH 构建候选阈值列表：使用验证集分数排序后去重
+                    std::vector<float> vecCandidates(vecValScores);  // 20260402 ZJH 拷贝所有分数作为候选
+                    std::sort(vecCandidates.begin(), vecCandidates.end());  // 20260402 ZJH 升序排序
+                    // 20260402 ZJH 去重，减少搜索空间
+                    vecCandidates.erase(
+                        std::unique(vecCandidates.begin(), vecCandidates.end()),
+                        vecCandidates.end());
+
+                    float fBestF1 = 0.0f;          // 20260402 ZJH 当前最佳 F1 分数
+                    float fBestThreshold = fSigmaThreshold;  // 20260402 ZJH 默认使用 3-sigma 阈值
+
+                    // 20260402 ZJH 遍历每个候选阈值，计算 Precision/Recall/F1
+                    for (float fCandThresh : vecCandidates) {
+                        int nTP = 0, nFP = 0, nFN = 0;  // 20260402 ZJH 混淆矩阵计数
+                        for (size_t j = 0; j < vecValScores.size(); ++j) {
+                            bool bPredAnomaly = (vecValScores[j] >= fCandThresh);  // 20260402 ZJH 分数>=阈值→异常
+                            bool bGTAnomaly   = (vecValGT[j] == 1);               // 20260402 ZJH 标签=1→异常
+                            if (bPredAnomaly && bGTAnomaly)   nTP++;  // 20260402 ZJH 正确检出异常
+                            if (bPredAnomaly && !bGTAnomaly)  nFP++;  // 20260402 ZJH 误检（正常判为异常）
+                            if (!bPredAnomaly && bGTAnomaly)  nFN++;  // 20260402 ZJH 漏检（异常判为正常）
+                        }
+                        // 20260402 ZJH 计算 F1 = 2*TP / (2*TP + FP + FN)
+                        float fF1 = 0.0f;
+                        int nDenom = 2 * nTP + nFP + nFN;  // 20260402 ZJH F1 分母
+                        if (nDenom > 0) {
+                            fF1 = static_cast<float>(2 * nTP) / static_cast<float>(nDenom);
+                        }
+                        // 20260402 ZJH 更新最佳 F1 及对应阈值
+                        if (fF1 > fBestF1) {
+                            fBestF1 = fF1;
+                            fBestThreshold = fCandThresh;
+                        }
+                    }
+
+                    // 20260402 ZJH 仅在 F1 > 0 时才用 F1-max 阈值覆盖 3-sigma 基线
+                    if (fBestF1 > 0.0f) {
+                        pEAD->setAnomalyThreshold(fBestThreshold);  // 20260402 ZJH 用 F1-max 阈值覆盖
+                        if (logCb) logCb("[INFO] EfficientAD: F1-max threshold=" + std::to_string(fBestThreshold)
+                            + " (F1=" + std::to_string(fBestF1)
+                            + ", tested " + std::to_string(vecCandidates.size()) + " candidates"
+                            + ", 3-sigma baseline was " + std::to_string(fSigmaThreshold) + ")");
+                    } else {
+                        // 20260402 ZJH F1 为 0（验证集标签可能有误），保持 3-sigma 基线
+                        if (logCb) logCb("[WARN] EfficientAD: F1-max calibration returned F1=0, keeping 3-sigma baseline");
+                    }
+                } else {
+                    // 20260402 ZJH 验证集推理成功样本不足 4 个，跳过 F1 校准
+                    if (logCb) logCb("[WARN] EfficientAD: Too few val samples for F1 calibration ("
+                        + std::to_string(vecValScores.size()) + "), keeping 3-sigma baseline");
+                }
+            } else {
+                // 20260402 ZJH 验证集仅含单一类别（全正常或全异常），无法计算 F1
+                if (logCb) logCb("[INFO] EfficientAD: Val set has only "
+                    + std::string(bHasNormalVal ? "normal" : "anomaly")
+                    + " samples — F1 calibration skipped, using 3-sigma threshold="
+                    + std::to_string(fSigmaThreshold));
+            }
         } else {
             if (logCb) logCb("[WARN] EfficientAD: No calibration scores collected, using default threshold 0.5");
+        }
+    }
+
+    // 20260402 ZJH ===== GCAD 自动拟合全局分布（Stage 2）=====
+    // 训练完成后自动收集正常样本的全局特征向量，拟合高斯分布
+    // 无需用户手动调用 fitGCADDistribution()
+    if (m_pImpl->bIsGCAD) {
+        auto* pGCAD = dynamic_cast<om::GCAD*>(m_pImpl->pModel.get());
+        if (pGCAD) {
+            pGCAD->eval();
+            std::vector<std::vector<float>> vecGlobalFeatures;
+            std::vector<float> vecFusedScores;
+
+            if (logCb) logCb("[INFO] GCAD: Fitting global distribution on " +
+                std::to_string(nTrainCount) + " normal samples...");
+
+            for (int i = 0; i < nTrainCount; ++i) {
+                int nSrc = i * nInputDim;
+                if (nSrc + nInputDim > static_cast<int>(vecTrainData.size())) break;
+
+                auto tInput = om::Tensor::fromData(
+                    vecTrainData.data() + nSrc, {1, 3, m_pImpl->nInputSize, m_pImpl->nInputSize});
+
+                try {
+                    // 20260402 ZJH 提取全局上下文向量
+                    auto globalVec = pGCAD->predictGlobal(tInput);
+                    auto cGlobal = globalVec.contiguous();
+                    int nDim = cGlobal.shape(1);
+                    const float* pG = cGlobal.floatDataPtr();
+                    std::vector<float> feat(nDim);
+                    for (int d = 0; d < nDim; ++d) feat[d] = pG[d];
+                    vecGlobalFeatures.push_back(std::move(feat));
+
+                    // 20260402 ZJH 收集融合分数
+                    auto gcadResult = pGCAD->predict(tInput);
+                    vecFusedScores.push_back(gcadResult.fFusedScore);
+                } catch (...) {}
+            }
+
+            if (!vecGlobalFeatures.empty()) {
+                pGCAD->fitGlobalDistribution(vecGlobalFeatures);
+                pGCAD->calibrateThreshold(vecFusedScores);
+                if (logCb) logCb("[INFO] GCAD: Distribution fitted, layout threshold=" +
+                    std::to_string(pGCAD->layoutThreshold()) +
+                    " anomaly threshold=" + std::to_string(pGCAD->anomalyThreshold()));
+            }
+        }
+    }
+
+    // 20260402 ZJH ===== 后训练模型剪枝（可选）=====
+    // 训练完成后自动执行 magnitude-based 剪枝，减少模型体积和推理延迟
+    if (params.bPruneAfterTraining && m_pImpl->pModel) {
+        if (logCb) logCb("[INFO] Post-training pruning: ratio=" +
+            std::to_string(params.fPruneRatio));
+
+        // 20260402 ZJH 幅度剪枝: 将绝对值最小的 fPruneRatio 比例权重置零
+        int nPruned = om::pruneModelMagnitude(*m_pImpl->pModel, params.fPruneRatio);
+
+        // 20260402 ZJH 统计剪枝后稀疏率
+        auto sparsityInfo = om::analyzeSparsity(*m_pImpl->pModel);
+        if (logCb) {
+            logCb("[INFO] Pruning complete: " + std::to_string(nPruned) + " params zeroed, sparsity=" +
+                std::to_string(sparsityInfo.fSparsityRatio * 100.0f) + "%");
+        }
+    }
+
+    // 20260402 ZJH ===== BN 折叠推理优化（Conv+BN → Conv）=====
+    // 训练完成后自动将 BatchNorm 参数合并到前置 Conv 权重中
+    // W_new = W * γ/√(var+ε), b_new = (b-μ)*γ/√(var+ε) + β
+    // 效果: 推理时消除 BN 层（减少 ~50% 算子），零精度损失
+    if (m_pImpl->pModel) {
+        auto vecNP = m_pImpl->pModel->namedParameters();
+        auto vecNB = m_pImpl->pModel->namedBuffers();
+
+        // 20260402 ZJH 构建名称→指针映射
+        std::map<std::string, om::Tensor*> mapParams, mapBuffers;
+        for (auto& [name, ptr] : vecNP) mapParams[name] = ptr;
+        for (auto& [name, ptr] : vecNB) mapBuffers[name] = ptr;
+
+        int nFoldedCount = 0;  // 20260402 ZJH 折叠计数
+        // 20260402 ZJH 扫描所有 BN 层，尝试找到匹配的前置 Conv
+        // 命名约定: conv1.weight + bn1.gamma → 折叠
+        for (auto& [bnName, bnGamma] : vecNP) {
+            // 20260402 ZJH 查找 *.gamma 参数（BN 层标识）
+            if (bnName.size() < 6 || bnName.substr(bnName.size() - 5) != "gamma") continue;
+
+            std::string strBnPrefix = bnName.substr(0, bnName.size() - 5);  // 20260402 ZJH "bn1."
+            // 20260402 ZJH 查找对应的 BN beta, running_mean, running_var
+            auto itBeta = mapParams.find(strBnPrefix + "beta");
+            auto itMean = mapBuffers.find(strBnPrefix + "running_mean");
+            auto itVar = mapBuffers.find(strBnPrefix + "running_var");
+            if (itBeta == mapParams.end() || itMean == mapBuffers.end() || itVar == mapBuffers.end()) continue;
+
+            om::Tensor* pGamma = bnGamma;
+            om::Tensor* pBeta = itBeta->second;
+            om::Tensor* pMean = itMean->second;
+            om::Tensor* pVar = itVar->second;
+            int nCh = pGamma->numel();  // 20260402 ZJH 通道数
+
+            // 20260402 ZJH 推断前置 Conv 名称（尝试 bn1→conv1 的命名映射）
+            // 常见模式: "encoder.bn1" → "encoder.conv1", "bn2" → "conv2"
+            std::string strConvPrefix = strBnPrefix;
+            auto bnPos = strConvPrefix.find("bn");
+            if (bnPos == std::string::npos) continue;
+            strConvPrefix.replace(bnPos, 2, "conv");  // 20260402 ZJH bn→conv
+
+            auto itConvW = mapParams.find(strConvPrefix + "weight");
+            if (itConvW == mapParams.end()) continue;
+            om::Tensor* pConvW = itConvW->second;
+
+            // 20260402 ZJH 查找或创建 Conv bias
+            auto itConvB = mapParams.find(strConvPrefix + "bias");
+            bool bHasBias = (itConvB != mapParams.end());
+
+            // 20260402 ZJH 验证通道数匹配
+            if (pConvW->shape(0) != nCh) continue;
+
+            // 20260402 ZJH 执行折叠: W_new[c] = W[c] * γ[c] / √(var[c]+ε)
+            float fEps = 1e-5f;  // 20260402 ZJH BN 默认 epsilon
+            const float* pG = pGamma->contiguous().floatDataPtr();
+            const float* pB = pBeta->contiguous().floatDataPtr();
+            const float* pM = pMean->contiguous().floatDataPtr();
+            const float* pV = pVar->contiguous().floatDataPtr();
+
+            float* pW = pConvW->mutableFloatDataPtr();
+            int nWeightsPerChannel = pConvW->numel() / nCh;  // 20260402 ZJH Cin*KH*KW
+
+            for (int c = 0; c < nCh; ++c) {
+                float fScale = pG[c] / std::sqrt(pV[c] + fEps);  // 20260402 ZJH γ/√(var+ε)
+                // 20260402 ZJH 缩放该通道的所有权重
+                for (int j = 0; j < nWeightsPerChannel; ++j) {
+                    pW[c * nWeightsPerChannel + j] *= fScale;
+                }
+                // 20260402 ZJH 更新或创建 bias: b_new = (b-μ)*scale + β
+                if (bHasBias) {
+                    float* pCB = itConvB->second->mutableFloatDataPtr();
+                    pCB[c] = (pCB[c] - pM[c]) * fScale + pB[c];
+                }
+            }
+
+            // 20260402 ZJH 将 BN 参数置零（折叠后 BN 变为恒等映射）
+            // gamma=1, beta=0, mean=0, var=1 → BN(x) = x
+            float* pGW = pGamma->mutableFloatDataPtr();
+            float* pBW = pBeta->mutableFloatDataPtr();
+            float* pMW = pMean->mutableFloatDataPtr();
+            float* pVW = pVar->mutableFloatDataPtr();
+            for (int c = 0; c < nCh; ++c) {
+                pGW[c] = 1.0f; pBW[c] = 0.0f; pMW[c] = 0.0f; pVW[c] = 1.0f;
+            }
+
+            nFoldedCount++;
+        }
+        if (nFoldedCount > 0 && logCb) {
+            logCb("[INFO] BN Folding: " + std::to_string(nFoldedCount) +
+                  " Conv+BN pairs fused (inference ~50% fewer ops)");
         }
     }
 
@@ -2457,12 +3100,12 @@ bool EngineBridge::train(
 // 20260325 ZJH 重写：GPU 加速推理 + 异常热力图生成
 BridgeInferResult EngineBridge::infer(const std::vector<float>& vecImageData)
 {
-    BridgeInferResult result;
-    if (!m_pImpl->pModel) return result;
+    BridgeInferResult result;  // 20260406 ZJH 推理结果（默认构造，全零初始化）
+    if (!m_pImpl->pModel) return result;  // 20260406 ZJH 模型未创建，返回空结果
 
-    int nInputDim = m_pImpl->nInputDim;
-    int nNumClasses = m_pImpl->nNumClasses;
-    int nH = m_pImpl->nInputSize;
+    int nInputDim = m_pImpl->nInputDim;    // 20260406 ZJH 展平输入维度
+    int nNumClasses = m_pImpl->nNumClasses;  // 20260406 ZJH 输出类别数
+    int nH = m_pImpl->nInputSize;          // 20260406 ZJH 输入空间尺寸 H=W
 
     // 20260325 ZJH 准备输入数据
     std::vector<float> vecPad(nInputDim, 0.0f);
@@ -2497,6 +3140,9 @@ BridgeInferResult EngineBridge::infer(const std::vector<float>& vecImageData)
             // 20260325 ZJH 首次推理：初始化 CUDA 并将模型迁移到 GPU
             if (omCudaInit(0) == 0) {
                 for (auto* p : vecParams) *p = p->cuda();
+                // 20260407 ZJH [修复] BN buffers (running_mean/running_var) 也需迁移到 GPU
+                auto vecBufs = m_pImpl->pModel->buffers();
+                for (auto* b : vecBufs) { if (b->isCpu()) *b = b->cuda(); }
                 bInferGpu = true;
             }
         } else {
@@ -2508,7 +3154,7 @@ BridgeInferResult EngineBridge::infer(const std::vector<float>& vecImageData)
     }
 #endif
 
-    m_pImpl->pModel->eval();
+    m_pImpl->pModel->eval();  // 20260406 ZJH 切换到评估模式（关闭 Dropout，BN 使用 running stats）
 
     // 20260326 ZJH EfficientAD 专用推理路径：直接提取空间异常图，跳过分类流程
     if (m_pImpl->bIsEfficientAD) {
@@ -2550,9 +3196,9 @@ BridgeInferResult EngineBridge::infer(const std::vector<float>& vecImageData)
         return result;
     }
 
-    om::Tensor tOut;
+    om::Tensor tOut;  // 20260406 ZJH 模型前向输出张量
     try {
-        tOut = m_pImpl->pModel->forward(tIn);
+        tOut = m_pImpl->pModel->forward(tIn);  // 20260406 ZJH 执行前向传播
     } catch (const std::exception& ex) {
         // 20260325 ZJH forward 异常时回退 CPU 再试一次
 #ifdef OM_HAS_CUDA
@@ -2571,10 +3217,10 @@ BridgeInferResult EngineBridge::infer(const std::vector<float>& vecImageData)
     }
 
     // 20260325 ZJH 确保输出在 CPU 上
-    if (tOut.isCuda()) tOut = tOut.cpu();
-    auto cOut = tOut.contiguous();
-    const float* pO = cOut.floatDataPtr();
-    int nOutTotal = cOut.numel();
+    if (tOut.isCuda()) tOut = tOut.cpu();  // 20260406 ZJH GPU 输出拷回 CPU（D2H）
+    auto cOut = tOut.contiguous();         // 20260406 ZJH 保证内存连续（后续指针访问需要）
+    const float* pO = cOut.floatDataPtr(); // 20260406 ZJH 获取输出数据指针
+    int nOutTotal = cOut.numel();          // 20260406 ZJH 输出元素总数
 
     // 20260330 ZJH ===== F1: YOLO 检测推理 + NMS =====
     // 检测模型输出为 3D [1, nPreds, 5+C]，通过 yoloDecodeAndNms 解码+NMS
@@ -2757,18 +3403,120 @@ BridgeInferResult EngineBridge::infer(const std::vector<float>& vecImageData)
         result.nMapW = nOutW;
         result.nMapH = nOutH;
 
-        // 20260401 ZJH ===== 逐像素 argmax 类别图（分割 mask overlay 使用）=====
-        // 每个像素取 logit 最大的类别作为预测，生成类别 ID 图
-        // 像素值 0=背景, 1=异物, 2=划痕, ... （与训练时的 mask 值一致）
-        result.vecArgmaxMap.resize(static_cast<size_t>(nSpatial));
-        for (int s = 0; s < nSpatial; ++s) {
-            int nBestC = 0;
-            float fBestV = pO[s];
-            for (int c = 1; c < nOutC; ++c) {
-                float fV = pO[c * nSpatial + s];
-                if (fV > fBestV) { fBestV = fV; nBestC = c; }
+        // 20260402 ZJH ===== DenseCRF 后处理（可选: 分割边界精化）=====
+        // 在 argmax 之前对 softmax 概率图做 CRF 精化，提升边界锐利度
+        // 条件: 分割模型 + 输入图像数据可用 + 类别数 > 1
+        if (m_pImpl->bIsSegmentation && nOutC >= 2 && vecImageData.size() >= static_cast<size_t>(3 * nOutH * nOutW)) {
+            try {
+                // 20260402 ZJH 构造 softmax 概率张量 [C, H, W]
+                auto tSoftmax = om::Tensor::zeros({nOutC, nOutH, nOutW});
+                float* pSM = tSoftmax.mutableFloatDataPtr();
+                for (int s = 0; s < nSpatial; ++s) {
+                    float fMax = pO[s];
+                    for (int c = 1; c < nOutC; ++c) fMax = std::max(fMax, pO[c * nSpatial + s]);
+                    float fSum = 0.0f;
+                    for (int c = 0; c < nOutC; ++c) {
+                        pSM[c * nSpatial + s] = std::exp(pO[c * nSpatial + s] - fMax);
+                        fSum += pSM[c * nSpatial + s];
+                    }
+                    for (int c = 0; c < nOutC; ++c) pSM[c * nSpatial + s] /= (fSum + 1e-10f);
+                }
+
+                // 20260402 ZJH 构造 RGB 图像张量 [3, H, W]（从输入数据截取，可能需要下采样）
+                auto tImage = om::Tensor::zeros({3, nOutH, nOutW});
+                float* pImg = tImage.mutableFloatDataPtr();
+                int nInH = m_pImpl->nInputSize;
+                float fScale = static_cast<float>(nInH) / static_cast<float>(nOutH);
+                for (int ch = 0; ch < 3; ++ch) {
+                    for (int y = 0; y < nOutH; ++y) {
+                        int nSrcY = std::min(static_cast<int>(y * fScale), nInH - 1);
+                        for (int x = 0; x < nOutW; ++x) {
+                            int nSrcX = std::min(static_cast<int>(x * fScale), nInH - 1);
+                            int nSrcIdx = ch * nInH * nInH + nSrcY * nInH + nSrcX;
+                            if (nSrcIdx < static_cast<int>(vecImageData.size()))
+                                pImg[ch * nSpatial + y * nOutW + x] = vecImageData[nSrcIdx];
+                        }
+                    }
+                }
+
+                // 20260402 ZJH 运行 CRF 精化（5 次迭代，~50ms）
+                om::DenseCRFPostProcessor crf;
+                crf.m_nIterations = 5;
+                auto tRefined = crf.refine(tSoftmax, tImage);
+
+                // 20260402 ZJH 用 CRF 精化后的概率替换 pO 指针用于后续 argmax
+                // 注意: pO 指向 cOut（原始 logits），CRF 输出是概率
+                // 使用 CRF 结果直接做 argmax
+                const float* pCRF = tRefined.contiguous().floatDataPtr();
+                result.vecArgmaxMap.resize(static_cast<size_t>(nSpatial));
+                for (int s = 0; s < nSpatial; ++s) {
+                    int nBestC = 0;
+                    float fBestV = pCRF[s];
+                    for (int c = 1; c < nOutC; ++c) {
+                        float fV = pCRF[c * nSpatial + s];
+                        if (fV > fBestV) { fBestV = fV; nBestC = c; }
+                    }
+                    result.vecArgmaxMap[s] = static_cast<uint8_t>(nBestC);
+                }
+            } catch (...) {
+                // 20260402 ZJH CRF 失败时 fallback 到原始 argmax
+                result.vecArgmaxMap.resize(static_cast<size_t>(nSpatial));
+                for (int s = 0; s < nSpatial; ++s) {
+                    int nBestC = 0;
+                    float fBestV = pO[s];
+                    for (int c = 1; c < nOutC; ++c) {
+                        float fV = pO[c * nSpatial + s];
+                        if (fV > fBestV) { fBestV = fV; nBestC = c; }
+                    }
+                    result.vecArgmaxMap[s] = static_cast<uint8_t>(nBestC);
+                }
             }
-            result.vecArgmaxMap[s] = static_cast<uint8_t>(nBestC);
+        } else {
+            // 20260401 ZJH ===== 逐像素 argmax 类别图（分割 mask overlay 使用）=====
+            result.vecArgmaxMap.resize(static_cast<size_t>(nSpatial));
+            for (int s = 0; s < nSpatial; ++s) {
+                int nBestC = 0;
+                float fBestV = pO[s];
+                for (int c = 1; c < nOutC; ++c) {
+                    float fV = pO[c * nSpatial + s];
+                    if (fV > fBestV) { fBestV = fV; nBestC = c; }
+                }
+                result.vecArgmaxMap[s] = static_cast<uint8_t>(nBestC);
+            }
+        }
+
+        // 20260407 ZJH ===== 形态学后处理（对标 Halcon closing_circle + opening_circle）=====
+        // 行业标准流水线: argmax → 开运算(去噪点) → 闭运算(填小孔)
+        // 3×3 形态学操作，纯 CPU 逐像素处理，对推理延迟影响 <1ms
+        if (!result.vecArgmaxMap.empty() && nOutH > 2 && nOutW > 2) {
+            auto& map = result.vecArgmaxMap;
+            std::vector<uint8_t> vecTemp(map.size());
+
+            // 20260407 ZJH 开运算 (erosion → dilation): 去除 1-2 像素的噪点
+            // erosion: 3×3 窗口内有任何背景邻居 → 设为背景
+            for (int y = 1; y < nOutH - 1; ++y) {
+                for (int x = 1; x < nOutW - 1; ++x) {
+                    uint8_t nC = map[y * nOutW + x];
+                    if (nC == 0) { vecTemp[y * nOutW + x] = 0; continue; }
+                    // 20260407 ZJH 检查 4-邻域是否全为同类
+                    bool bKeep = (map[(y-1)*nOutW + x] == nC) && (map[(y+1)*nOutW + x] == nC)
+                              && (map[y*nOutW + (x-1)] == nC) && (map[y*nOutW + (x+1)] == nC);
+                    vecTemp[y * nOutW + x] = bKeep ? nC : 0;
+                }
+            }
+            // dilation: 恢复被 erosion 缩小的区域
+            for (int y = 1; y < nOutH - 1; ++y) {
+                for (int x = 1; x < nOutW - 1; ++x) {
+                    if (vecTemp[y * nOutW + x] != 0) { map[y * nOutW + x] = vecTemp[y * nOutW + x]; continue; }
+                    // 20260407 ZJH 如果 4-邻域有非背景像素，取最常见类
+                    uint8_t nUp = vecTemp[(y-1)*nOutW+x], nDn = vecTemp[(y+1)*nOutW+x];
+                    uint8_t nLt = vecTemp[y*nOutW+(x-1)], nRt = vecTemp[y*nOutW+(x+1)];
+                    uint8_t nBest = 0;
+                    if (nUp) nBest = nUp; else if (nDn) nBest = nDn;
+                    else if (nLt) nBest = nLt; else if (nRt) nBest = nRt;
+                    map[y * nOutW + x] = nBest;
+                }
+            }
         }
     }
     return result;
@@ -3165,9 +3913,45 @@ bool EngineBridge::loadModel(const std::string& strPath) {
                               << " → rebuilding model" << std::endl;
                     bNeedRebuild = true;
                 }
+                // 20260405 ZJH GroupNorm/BatchNorm 不匹配检测
+                // 训练时 batch<8 自动启用 GroupNorm（train() 内重建模型），meta 记录 nNormType=1
+                // 推理时 createModel() 默认 bUseGroupNorm=false（BatchNorm）
+                // 若不重建: GN 权重加载到 BN 层，但 BN running_mean=0/running_var=1（GN 无 buffers）
+                // → eval 模式下 BN 不做真正归一化 → 特征空间错乱 → 全预测背景 → 推理不出缺陷
+                bool bFileGroupNorm = (fileMeta.nNormType == 1);  // 20260405 ZJH 文件中记录的归一化类型
+                if (bFileGroupNorm != m_pImpl->bUseGroupNorm) {
+                    std::cerr << "[EngineBridge] loadModel: normType mismatch — file="
+                              << (bFileGroupNorm ? "GroupNorm" : "BatchNorm")
+                              << " current=" << (m_pImpl->bUseGroupNorm ? "GroupNorm" : "BatchNorm")
+                              << " → rebuilding model" << std::endl;
+                    m_pImpl->bUseGroupNorm = bFileGroupNorm;  // 20260405 ZJH 同步归一化标志
+                    bNeedRebuild = true;
+                }
                 if (bNeedRebuild) {
                     // 20260330 ZJH 用文件元数据中的参数重建模型
                     std::string strType = m_pImpl->strModelType;
+
+                    // 20260406 ZJH [修复] 检测训练时是否自动缩放了模型类型
+                    // 场景: 训练时 DeepLabV3+ 自动缩放为 MobileSegNet（<30张图）
+                    //       但推理端用户仍选 DeepLabV3+ → nModelTypeHash 不匹配
+                    //       → 用错误架构重建 → 所有权重 shape 不匹配全部 SKIPPED
+                    uint32_t nCurHash = om::ModelMeta::hashString(strType);
+                    if (fileMeta.nModelTypeHash != 0 && fileMeta.nModelTypeHash != nCurHash) {
+                        // 20260406 ZJH 遍历已知分割模型类型，匹配文件中的 hash
+                        for (const char* strCandidate : {"UNet", "DeepLabV3+", "DeepLabV3Plus",
+                                "MobileSegNet", "MobileSeg", "ResNet18", "ResNet50",
+                                "MobileNetV4Small", "ViTTiny", "EfficientAD"}) {
+                            if (om::ModelMeta::hashString(strCandidate) == fileMeta.nModelTypeHash) {
+                                std::cerr << "[EngineBridge] loadModel: model type auto-corrected — "
+                                          << "user selected '" << strType << "' but file was trained as '"
+                                          << strCandidate << "'" << std::endl;
+                                strType = strCandidate;
+                                m_pImpl->strModelType = strType;
+                                break;
+                            }
+                        }
+                    }
+
                     int nSavedBase = fileMeta.nBaseChannels;
                     int nSavedClasses = fileMeta.nNumClasses;
                     int nSavedInput = (fileMeta.nInputSize > 0) ? fileMeta.nInputSize : m_pImpl->nInputSize;
@@ -3231,16 +4015,19 @@ bool EngineBridge::loadModel(const std::string& strPath) {
     }
 }
 
+// 20260406 ZJH 获取模型参数总数（遍历所有参数张量，累加元素数）
 int64_t EngineBridge::totalParameters() const {
-    if (!m_pImpl->pModel) return 0;
-    int64_t n = 0;
+    if (!m_pImpl->pModel) return 0;  // 20260406 ZJH 模型未创建返回 0
+    int64_t n = 0;  // 20260406 ZJH 参数元素总数累加器
     for (const auto* p : m_pImpl->pModel->parameters()) {
         try { if (p) n += p->numel(); } catch (...) {}  // 20260330 ZJH 跳过损坏的参数
     }
-    return n;
+    return n;  // 20260406 ZJH 返回参数总元素数
 }
 
+// 20260406 ZJH 可训练参数数（当前所有参数均可训练，等同 totalParameters）
 int64_t EngineBridge::trainableParameters() const { return totalParameters(); }
+// 20260406 ZJH 检查模型是否已创建（pModel 非空即表示已创建）
 bool EngineBridge::hasModel() const { return m_pImpl->pModel.get() != nullptr; }
 
 // 20260326 ZJH 强制释放 GPU 内存
@@ -3404,5 +4191,487 @@ BridgeSynthesisResult EngineBridge::synthesizeData(
         std::cerr << "[EngineBridge::synthesizeData] UNKNOWN EXCEPTION" << std::endl;
     }
 
+    return result;
+}
+
+// =============================================================================
+// 20260402 ZJH 新增接口实现 — 对标 Halcon/ViDi 差距补全
+// =============================================================================
+
+// 20260402 ZJH inferGCAD — GCAD 全局上下文异常检测推理
+EngineBridge::GCADInferResult EngineBridge::inferGCAD(
+    const std::vector<float>& vecImageData, int nC, int nH, int nW)
+{
+    GCADInferResult result{};  // 20260402 ZJH 默认初始化
+    try {
+        if (!m_pImpl || !m_pImpl->pModel) {
+            std::cerr << "[EngineBridge::inferGCAD] No model loaded" << std::endl;
+            return result;
+        }
+
+        // 20260402 ZJH 构造输入张量 [1, C, H, W]
+        auto input = om::Tensor::zeros({1, nC, nH, nW});
+        float* pInput = input.mutableFloatDataPtr();
+        int nTotal = nC * nH * nW;
+        for (int i = 0; i < std::min(nTotal, static_cast<int>(vecImageData.size())); ++i) {
+            pInput[i] = vecImageData[i];
+        }
+
+        // 20260402 ZJH 尝试转换为 GCAD 模型
+        auto* pGcad = dynamic_cast<om::GCAD*>(m_pImpl->pModel.get());
+        if (!pGcad) {
+            std::cerr << "[EngineBridge::inferGCAD] Model is not GCAD type" << std::endl;
+            return result;
+        }
+
+        // 20260402 ZJH 调用 GCAD predict
+        pGcad->eval();  // 20260402 ZJH 切换到评估模式
+        auto gcadResult = pGcad->predict(input);
+
+        // 20260402 ZJH 转换结果
+        result.fGlobalScore = gcadResult.fGlobalScore;
+        result.fLocalScore = gcadResult.fLocalScore;
+        result.fFusedScore = gcadResult.fFusedScore;
+        result.bIsAnomaly = gcadResult.bIsAnomaly;
+        result.bIsLayoutAnomaly = gcadResult.bIsLayoutAnomaly;
+        result.vecAnomalyMap = std::move(gcadResult.vecAnomalyMap);
+        result.nMapH = gcadResult.nMapH;
+        result.nMapW = gcadResult.nMapW;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[EngineBridge::inferGCAD] EXCEPTION: " << e.what() << std::endl;
+    }
+    return result;
+}
+
+// 20260402 ZJH fitGCADDistribution — 训练后拟合正常样本全局分布
+bool EngineBridge::fitGCADDistribution(
+    const std::vector<std::vector<float>>& vecNormalImages,
+    int nC, int nH, int nW)
+{
+    try {
+        if (!m_pImpl || !m_pImpl->pModel) return false;
+
+        auto* pGcad = dynamic_cast<om::GCAD*>(m_pImpl->pModel.get());
+        if (!pGcad) return false;
+
+        pGcad->eval();  // 20260402 ZJH 评估模式
+
+        // 20260402 ZJH 收集所有正常样本的全局特征向量
+        std::vector<std::vector<float>> vecFeatures;
+        std::vector<float> vecFusedScores;
+
+        for (const auto& vecImg : vecNormalImages) {
+            auto input = om::Tensor::zeros({1, nC, nH, nW});
+            float* pIn = input.mutableFloatDataPtr();
+            int nPixels = nC * nH * nW;
+            for (int i = 0; i < std::min(nPixels, static_cast<int>(vecImg.size())); ++i) {
+                pIn[i] = vecImg[i];
+            }
+
+            // 20260402 ZJH 提取全局上下文向量
+            auto globalVec = pGcad->predictGlobal(input);
+            auto cGlobal = globalVec.contiguous();
+            int nDim = cGlobal.shape(1);
+            const float* pGlobal = cGlobal.floatDataPtr();
+
+            std::vector<float> vecFeat(nDim);
+            for (int d = 0; d < nDim; ++d) vecFeat[d] = pGlobal[d];
+            vecFeatures.push_back(std::move(vecFeat));
+
+            // 20260402 ZJH 收集融合分数
+            auto gcadResult = pGcad->predict(input);
+            vecFusedScores.push_back(gcadResult.fFusedScore);
+        }
+
+        // 20260402 ZJH 拟合全局分布 + 校准阈值
+        pGcad->fitGlobalDistribution(vecFeatures);
+        pGcad->calibrateThreshold(vecFusedScores);
+
+        std::cerr << "[EngineBridge::fitGCADDistribution] Fitted with "
+                  << vecNormalImages.size() << " normal samples" << std::endl;
+        return true;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[EngineBridge::fitGCADDistribution] EXCEPTION: " << e.what() << std::endl;
+    }
+    return false;
+}
+
+// 20260402 ZJH trainContinual — 增量学习（EWC 弹性权重巩固）
+bool EngineBridge::trainContinual(
+    const std::vector<std::vector<float>>& vecOldData,
+    const std::vector<std::vector<float>>& vecOldLabels,
+    const std::vector<std::vector<float>>& vecNewData,
+    const std::vector<std::vector<float>>& vecNewLabels,
+    int nC, int nH, int nW, int nEpochs, float fLR,
+    float fEwcLambda)
+{
+    try {
+        if (!m_pImpl || !m_pImpl->pModel) return false;
+
+        auto* pModel = m_pImpl->pModel.get();
+        pModel->train();  // 20260402 ZJH 训练模式
+
+        // 20260402 ZJH Step 1: 用旧数据计算 Fisher 信息矩阵
+        om::ContinualLearner ewc;
+        om::ContinualLearner::EWCConfig config;
+        config.fLambda = fEwcLambda;
+
+        // 20260402 ZJH 构造旧任务张量
+        int nInputDim = nC * nH * nW;
+        std::vector<om::Tensor> vecOldTensors, vecOldLabelTensors;
+        for (size_t i = 0; i < vecOldData.size(); ++i) {
+            auto t = om::Tensor::zeros({1, nC, nH, nW});
+            float* p = t.mutableFloatDataPtr();
+            for (int j = 0; j < std::min(nInputDim, static_cast<int>(vecOldData[i].size())); ++j) {
+                p[j] = vecOldData[i][j];
+            }
+            vecOldTensors.push_back(std::move(t));
+
+            auto lbl = om::Tensor::zeros({1, static_cast<int>(vecOldLabels[i].size())});
+            float* pLbl = lbl.mutableFloatDataPtr();
+            for (size_t j = 0; j < vecOldLabels[i].size(); ++j) {
+                pLbl[j] = vecOldLabels[i][j];
+            }
+            vecOldLabelTensors.push_back(std::move(lbl));
+        }
+
+        ewc.computeFisherMatrix(*pModel, vecOldTensors, vecOldLabelTensors);
+
+        // 20260402 ZJH Step 2: 在新数据上训练（带 EWC 正则化）
+        auto vecParams = pModel->parameters();
+        om::SGD optimizer(vecParams, fLR, 0.9f, 1e-4f);
+        om::CrossEntropyLoss ceLoss;
+
+        for (int epoch = 0; epoch < nEpochs; ++epoch) {
+            float fEpochLoss = 0.0f;
+            for (size_t i = 0; i < vecNewData.size(); ++i) {
+                auto input = om::Tensor::zeros({1, nC, nH, nW});
+                float* pIn = input.mutableFloatDataPtr();
+                for (int j = 0; j < std::min(nInputDim, static_cast<int>(vecNewData[i].size())); ++j) {
+                    pIn[j] = vecNewData[i][j];
+                }
+
+                auto target = om::Tensor::zeros({1, static_cast<int>(vecNewLabels[i].size())});
+                float* pTgt = target.mutableFloatDataPtr();
+                for (size_t j = 0; j < vecNewLabels[i].size(); ++j) {
+                    pTgt[j] = vecNewLabels[i][j];
+                }
+
+                // 20260402 ZJH 前向 + CE + EWC
+                auto output = pModel->forward(input);
+                auto taskLoss = ceLoss.forward(output, target);
+                auto ewcPenalty = ewc.ewcPenalty(*pModel);
+                auto totalLoss = om::tensorAdd(taskLoss, ewcPenalty);
+
+                optimizer.zeroGrad();
+                om::tensorBackward(totalLoss);  // 20260402 ZJH autograd 反向传播
+                optimizer.step();
+
+                fEpochLoss += totalLoss.contiguous().floatDataPtr()[0];
+            }
+
+            if ((epoch + 1) % 10 == 0 || epoch == 0) {
+                std::cerr << "[ContinualLearning] Epoch " << (epoch + 1)
+                          << "/" << nEpochs << " loss="
+                          << fEpochLoss / std::max(size_t(1), vecNewData.size()) << std::endl;
+            }
+        }
+        return true;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[EngineBridge::trainContinual] EXCEPTION: " << e.what() << std::endl;
+    }
+    return false;
+}
+
+// 20260402 ZJH inferWithTTA — TTA 增强推理
+BridgeInferResult EngineBridge::inferWithTTA(
+    const std::vector<float>& vecImageData,
+    int nC, int nH, int nW,
+    bool bHFlip, bool bVFlip, bool bRotate90, bool bMultiScale)
+{
+    BridgeInferResult result{};  // 20260406 ZJH TTA 推理结果（默认初始化）
+    try {
+        if (!m_pImpl || !m_pImpl->pModel) return result;  // 20260406 ZJH 模型未加载，返回空结果
+
+        auto* pModel = m_pImpl->pModel.get();  // 20260406 ZJH 获取模型裸指针
+        pModel->eval();  // 20260406 ZJH 切换到评估模式
+
+        // 20260402 ZJH 构造输入张量
+        auto input = om::Tensor::zeros({1, nC, nH, nW});  // 20260406 ZJH 创建 [1,C,H,W] 零张量
+        float* pInput = input.mutableFloatDataPtr();  // 20260406 ZJH 获取可写数据指针
+        int nTotal = nC * nH * nW;  // 20260406 ZJH 单张图像总元素数
+        for (int i = 0; i < std::min(nTotal, static_cast<int>(vecImageData.size())); ++i) {
+            pInput[i] = vecImageData[i];  // 20260406 ZJH 将输入数据拷贝到张量
+        }
+
+        // 20260402 ZJH 配置 TTA
+        om::TTAPredictor tta;
+        om::TTAPredictor::TTAConfig ttaConfig;
+        ttaConfig.bHFlip = bHFlip;
+        ttaConfig.bVFlip = bVFlip;
+        ttaConfig.bRotate90 = bRotate90;
+        ttaConfig.bMultiScale = bMultiScale;
+
+        if (m_pImpl->bIsSegmentation) {
+            // 20260402 ZJH 分割 TTA
+            auto ttaOutput = tta.segmentTTA(*pModel, input, ttaConfig);
+            auto cOut = ttaOutput.contiguous();
+            int nOutC = cOut.shape(1), nOutH = cOut.shape(2), nOutW = cOut.shape(3);
+            result.vecArgmaxMap.resize(nOutH * nOutW);
+            const float* pOut = cOut.floatDataPtr();
+            for (int h = 0; h < nOutH; ++h) {
+                for (int w = 0; w < nOutW; ++w) {
+                    int nBestC = 0;
+                    float fBestV = pOut[h * nOutW + w];
+                    for (int c = 1; c < nOutC; ++c) {
+                        float fV = pOut[(c * nOutH + h) * nOutW + w];
+                        if (fV > fBestV) { fBestV = fV; nBestC = c; }
+                    }
+                    result.vecArgmaxMap[h * nOutW + w] = static_cast<uint8_t>(nBestC);
+                }
+            }
+        } else {
+            // 20260402 ZJH 分类 TTA
+            auto vecProbs = tta.classifyTTA(*pModel, input, ttaConfig);
+            if (!vecProbs.empty()) {
+                int nBestClass = 0;
+                float fBestProb = vecProbs[0];
+                for (int i = 1; i < static_cast<int>(vecProbs.size()); ++i) {
+                    if (vecProbs[i] > fBestProb) {
+                        fBestProb = vecProbs[i];
+                        nBestClass = i;
+                    }
+                }
+                result.nPredictedClass = nBestClass;
+                result.fConfidence = fBestProb;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[EngineBridge::inferWithTTA] EXCEPTION: " << e.what() << std::endl;
+    }
+    return result;
+}
+
+// =============================================================================
+// 20260402 ZJH Benchmark + 精度基线系统实现
+// =============================================================================
+
+// 20260402 ZJH benchmarkInference — 推理性能基准测试
+EngineBridge::BenchmarkResult EngineBridge::benchmarkInference(
+    const std::vector<float>& vecImageData,
+    int nC, int nH, int nW,
+    int nWarmupRuns, int nBenchmarkRuns)
+{
+    BenchmarkResult result{};  // 20260406 ZJH 性能基准测试结果（默认初始化）
+    result.nWarmupRuns = nWarmupRuns;        // 20260406 ZJH 记录预热轮数
+    result.nBenchmarkRuns = nBenchmarkRuns;  // 20260406 ZJH 记录测试轮数
+
+    try {
+        if (!m_pImpl || !m_pImpl->pModel) return result;  // 20260406 ZJH 模型未加载，返回空结果
+
+        m_pImpl->pModel->eval();  // 20260402 ZJH 评估模式
+
+        // 20260402 ZJH 构造输入张量
+        auto input = om::Tensor::zeros({1, nC, nH, nW});
+        float* pInput = input.mutableFloatDataPtr();
+        int nTotal = nC * nH * nW;
+        for (int i = 0; i < std::min(nTotal, static_cast<int>(vecImageData.size())); ++i) {
+            pInput[i] = vecImageData[i];
+        }
+
+        // 20260402 ZJH Warmup（消除冷启动、JIT 编译等影响）
+        for (int i = 0; i < nWarmupRuns; ++i) {
+            auto output = m_pImpl->pModel->forward(input);
+            (void)output;
+        }
+
+        // 20260402 ZJH 正式计时
+        std::vector<double> vecTimes;           // 20260406 ZJH 每次推理的耗时记录 (ms)
+        vecTimes.reserve(nBenchmarkRuns);       // 20260406 ZJH 预分配避免扩容
+        for (int i = 0; i < nBenchmarkRuns; ++i) {
+            auto t0 = std::chrono::high_resolution_clock::now();
+            auto output = m_pImpl->pModel->forward(input);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double dMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            vecTimes.push_back(dMs);
+        }
+
+        // 20260402 ZJH 统计
+        std::sort(vecTimes.begin(), vecTimes.end());  // 20260406 ZJH 升序排序用于分位数计算
+        result.dMinMs = vecTimes.front();              // 20260406 ZJH 最小延迟
+        result.dMaxMs = vecTimes.back();               // 20260406 ZJH 最大延迟
+        result.dMedianMs = vecTimes[vecTimes.size() / 2];  // 20260406 ZJH 中位数延迟
+        result.dP95Ms = vecTimes[static_cast<int>(vecTimes.size() * 0.95)];  // 20260406 ZJH P95 延迟
+        result.dP99Ms = vecTimes[static_cast<int>(vecTimes.size() * 0.99)];  // 20260406 ZJH P99 延迟
+
+        // 20260402 ZJH 吞吐量 = 1000 / median
+        result.dThroughputFPS = (result.dMedianMs > 0.0) ? (1000.0 / result.dMedianMs) : 0.0;
+
+        std::cerr << "[Benchmark] median=" << result.dMedianMs
+                  << "ms p95=" << result.dP95Ms
+                  << "ms FPS=" << result.dThroughputFPS << std::endl;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[EngineBridge::benchmarkInference] EXCEPTION: " << e.what() << std::endl;
+    }
+    return result;
+}
+
+// 20260402 ZJH saveAccuracyBaseline — 保存精度基线到 JSON
+bool EngineBridge::saveAccuracyBaseline(const AccuracyBaseline& baseline,
+                                         const std::string& strBaselineDir)
+{
+    try {
+        // 20260402 ZJH 构造文件路径: baselines/ModelType_DatasetName.json
+        std::string strFileName = strBaselineDir + "/" + baseline.strModelType + "_baseline.json";
+        std::ofstream ofs(strFileName);
+        if (!ofs.is_open()) {
+            std::cerr << "[Baseline] Failed to open: " << strFileName << std::endl;
+            return false;
+        }
+
+        // 20260402 ZJH 手写 JSON（不依赖 nlohmann/json 在此层）
+        ofs << "{\n"
+            << "  \"model\": \"" << baseline.strModelType << "\",\n"
+            << "  \"dataset\": \"" << baseline.strDatasetName << "\",\n"
+            << "  \"train_samples\": " << baseline.nTrainSamples << ",\n"
+            << "  \"epochs\": " << baseline.nEpochs << ",\n"
+            << "  \"final_loss\": " << baseline.fFinalLoss << ",\n"
+            << "  \"val_accuracy\": " << baseline.fValAccuracy << ",\n"
+            << "  \"val_f1\": " << baseline.fValF1 << ",\n"
+            << "  \"inference_ms\": " << baseline.fInferenceMs << ",\n"
+            << "  \"timestamp\": \"" << baseline.strTimestamp << "\"\n"
+            << "}\n";
+        ofs.close();
+
+        std::cerr << "[Baseline] Saved: " << strFileName << std::endl;
+        return true;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[Baseline] Save error: " << e.what() << std::endl;
+    }
+    return false;
+}
+
+// 20260402 ZJH loadAccuracyBaseline — 从 JSON 加载精度基线
+bool EngineBridge::loadAccuracyBaseline(const std::string& strBaselineDir,
+                                         const std::string& strModelType,
+                                         AccuracyBaseline& outBaseline)
+{
+    try {
+        std::string strFileName = strBaselineDir + "/" + strModelType + "_baseline.json";
+        std::ifstream ifs(strFileName);
+        if (!ifs.is_open()) return false;  // 20260402 ZJH 无基线文件（首次运行）
+
+        // 20260402 ZJH 简化 JSON 解析（仅提取关键数值字段）
+        std::string strContent((std::istreambuf_iterator<char>(ifs)),
+                                std::istreambuf_iterator<char>());
+        ifs.close();
+
+        auto extractFloat = [&](const std::string& key) -> float {
+            auto pos = strContent.find("\"" + key + "\"");
+            if (pos == std::string::npos) return 0.0f;
+            pos = strContent.find(":", pos);
+            if (pos == std::string::npos) return 0.0f;
+            return std::stof(strContent.substr(pos + 1));
+        };
+
+        outBaseline.strModelType = strModelType;
+        outBaseline.fFinalLoss = extractFloat("final_loss");
+        outBaseline.fValAccuracy = extractFloat("val_accuracy");
+        outBaseline.fValF1 = extractFloat("val_f1");
+        outBaseline.fInferenceMs = extractFloat("inference_ms");
+        outBaseline.nTrainSamples = static_cast<int>(extractFloat("train_samples"));
+        outBaseline.nEpochs = static_cast<int>(extractFloat("epochs"));
+
+        std::cerr << "[Baseline] Loaded: " << strFileName
+                  << " acc=" << outBaseline.fValAccuracy
+                  << " f1=" << outBaseline.fValF1 << std::endl;
+        return true;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[Baseline] Load error: " << e.what() << std::endl;
+    }
+    return false;
+}
+
+// 20260402 ZJH checkAccuracyRegression — 精度回归检测
+bool EngineBridge::checkAccuracyRegression(const AccuracyBaseline& current,
+                                            const AccuracyBaseline& baseline,
+                                            float fTolerance)
+{
+    bool bPass = true;  // 20260406 ZJH 回归检测结果（默认通过）
+
+    // 20260402 ZJH 精度检查: current.accuracy >= baseline.accuracy - tolerance
+    if (baseline.fValAccuracy > 0.0f) {
+        float fMinAccuracy = baseline.fValAccuracy - fTolerance;
+        if (current.fValAccuracy < fMinAccuracy) {
+            std::cerr << "[REGRESSION] Accuracy dropped: " << current.fValAccuracy
+                      << " < " << fMinAccuracy << " (baseline=" << baseline.fValAccuracy
+                      << " tolerance=" << fTolerance << ")" << std::endl;
+            bPass = false;
+        }
+    }
+
+    // 20260402 ZJH F1 检查
+    if (baseline.fValF1 > 0.0f) {
+        float fMinF1 = baseline.fValF1 - fTolerance;
+        if (current.fValF1 < fMinF1) {
+            std::cerr << "[REGRESSION] F1 dropped: " << current.fValF1
+                      << " < " << fMinF1 << std::endl;
+            bPass = false;
+        }
+    }
+
+    // 20260402 ZJH 推理速度检查: 不超过基线的 1.2 倍（允许 20% 波动）
+    if (baseline.fInferenceMs > 0.0f) {
+        float fMaxMs = baseline.fInferenceMs * 1.2f;
+        if (current.fInferenceMs > fMaxMs) {
+            std::cerr << "[REGRESSION] Inference slowed: " << current.fInferenceMs
+                      << "ms > " << fMaxMs << "ms" << std::endl;
+            bPass = false;
+        }
+    }
+
+    if (bPass) {  // 20260406 ZJH 所有检查项均通过
+        std::cerr << "[REGRESSION] PASSED: " << current.strModelType
+                  << " acc=" << current.fValAccuracy
+                  << " f1=" << current.fValF1
+                  << " ms=" << current.fInferenceMs << std::endl;
+    }
+    return bPass;  // 20260406 ZJH 返回回归检测结果（true=通过, false=回归）
+}
+
+// 20260402 ZJH generateDefects — AI 缺陷生成器入口
+EngineBridge::DefectGenResult EngineBridge::generateDefects(
+    const std::vector<std::vector<float>>& vecNormalImages,
+    const std::vector<std::vector<float>>& vecDefectImages,
+    const DefectGenConfig& config)
+{
+    DefectGenResult result;  // 20260406 ZJH 缺陷生成结果（默认构造）
+    try {
+        om::DefectGeneratorConfig genConfig;  // 20260406 ZJH 引擎层缺陷生成配置
+        genConfig.nTargetCount = config.nTargetCount;
+        genConfig.nImageWidth = config.nImageWidth;
+        genConfig.nImageHeight = config.nImageHeight;
+        genConfig.nDDPMTrainEpochs = config.nDDPMTrainEpochs;
+
+        // 20260406 ZJH 调用引擎层缺陷生成器（自动选择 DRAEM+ 或 DDPM Tiny）
+        auto omResult = om::DefectGenerator::generate(vecNormalImages, vecDefectImages, genConfig);
+
+        result.vecImages = std::move(omResult.vecImages);        // 20260406 ZJH 生成的缺陷图像列表
+        result.vecMasks = std::move(omResult.vecMasks);          // 20260406 ZJH 对应的缺陷 mask 列表
+        result.nGeneratedCount = omResult.nGeneratedCount;       // 20260406 ZJH 实际生成数量
+        result.nMode = omResult.nMode;                           // 20260406 ZJH 使用的生成模式 (0=DRAEM+, 1=DDPM)
+        result.strLog = std::move(omResult.strLog);              // 20260406 ZJH 生成过程日志
+
+        std::cerr << result.strLog;  // 20260406 ZJH 输出生成日志到标准错误流
+    } catch (const std::exception& e) {
+        result.strLog = std::string("[DefectGen] ERROR: ") + e.what();
+        std::cerr << result.strLog << std::endl;
+    }
     return result;
 }

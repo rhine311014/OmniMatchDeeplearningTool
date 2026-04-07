@@ -4,20 +4,20 @@
 // 适合 ImageNet 等大规模分类任务
 module;
 
-#include <vector>
-#include <string>
-#include <memory>
-#include <cmath>
+#include <vector>   // 20260406 ZJH std::vector 用于参数列表和层列表
+#include <string>   // 20260406 ZJH std::string 用于模块命名
+#include <memory>   // 20260406 ZJH std::unique_ptr 用于子模块管理
+#include <cmath>    // 20260406 ZJH 数学函数（预留）
 
-export module om.engine.resnet50;
+export module om.engine.resnet50;  // 20260406 ZJH 导出 ResNet50 模块接口
 
 // 20260322 ZJH 导入依赖模块
-import om.engine.tensor;
-import om.engine.tensor_ops;
-import om.engine.module;
-import om.engine.conv;
-import om.engine.linear;
-import om.engine.activations;
+import om.engine.tensor;       // 20260406 ZJH Tensor 数据结构
+import om.engine.tensor_ops;   // 20260406 ZJH tensorAdd 等张量运算
+import om.engine.module;       // 20260406 ZJH Module 基类、BatchNorm2d
+import om.engine.conv;         // 20260406 ZJH Conv2d、AdaptiveAvgPool2d
+import om.engine.linear;       // 20260406 ZJH Linear 全连接层、Flatten
+import om.engine.activations;  // 20260406 ZJH ReLU 激活函数
 
 export namespace om {
 
@@ -103,31 +103,32 @@ public:
             appendVec(m_pDownsampleBn->parameters());    // 20260322 ZJH downsample bn 参数
         }
 
-        return vecResult;
+        return vecResult;  // 20260406 ZJH 返回所有参数
     }
 
     // 20260322 ZJH 重写 namedParameters()
     std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") override {
-        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        std::vector<std::pair<std::string, Tensor*>> vecResult;  // 20260406 ZJH 命名参数收集容器
+        // 20260406 ZJH lambda: 为子层参数添加层级前缀
         auto appendParams = [&](const std::string& strSubPrefix, Module& mod) {
             std::string strFullPrefix = strPrefix.empty() ? strSubPrefix : strPrefix + "." + strSubPrefix;
             auto vecParams = mod.namedParameters(strFullPrefix);
             vecResult.insert(vecResult.end(), vecParams.begin(), vecParams.end());
         };
 
-        appendParams("conv1", m_conv1);
-        appendParams("bn1", m_bn1);
-        appendParams("conv2", m_conv2);
-        appendParams("bn2", m_bn2);
-        appendParams("conv3", m_conv3);
-        appendParams("bn3", m_bn3);
+        appendParams("conv1", m_conv1);  // 20260406 ZJH 1x1 降维卷积参数
+        appendParams("bn1", m_bn1);      // 20260406 ZJH 第一层 BN 参数
+        appendParams("conv2", m_conv2);  // 20260406 ZJH 3x3 卷积参数
+        appendParams("bn2", m_bn2);      // 20260406 ZJH 第二层 BN 参数
+        appendParams("conv3", m_conv3);  // 20260406 ZJH 1x1 升维卷积参数
+        appendParams("bn3", m_bn3);      // 20260406 ZJH 第三层 BN 参数
 
         if (m_pDownsampleConv) {
-            appendParams("downsample_conv", *m_pDownsampleConv);
-            appendParams("downsample_bn", *m_pDownsampleBn);
+            appendParams("downsample_conv", *m_pDownsampleConv);  // 20260406 ZJH 下采样卷积参数
+            appendParams("downsample_bn", *m_pDownsampleBn);      // 20260406 ZJH 下采样 BN 参数
         }
 
-        return vecResult;
+        return vecResult;  // 20260406 ZJH 返回所有命名参数
     }
 
     // 20260328 ZJH 重写 buffers() 收集 BN running stats
@@ -162,15 +163,15 @@ public:
         return vecResult;
     }
 
-    // 20260322 ZJH 重写 train()
+    // 20260322 ZJH 重写 train() 递归设置训练模式
     void train(bool bMode = true) override {
-        m_bTraining = bMode;
-        m_conv1.train(bMode);  m_bn1.train(bMode);
-        m_conv2.train(bMode);  m_bn2.train(bMode);
-        m_conv3.train(bMode);  m_bn3.train(bMode);
+        m_bTraining = bMode;  // 20260406 ZJH 设置自身训练标志
+        m_conv1.train(bMode);  m_bn1.train(bMode);  // 20260406 ZJH 传播到 conv1/bn1
+        m_conv2.train(bMode);  m_bn2.train(bMode);  // 20260406 ZJH 传播到 conv2/bn2
+        m_conv3.train(bMode);  m_bn3.train(bMode);  // 20260406 ZJH 传播到 conv3/bn3
         if (m_pDownsampleConv) {
-            m_pDownsampleConv->train(bMode);
-            m_pDownsampleBn->train(bMode);
+            m_pDownsampleConv->train(bMode);  // 20260406 ZJH 传播到下采样卷积
+            m_pDownsampleBn->train(bMode);    // 20260406 ZJH 传播到下采样 BN
         }
     }
 
@@ -277,39 +278,44 @@ public:
         return x;  // 20260322 ZJH 返回分类 logits
     }
 
-    // 20260322 ZJH 重写 parameters()
+    // 20260322 ZJH 重写 parameters() 收集所有子层可训练参数
     std::vector<Tensor*> parameters() override {
-        std::vector<Tensor*> vecResult;
+        std::vector<Tensor*> vecResult;  // 20260406 ZJH 参数收集容器
+        // 20260406 ZJH lambda: 将子模块参数追加到结果列表
         auto appendVec = [&](std::vector<Tensor*> vecP) {
             vecResult.insert(vecResult.end(), vecP.begin(), vecP.end());
         };
 
-        appendVec(m_conv1.parameters());
-        appendVec(m_bn1.parameters());
+        appendVec(m_conv1.parameters());  // 20260406 ZJH 初始卷积参数
+        appendVec(m_bn1.parameters());    // 20260406 ZJH 初始 BN 参数
 
+        // 20260406 ZJH 遍历四个残差层收集所有 Bottleneck 参数
         for (auto& pBlock : m_vecLayer1) appendVec(pBlock->parameters());
         for (auto& pBlock : m_vecLayer2) appendVec(pBlock->parameters());
         for (auto& pBlock : m_vecLayer3) appendVec(pBlock->parameters());
         for (auto& pBlock : m_vecLayer4) appendVec(pBlock->parameters());
 
-        appendVec(m_fc.parameters());
+        appendVec(m_fc.parameters());  // 20260406 ZJH 全连接分类器参数
 
-        return vecResult;
+        return vecResult;  // 20260406 ZJH 返回所有可训练参数
     }
 
-    // 20260322 ZJH 重写 namedParameters()
+    // 20260322 ZJH 重写 namedParameters() 收集所有命名参数
     std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") override {
-        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        std::vector<std::pair<std::string, Tensor*>> vecResult;  // 20260406 ZJH 命名参数收集容器
+        // 20260406 ZJH lambda: 构建带前缀的参数名
         auto makeP = [&](const std::string& s) -> std::string {
             return strPrefix.empty() ? s : strPrefix + "." + s;
         };
+        // 20260406 ZJH lambda: 追加命名参数列表
         auto appendVec = [&](std::vector<std::pair<std::string, Tensor*>> vecP) {
             vecResult.insert(vecResult.end(), vecP.begin(), vecP.end());
         };
 
-        appendVec(m_conv1.namedParameters(makeP("conv1")));
-        appendVec(m_bn1.namedParameters(makeP("bn1")));
+        appendVec(m_conv1.namedParameters(makeP("conv1")));  // 20260406 ZJH 初始卷积
+        appendVec(m_bn1.namedParameters(makeP("bn1")));      // 20260406 ZJH 初始 BN
 
+        // 20260406 ZJH 遍历四个残差层，为每个 Bottleneck 添加 layer*.i 前缀
         for (size_t i = 0; i < m_vecLayer1.size(); ++i)
             appendVec(m_vecLayer1[i]->namedParameters(makeP("layer1." + std::to_string(i))));
         for (size_t i = 0; i < m_vecLayer2.size(); ++i)
@@ -319,9 +325,9 @@ public:
         for (size_t i = 0; i < m_vecLayer4.size(); ++i)
             appendVec(m_vecLayer4[i]->namedParameters(makeP("layer4." + std::to_string(i))));
 
-        appendVec(m_fc.namedParameters(makeP("fc")));
+        appendVec(m_fc.namedParameters(makeP("fc")));  // 20260406 ZJH 全连接分类器
 
-        return vecResult;
+        return vecResult;  // 20260406 ZJH 返回所有命名参数
     }
 
     // 20260328 ZJH 重写 buffers() 收集所有 BN running stats
@@ -359,16 +365,17 @@ public:
         return vecResult;
     }
 
-    // 20260322 ZJH 重写 train()
+    // 20260322 ZJH 重写 train() 递归设置训练模式
     void train(bool bMode = true) override {
-        m_bTraining = bMode;
-        m_conv1.train(bMode);
-        m_bn1.train(bMode);
+        m_bTraining = bMode;  // 20260406 ZJH 设置自身训练标志
+        m_conv1.train(bMode);  // 20260406 ZJH 传播到初始卷积
+        m_bn1.train(bMode);    // 20260406 ZJH 传播到初始 BN
+        // 20260406 ZJH 传播到四个残差层的所有 Bottleneck
         for (auto& pBlock : m_vecLayer1) pBlock->train(bMode);
         for (auto& pBlock : m_vecLayer2) pBlock->train(bMode);
         for (auto& pBlock : m_vecLayer3) pBlock->train(bMode);
         for (auto& pBlock : m_vecLayer4) pBlock->train(bMode);
-        m_fc.train(bMode);
+        m_fc.train(bMode);  // 20260406 ZJH 传播到全连接层
     }
 
 private:
@@ -385,6 +392,77 @@ private:
     AdaptiveAvgPool2d m_adaptivePool;  // 20260322 ZJH 自适应平均池化
     Flatten m_flatten;                  // 20260322 ZJH 展平层
     Linear m_fc;                        // 20260322 ZJH 全连接分类器
+};
+
+// =============================================================================
+// 20260402 ZJH BlurPool — 抗锯齿下采样（Anti-aliased Pooling, Zhang 2019）
+// 在 stride>1 下采样前先做 3x3 高斯低通滤波，消除混叠伪影
+// ETFA 2025 论文证明: PatchCore + BlurPool → 生产线运动模糊鲁棒性 +2-3%
+// 用法: 替换 MaxPool(stride=2) 为 MaxPool(stride=1) + BlurPool(stride=2)
+// =============================================================================
+class BlurPool : public Module {
+public:
+    // 20260402 ZJH 构造函数
+    // nChannels: 通道数; nStride: 下采样步幅
+    BlurPool(int nChannels, int nStride = 2)
+        : m_nChannels(nChannels), m_nStride(nStride)  // 20260406 ZJH 保存通道数和下采样步幅
+    {
+        // 20260402 ZJH 3x3 高斯核（归一化）: [1,2,1; 2,4,2; 1,2,1] / 16
+        m_kernel = Tensor::zeros({1, 1, 3, 3});  // 20260406 ZJH 创建 3x3 核张量
+        float* pK = m_kernel.mutableFloatDataPtr();  // 20260406 ZJH 获取核数据指针
+        // 20260406 ZJH 按行填充高斯核权重（总和为 1.0，已归一化）
+        pK[0]=1/16.f; pK[1]=2/16.f; pK[2]=1/16.f;  // 20260406 ZJH 第 0 行: [1, 2, 1] / 16
+        pK[3]=2/16.f; pK[4]=4/16.f; pK[5]=2/16.f;  // 20260406 ZJH 第 1 行: [2, 4, 2] / 16
+        pK[6]=1/16.f; pK[7]=2/16.f; pK[8]=1/16.f;  // 20260406 ZJH 第 2 行: [1, 2, 1] / 16
+    }
+
+    // 20260402 ZJH forward — 高斯模糊 + stride 下采样
+    // 20260406 ZJH input: [N, C, H, W] 输入特征图
+    // 20260406 ZJH 返回: [N, C, H/stride, W/stride] 抗锯齿下采样结果
+    Tensor forward(const Tensor& input) override {
+        auto cIn = input.contiguous();  // 20260406 ZJH 确保内存连续
+        int nN = cIn.shape(0), nC = cIn.shape(1), nH = cIn.shape(2), nW = cIn.shape(3);  // 20260406 ZJH 获取输入维度
+        int nOutH = (nH + 1) / m_nStride;  // 20260402 ZJH 输出高度
+        int nOutW = (nW + 1) / m_nStride;  // 20260402 ZJH 输出宽度
+        auto result = Tensor::zeros({nN, nC, nOutH, nOutW});  // 20260406 ZJH 创建输出张量
+        float* pO = result.mutableFloatDataPtr();  // 20260406 ZJH 输出数据指针
+        const float* pI = cIn.floatDataPtr();  // 20260406 ZJH 输入数据指针
+        const float* pK = m_kernel.floatDataPtr();  // 20260406 ZJH 高斯核数据指针
+
+        // 20260402 ZJH 逐通道 3x3 高斯卷积 + stride 采样
+        // 20260406 ZJH 四重循环: batch → 通道 → 输出高度 → 输出宽度
+        for (int n = 0; n < nN; ++n) {
+            for (int c = 0; c < nC; ++c) {
+                for (int oh = 0; oh < nOutH; ++oh) {
+                    for (int ow = 0; ow < nOutW; ++ow) {
+                        int nCenterH = oh * m_nStride;  // 20260406 ZJH 输入中心行坐标
+                        int nCenterW = ow * m_nStride;  // 20260406 ZJH 输入中心列坐标
+                        float fSum = 0.0f;  // 20260406 ZJH 加权求和累加器
+                        // 20260406 ZJH 3x3 核窗口遍历（kh, kw 从 -1 到 1）
+                        for (int kh = -1; kh <= 1; ++kh) {
+                            for (int kw = -1; kw <= 1; ++kw) {
+                                int nh = nCenterH + kh, nw = nCenterW + kw;  // 20260406 ZJH 输入采样坐标
+                                // 20260406 ZJH 边界检查：超出范围的像素用零填充（隐式 zero-padding）
+                                if (nh >= 0 && nh < nH && nw >= 0 && nw < nW) {
+                                    fSum += pI[((n*nC+c)*nH+nh)*nW+nw] * pK[(kh+1)*3+(kw+1)];  // 20260406 ZJH 输入×核权重
+                                }
+                            }
+                        }
+                        pO[((n*nC+c)*nOutH+oh)*nOutW+ow] = fSum;  // 20260406 ZJH 写入输出
+                    }
+                }
+            }
+        }
+        return result;  // 20260406 ZJH 返回抗锯齿下采样结果
+    }
+
+    std::vector<Tensor*> parameters() override { return {}; }  // 20260402 ZJH 无可学习参数
+    void train(bool bMode = true) override { m_bTraining = bMode; }  // 20260406 ZJH 设置训练模式标志
+
+private:
+    int m_nChannels;   // 20260406 ZJH 通道数
+    int m_nStride;     // 20260406 ZJH 下采样步幅
+    Tensor m_kernel;  // 20260402 ZJH 3x3 高斯核
 };
 
 }  // namespace om

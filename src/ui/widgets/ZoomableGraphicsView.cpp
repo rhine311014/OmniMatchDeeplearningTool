@@ -137,6 +137,39 @@ void ZoomableGraphicsView::fitInView()
     emit zoomChanged(m_dZoomFactor * 100.0);
 }
 
+// 20260404 ZJH 缩放到指定矩形区域（检查页双击跳转定位标注用）
+// 正确同步 m_dZoomFactor 内部状态，确保后续滚轮缩放、百分比显示正常
+void ZoomableGraphicsView::fitInView(const QRectF& rect)
+{
+    if (rect.isEmpty()) {
+        return;  // 20260404 ZJH 空矩形，忽略
+    }
+
+    // 20260404 ZJH 重置变换矩阵
+    resetTransform();
+
+    // 20260404 ZJH 计算目标矩形填满视图所需的缩放因子
+    QRectF rectView = viewport()->rect();  // 20260404 ZJH 视图可见区域
+    double dScaleX = rectView.width() / rect.width();    // 20260404 ZJH 水平缩放比
+    double dScaleY = rectView.height() / rect.height();  // 20260404 ZJH 垂直缩放比
+    m_dZoomFactor = qMin(dScaleX, dScaleY);              // 20260404 ZJH 等比缩放取较小值
+
+    // 20260404 ZJH 限制缩放范围
+    m_dZoomFactor = qBound(m_dMinZoom, m_dZoomFactor, m_dMaxZoom);
+
+    // 20260404 ZJH 应用缩放变换
+    setTransform(QTransform::fromScale(m_dZoomFactor, m_dZoomFactor));
+
+    // 20260404 ZJH 居中到目标矩形中心
+    centerOn(rect.center());
+
+    // 20260404 ZJH 退出自适应模式（用户已定位到特定区域）
+    m_bFitOnResize = false;
+
+    // 20260404 ZJH 发射缩放变化信号
+    emit zoomChanged(m_dZoomFactor * 100.0);
+}
+
 // 20260322 ZJH 缩放到 1:1 实际像素大小
 void ZoomableGraphicsView::zoomToActualSize()
 {

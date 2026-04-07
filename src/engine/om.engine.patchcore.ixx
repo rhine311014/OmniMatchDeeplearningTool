@@ -4,16 +4,21 @@
 // 推理阶段: 提取测试图像 patch 特征 → 与 MemoryBank 中最近邻的距离 → 异常分数
 // 优势: 无需训练网络权重，仅需正常样本建库；少样本场景下表现优异
 // PatchCore 不继承 Module（非前向网络），使用独立的特征提取器
+// 20260402 ZJH Phase 1.2: 支持 ImageNet 预训练 ResNet18 骨干替换 4 层轻量 CNN
+//   对标 PatchCore 论文: WideResNet-50 Layer2+Layer3 多尺度特征拼接
+//   bUsePretrainedBackbone=true → ResNet18 前 3 层（Layer1~Layer3）提取 384 维多尺度特征
+//   bUsePretrainedBackbone=false → 保留原有 4 层轻量 CNN（向后兼容）
 module;
 
-#include <vector>
-#include <string>
-#include <memory>
-#include <cmath>
-#include <algorithm>
-#include <limits>
-#include <numeric>
-#include <cstdint>
+// 20260406 ZJH 标准库头文件包含
+#include <vector>    // 20260406 ZJH 动态数组容器
+#include <string>    // 20260406 ZJH 字符串类型
+#include <memory>    // 20260406 ZJH 智能指针 (shared_ptr, unique_ptr)
+#include <cmath>     // 20260406 ZJH 数学函数 (sqrt)
+#include <algorithm> // 20260406 ZJH 算法函数 (std::min, std::max, std::swap)
+#include <limits>    // 20260406 ZJH 数值极限 (numeric_limits::max)
+#include <numeric>   // 20260406 ZJH 数值算法 (std::iota)
+#include <cstdint>   // 20260406 ZJH 固定宽度整数类型 (uint32_t)
 
 export module om.engine.patchcore;
 
@@ -24,14 +29,173 @@ import om.engine.module;
 import om.engine.conv;
 import om.engine.linear;
 import om.engine.activations;
+import om.engine.resnet;  // 20260402 ZJH 导入 ResNet18/BasicBlock 用于预训练骨干
 
 export namespace om {
 
-// 20260322 ZJH PatchCoreExtractor — PatchCore 特征提取 CNN
+// 20260402 ZJH ResNet18FeatureExtractor — 使用 ResNet18 前 3 层提取多尺度特征
+// 对标 PatchCore 论文: WideResNet-50 Layer2+Layer3 拼接
+// 架构: conv1(3x3,s1,p1) → bn1 → relu → maxpool(3,2,1)
+//        → Layer1(2xBasicBlock, 64→64)   输出 [N, 64, H/4, W/4]
+//        → Layer2(2xBasicBlock, 64→128, s2) 输出 [N, 128, H/8, W/8]
+//        → Layer3(2xBasicBlock, 128→256, s2) 输出 [N, 256, H/16, W/16]
+// 多尺度拼接: Layer2 [N,128,H/8,W/8] + 上采样(Layer3) [N,256,H/8,W/8] → [N,384,H/8,W/8]
+// 优势: ImageNet 预训练权重包含丰富的通用视觉特征，异常检测精度远超随机初始化 CNN
+class ResNet18FeatureExtractor : public Module {
+public:
+    // 20260402 ZJH 构造函数
+    // nInChannels: 输入图像通道数，默认 3（RGB）
+    ResNet18FeatureExtractor(int nInChannels = 3) {
+        // 20260402 ZJH Stage 0: stem 卷积 + BN + ReLU + MaxPool
+        // ResNet18 标准 stem: conv1(3x3, stride=1, pad=1) → bn1 → relu → maxpool(3,2,1)
+        // 注意: 小图像模式使用 3x3 stride=1（非 ImageNet 7x7 stride=2），maxpool 条件使用
+        m_pConv1 = std::make_shared<Conv2d>(nInChannels, 64, 3, 1, 1, false);  // 20260402 ZJH stem conv 3→64
+        m_pBn1 = std::make_shared<BatchNorm2d>(64);  // 20260402 ZJH stem BN
+        m_pMaxpool = std::make_shared<MaxPool2d>(3, 2, 1);  // 20260402 ZJH 3x3 stride=2 pad=1 下采样 /2
+        m_pRelu = std::make_shared<ReLU>();  // 20260402 ZJH 共用 ReLU 激活
+
+        // 20260402 ZJH 注册 stem 模块（利用 Module 基类递归管理参数）
+        registerModule("conv1", m_pConv1);
+        registerModule("bn1", m_pBn1);
+        registerModule("maxpool", m_pMaxpool);
+        registerModule("relu", m_pRelu);
+
+        // 20260402 ZJH Stage 1: Layer1 = 2x BasicBlock(64→64, stride=1)
+        // 输入 [N, 64, H/2, W/2]（经 maxpool 后）→ 输出 [N, 64, H/2, W/2]
+        // 大图输入（H>32）经 maxpool 后为 H/2，此层不改变空间尺寸
+        auto addLayer = [&](const std::string& strName,
+                            std::vector<std::shared_ptr<BasicBlock>>& vecBlocks,
+                            int nInC, int nOutC, int nStride) {
+            vecBlocks.reserve(2);  // 20260402 ZJH 预分配 2 个 BasicBlock
+            for (int i = 0; i < 2; ++i) {
+                int s = (i == 0) ? nStride : 1;  // 20260402 ZJH 仅第一个 block 使用指定 stride
+                int c = (i == 0) ? nInC : nOutC;  // 20260402 ZJH 第一个 block 输入为 nInC，后续为 nOutC
+                auto pBlock = std::make_shared<BasicBlock>(c, nOutC, s);  // 20260402 ZJH 创建残差块
+                vecBlocks.push_back(pBlock);  // 20260402 ZJH 存入层列表
+                registerModule(strName + "." + std::to_string(i), pBlock);  // 20260402 ZJH 注册子模块
+            }
+        };
+
+        // 20260402 ZJH 构建 Layer1~Layer3（与 ResNet18 完全一致，共享权重结构）
+        addLayer("layer1", m_vecLayer1, 64, 64, 1);    // 20260402 ZJH Layer1: 64→64, stride=1
+        addLayer("layer2", m_vecLayer2, 64, 128, 2);   // 20260402 ZJH Layer2: 64→128, stride=2 → 空间 /2
+        addLayer("layer3", m_vecLayer3, 128, 256, 2);  // 20260402 ZJH Layer3: 128→256, stride=2 → 空间 /2
+    }
+
+    // 20260402 ZJH forward — 前向传播提取多尺度特征并拼接
+    // input: [N, Cin, H, W]
+    // 返回: [N, 384, H/8, W/8] 多尺度拼接特征（128 + 256 通道）
+    Tensor forward(const Tensor& input) override {
+        return extractMultiScale(input);  // 20260402 ZJH 委托给多尺度提取方法
+    }
+
+    // 20260402 ZJH extractMultiScale — 提取 Layer2+Layer3 多尺度特征并拼接
+    // 对标 PatchCore 论文的特征提取策略:
+    //   Layer2 输出 [N, 128, H/8, W/8] — 中间层特征，保留纹理细节
+    //   Layer3 输出 [N, 256, H/16, W/16] — 深层特征，捕获语义信息
+    //   上采样 Layer3 到 H/8 后与 Layer2 拼接 → [N, 384, H/8, W/8]
+    // input: [N, Cin, H, W]
+    // 返回: [N, 384, H/8, W/8]
+    Tensor extractMultiScale(const Tensor& input) {
+        // 20260402 ZJH Stem: conv1 → bn1 → relu → maxpool
+        auto x = m_pConv1->forward(input);   // 20260402 ZJH [N, 64, H, W]
+        x = m_pBn1->forward(x);              // 20260402 ZJH BN 归一化
+        x = m_pRelu->forward(x);             // 20260402 ZJH ReLU 激活
+        // 20260402 ZJH 大图（H>32）使用 maxpool 下采样，小图跳过
+        if (input.shape(2) > 32) {
+            x = m_pMaxpool->forward(x);      // 20260402 ZJH [N, 64, H/2, W/2]
+        }
+
+        // 20260402 ZJH Layer1: 2x BasicBlock(64→64)
+        for (auto& pBlock : m_vecLayer1) x = pBlock->forward(x);  // 20260402 ZJH [N, 64, H/2, W/2]
+
+        // 20260402 ZJH Layer2: 2x BasicBlock(64→128, stride=2)
+        auto xLayer2 = x;  // 20260402 ZJH 保存 Layer1 输出作为 Layer2 输入
+        for (auto& pBlock : m_vecLayer2) xLayer2 = pBlock->forward(xLayer2);
+        // 20260402 ZJH xLayer2 = [N, 128, H/4, W/4]（stem有maxpool时为H/4，无maxpool时为H/2）
+        // 对于大图: stem→/2, layer2→/2 = /4  但我们需要 /8
+        // 实际: stem conv(s1)→H, maxpool(s2)→H/2, layer1→H/2, layer2(s2)→H/4
+
+        // 20260402 ZJH Layer3: 2x BasicBlock(128→256, stride=2)
+        auto xLayer3 = xLayer2;  // 20260402 ZJH Layer2 输出作为 Layer3 输入
+        for (auto& pBlock : m_vecLayer3) xLayer3 = pBlock->forward(xLayer3);
+        // 20260402 ZJH xLayer3 = [N, 256, H/8, W/8]
+
+        // 20260402 ZJH 上采样 Layer3 到 Layer2 的空间尺寸
+        int nTargetH = xLayer2.shape(2);  // 20260402 ZJH Layer2 的空间高度
+        int nTargetW = xLayer2.shape(3);  // 20260402 ZJH Layer2 的空间宽度
+        auto xLayer3Up = nnUpsample(xLayer3, nTargetH, nTargetW);  // 20260402 ZJH [N, 256, H/4, W/4]
+
+        // 20260402 ZJH 沿通道维度拼接 Layer2 + Layer3（上采样后）
+        // [N, 128, H/4, W/4] + [N, 256, H/4, W/4] → [N, 384, H/4, W/4]
+        auto xConcat = tensorConcatChannels(xLayer2, xLayer3Up);  // 20260402 ZJH 多尺度特征拼接
+
+        return xConcat;  // 20260402 ZJH 返回 [N, 384, H/4, W/4] 多尺度特征
+    }
+
+    // 20260402 ZJH freeze — 冻结所有参数（PatchCore 不训练骨干网络）
+    // PatchCore 的特征提取器使用预训练权重直接建库，不做 fine-tune
+    // 冻结后 parameters() 仍返回参数列表（序列化用），但不传给优化器
+    void freeze() {
+        eval();  // 20260402 ZJH 切换到评估模式（BN 使用 running stats）
+        m_bFrozen = true;  // 20260402 ZJH 标记已冻结
+    }
+
+    // 20260402 ZJH isFrozen — 查询冻结状态
+    bool isFrozen() const { return m_bFrozen; }
+
+    // 20260402 ZJH getFeatureDim — 获取输出特征向量维度
+    // Layer2(128) + Layer3(256) = 384 维
+    int getFeatureDim() const { return 384; }
+
+private:
+    // 20260402 ZJH Stem 模块
+    std::shared_ptr<Conv2d> m_pConv1;        // 20260402 ZJH stem 卷积 3→64
+    std::shared_ptr<BatchNorm2d> m_pBn1;     // 20260402 ZJH stem BN
+    std::shared_ptr<MaxPool2d> m_pMaxpool;   // 20260402 ZJH stem 下采样池化
+    std::shared_ptr<ReLU> m_pRelu;           // 20260402 ZJH 共用 ReLU
+
+    // 20260402 ZJH ResNet18 Layer1~Layer3（每层 2 个 BasicBlock）
+    std::vector<std::shared_ptr<BasicBlock>> m_vecLayer1;  // 20260402 ZJH 64→64
+    std::vector<std::shared_ptr<BasicBlock>> m_vecLayer2;  // 20260402 ZJH 64→128, stride=2
+    std::vector<std::shared_ptr<BasicBlock>> m_vecLayer3;  // 20260402 ZJH 128→256, stride=2
+
+    bool m_bFrozen = false;  // 20260402 ZJH 参数冻结标记
+
+    // 20260402 ZJH nnUpsample — 最近邻上采样（内部工具函数）
+    // 将 [N, C, srcH, srcW] 上采样到 [N, C, nTargetH, nTargetW]
+    // 使用最近邻插值（无可训练参数，保持梯度简单）
+    static Tensor nnUpsample(const Tensor& input, int nTargetH, int nTargetW) {
+        auto cIn = input.contiguous();  // 20260402 ZJH 确保输入连续
+        int nN = cIn.shape(0), nC = cIn.shape(1);  // 20260402 ZJH batch 和通道数
+        int nH = cIn.shape(2), nW = cIn.shape(3);  // 20260402 ZJH 源空间尺寸
+        auto result = Tensor::zeros({nN, nC, nTargetH, nTargetW});  // 20260402 ZJH 分配输出
+        float* pO = result.mutableFloatDataPtr();  // 20260402 ZJH 输出数据指针
+        const float* pI = cIn.floatDataPtr();  // 20260402 ZJH 输入数据指针
+        // 20260402 ZJH 计算源-目标坐标缩放比
+        float fSH = static_cast<float>(nH) / static_cast<float>(nTargetH);
+        float fSW = static_cast<float>(nW) / static_cast<float>(nTargetW);
+        // 20260402 ZJH 逐像素最近邻采样
+        for (int n = 0; n < nN; ++n)
+            for (int c = 0; c < nC; ++c)
+                for (int th = 0; th < nTargetH; ++th) {
+                    int sh = std::min(static_cast<int>(th * fSH), nH - 1);  // 20260402 ZJH 源 y 坐标
+                    for (int tw = 0; tw < nTargetW; ++tw) {
+                        int sw = std::min(static_cast<int>(tw * fSW), nW - 1);  // 20260402 ZJH 源 x 坐标
+                        pO[((n * nC + c) * nTargetH + th) * nTargetW + tw] =
+                            pI[((n * nC + c) * nH + sh) * nW + sw];  // 20260402 ZJH 复制像素值
+                    }
+                }
+        return result;  // 20260402 ZJH 返回上采样结果
+    }
+};
+
+// 20260322 ZJH PatchCoreExtractor — PatchCore 特征提取 CNN（原始 4 层轻量版）
 // 4 层 Conv+BN+ReLU+MaxPool 结构（与 EfficientADBackbone 类似但独立实现）
 // 提取 patch 级特征用于与 MemoryBank 比较
 // 输入: [N, Cin, H, W]
 // 输出特征图: [N, 256, H/8, W/8]，每个空间位置对应一个 256 维 patch 特征向量
+// 20260402 ZJH 保留作为 fallback（bUsePretrainedBackbone=false 时使用）
 class PatchCoreExtractor : public Module {
 public:
     // 20260322 ZJH 构造函数
@@ -165,21 +329,63 @@ private:
 // 核心思想: 基于正常样本 patch 特征的记忆库 + 最近邻距离异常检测
 // 不继承 Module（非标准前向网络）
 // 使用流程:
-//   1. 创建 PatchCore 实例
-//   2. 调用 buildMemoryBank() 传入正常样本图像列表
-//   3. 推理时调用 computeAnomalyScore() 或 computeAnomalyMap()
+//   1. 创建 PatchCore 实例（bUsePretrainedBackbone=true 使用 ResNet18 骨干）
+//   2. 调用 loadPretrainedBackbone() 加载 ImageNet 预训练权重（可选）
+//   3. 调用 buildMemoryBank() 传入正常样本图像列表
+//   4. 推理时调用 computeAnomalyScore() 或 computeAnomalyMap()
+// 20260402 ZJH Phase 1.2: 新增 bUsePretrainedBackbone 标志
+//   true(默认) → 使用 ResNet18FeatureExtractor（384 维多尺度特征）
+//   false → 使用原有 PatchCoreExtractor（256 维轻量 CNN）
 class PatchCore {
 public:
     // 20260322 ZJH 构造函数
     // nInChannels: 输入图像通道数，默认 3（RGB）
     // nMaxMemorySize: MemoryBank 最大容量（coreset 采样上限），默认 1000
-    PatchCore(int nInChannels = 3, int nMaxMemorySize = 1000)
-        : m_extractor(nInChannels),
-          m_nMaxMemorySize(nMaxMemorySize),
-          m_nFeatureDim(256)  // 20260322 ZJH 特征向量维度，与 PatchCoreExtractor 输出通道一致
+    // 20260402 ZJH bUsePretrainedBackbone: 是否使用 ResNet18 预训练骨干，默认 true
+    PatchCore(int nInChannels = 3, int nMaxMemorySize = 1000, bool bUsePretrainedBackbone = true)
+        : m_nMaxMemorySize(nMaxMemorySize),
+          m_bUsePretrainedBackbone(bUsePretrainedBackbone)  // 20260402 ZJH 保存骨干选择标志
     {
-        m_extractor.eval();  // 20260322 ZJH 特征提取器设置为评估模式
+        if (m_bUsePretrainedBackbone) {
+            // 20260402 ZJH 使用 ResNet18 前 3 层作为特征提取器（对标 PatchCore 论文）
+            m_pResNetExtractor = std::make_unique<ResNet18FeatureExtractor>(nInChannels);
+            m_pResNetExtractor->freeze();  // 20260402 ZJH PatchCore 不训练骨干，直接冻结
+            m_nFeatureDim = m_pResNetExtractor->getFeatureDim();  // 20260402 ZJH 384 维
+        } else {
+            // 20260402 ZJH 使用原有 4 层轻量 CNN（向后兼容）
+            m_pLegacyExtractor = std::make_unique<PatchCoreExtractor>(nInChannels);
+            m_pLegacyExtractor->eval();  // 20260402 ZJH 设置为评估模式
+            m_nFeatureDim = m_pLegacyExtractor->getFeatureDim();  // 20260402 ZJH 256 维
+        }
     }
+
+    // 20260402 ZJH loadPretrainedBackbone — 从 .omm 文件加载 ImageNet 预训练权重到 ResNet18 骨干
+    // 仅在 bUsePretrainedBackbone=true 时有效
+    // strWeightPath: 预训练权重文件路径（.omm 格式，ResNet18 ImageNet 1000-class）
+    // 返回: 成功加载的参数层数
+    int loadPretrainedBackbone(const std::string& strWeightPath) {
+        if (!m_bUsePretrainedBackbone || !m_pResNetExtractor) {
+            return 0;  // 20260402 ZJH 非预训练模式，跳过
+        }
+        // 20260402 ZJH 权重加载由 EngineBridge 统一处理（通过 loadPyTorchPretrainedToSegModel）
+        // 此处仅提供接口，实际调用在 EngineBridge 中完成
+        return 0;  // 20260402 ZJH placeholder，实际加载在 EngineBridge 中
+    }
+
+    // 20260402 ZJH getBackboneModule — 获取骨干网络的 Module 引用（用于外部预训练加载）
+    // 返回: 当前使用的特征提取器 Module 指针（ResNet18 或轻量 CNN）
+    Module* getBackboneModule() {
+        if (m_bUsePretrainedBackbone && m_pResNetExtractor) {
+            return m_pResNetExtractor.get();  // 20260402 ZJH ResNet18 骨干
+        }
+        if (m_pLegacyExtractor) {
+            return m_pLegacyExtractor.get();  // 20260402 ZJH 原始 4 层 CNN
+        }
+        return nullptr;  // 20260402 ZJH 不应到达
+    }
+
+    // 20260402 ZJH isUsingPretrainedBackbone — 查询是否使用预训练骨干
+    bool isUsingPretrainedBackbone() const { return m_bUsePretrainedBackbone; }
 
     // 20260322 ZJH buildMemoryBank — 构建正常样本特征记忆库
     // 遍历所有正常图像，提取 patch 特征并存入 MemoryBank
@@ -190,8 +396,15 @@ public:
 
         // 20260322 ZJH 遍历所有正常图像，提取 patch 特征
         for (const auto& image : vecNormalImages) {
-            // 20260322 ZJH 前向提取特征图: [1, Cin, H, W] → [1, 256, Hf, Wf]
-            auto featureMap = m_extractor.forward(image);
+            // 20260402 ZJH 根据骨干类型选择特征提取器
+            // ResNet18 骨干: [1, Cin, H, W] → [1, 384, Hf, Wf]
+            // 轻量 CNN:     [1, Cin, H, W] → [1, 256, Hf, Wf]
+            Tensor featureMap;
+            if (m_bUsePretrainedBackbone && m_pResNetExtractor) {
+                featureMap = m_pResNetExtractor->forward(image);  // 20260402 ZJH ResNet18 多尺度特征
+            } else {
+                featureMap = m_pLegacyExtractor->forward(image);  // 20260402 ZJH 原始 4 层 CNN
+            }
             auto cFeats = featureMap.contiguous();
 
             int nChannels = cFeats.shape(1);  // 20260322 ZJH 特征通道数 (256)
@@ -231,10 +444,17 @@ public:
     // 20260322 ZJH computeAnomalyMap — 计算像素级异常热力图
     // 对测试图像每个 patch 位置计算与 MemoryBank 的最近邻距离
     // testImage: [1, Cin, H, W] 测试图像
-    // 返回: [1, 1, Hf, Wf] 异常热力图（Hf=H/8, Wf=W/8）
+    // 返回: [1, 1, Hf, Wf] 异常热力图
+    // 20260402 ZJH ResNet18 骨干: Hf=H/4, Wf=W/4（更高分辨率）
+    //              轻量 CNN:      Hf=H/8, Wf=W/8
     Tensor computeAnomalyMap(const Tensor& testImage) {
-        // 20260322 ZJH 提取测试图像特征图
-        auto featureMap = m_extractor.forward(testImage);
+        // 20260402 ZJH 根据骨干类型选择特征提取器
+        Tensor featureMap;
+        if (m_bUsePretrainedBackbone && m_pResNetExtractor) {
+            featureMap = m_pResNetExtractor->forward(testImage);  // 20260402 ZJH ResNet18 多尺度特征
+        } else {
+            featureMap = m_pLegacyExtractor->forward(testImage);  // 20260402 ZJH 原始 4 层 CNN
+        }
         auto cFeats = featureMap.contiguous();
 
         int nChannels = cFeats.shape(1);  // 20260322 ZJH 特征通道数 (256)
@@ -271,12 +491,22 @@ public:
         return static_cast<int>(m_vecMemoryBank.size());
     }
 
-    // 20260322 ZJH getExtractor — 获取特征提取器（用于预训练）
-    PatchCoreExtractor& getExtractor() { return m_extractor; }
+    // 20260402 ZJH getExtractor — 获取原始轻量特征提取器（向后兼容，仅在 legacy 模式可用）
+    // 注意: 使用 ResNet18 骨干时此方法不应被调用，建议使用 getBackboneModule()
+    PatchCoreExtractor* getLegacyExtractor() {
+        return m_pLegacyExtractor.get();  // 20260402 ZJH 可能为 nullptr
+    }
 
     // 20260322 ZJH getExtractorParameters — 获取特征提取器参数
+    // 20260402 ZJH 根据骨干类型返回对应的参数列表
     std::vector<Tensor*> getExtractorParameters() {
-        return m_extractor.parameters();
+        if (m_bUsePretrainedBackbone && m_pResNetExtractor) {
+            return m_pResNetExtractor->parameters();  // 20260402 ZJH ResNet18 骨干参数
+        }
+        if (m_pLegacyExtractor) {
+            return m_pLegacyExtractor->parameters();  // 20260402 ZJH 原始 CNN 参数
+        }
+        return {};  // 20260402 ZJH 空列表
     }
 
 private:
@@ -335,9 +565,12 @@ private:
         m_vecMemoryBank = std::move(vecSampled);  // 20260322 ZJH 替换为采样后的记忆库
     }
 
-    PatchCoreExtractor m_extractor;  // 20260322 ZJH 特征提取 CNN
+    // 20260402 ZJH 特征提取器（两种骨干互斥，只有一个非 null）
+    std::unique_ptr<ResNet18FeatureExtractor> m_pResNetExtractor;  // 20260402 ZJH ResNet18 预训练骨干（384 维）
+    std::unique_ptr<PatchCoreExtractor> m_pLegacyExtractor;        // 20260402 ZJH 原始 4 层 CNN（256 维）
+    bool m_bUsePretrainedBackbone;   // 20260402 ZJH 骨干选择标志: true=ResNet18, false=轻量CNN
     int m_nMaxMemorySize;            // 20260322 ZJH MemoryBank 最大容量
-    int m_nFeatureDim;               // 20260322 ZJH 特征向量维度 (256)
+    int m_nFeatureDim;               // 20260402 ZJH 特征向量维度（384 或 256，取决于骨干类型）
 
     // 20260322 ZJH MemoryBank: 存储正常样本 patch 级特征向量
     // 每个元素是一个 256 维 float 向量
@@ -345,4 +578,4 @@ private:
     std::vector<std::vector<float>> m_vecMemoryBank;
 };
 
-}  // namespace om
+}  // 20260406 ZJH namespace om 结束

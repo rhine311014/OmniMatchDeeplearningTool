@@ -26,6 +26,13 @@ int omCudaGetDeviceName(int nDeviceId, char* pNameBuf, int nBufSize);
 // 20260320 ZJH 获取设备显存信息（单位字节）
 int omCudaGetMemInfo(int nDeviceId, size_t* pFreeMem, size_t* pTotalMem);
 
+// 20260402 ZJH 获取设备计算能力（Compute Capability）
+// pMajor: 主版本号（7=Volta, 8=Ampere, 9=Hopper/Ada）
+// pMinor: 次版本号
+// 返回: 0 成功, 非 0 失败
+// 用途: Compute Capability ≥ 7.0 的 GPU 支持 Tensor Core FP16 加速
+int omCudaGetComputeCapability(int nDeviceId, int* pMajor, int* pMinor);
+
 // ===== 内存管理（使用内存池） =====
 
 // 20260320 ZJH 分配 GPU 内存（20260324 ZJH 通过内存池分配，复用已释放块）
@@ -495,6 +502,32 @@ int omCudaMallocHost(void** ppPtr, size_t nBytes);
 
 // 20260330 ZJH 释放锁页 Host 内存
 int omCudaFreeHost(void* pPtr);
+
+// =====================================================================
+// 20260402 ZJH [OPT-3.5] CUDA Graph — 推理图捕获与回放
+// 首次推理时捕获完整的 kernel launch 序列为 CUDA Graph
+// 后续推理直接 replay（跳过 CPU 侧的 kernel dispatch 开销）
+// 效果: 推理延迟 -20-40%（对小模型尤其显著，因为 kernel dispatch 占比高）
+// =====================================================================
+
+// 20260402 ZJH 开始 CUDA Graph 捕获（在计算流上）
+// 调用后所有 kernel launch 将被录制而不是立即执行
+// 返回: 0 成功, 非 0 失败
+int omCudaGraphBeginCapture();
+
+// 20260402 ZJH 结束 CUDA Graph 捕获并实例化为可执行图
+// pGraphExec: 输出可执行图句柄（void* 包装 cudaGraphExec_t）
+// 返回: 0 成功, 非 0 失败
+int omCudaGraphEndCapture(void** pGraphExec);
+
+// 20260402 ZJH 回放已捕获的 CUDA Graph（替代正常的前向传播）
+// pGraphExec: 由 omCudaGraphEndCapture 返回的可执行图句柄
+// 返回: 0 成功, 非 0 失败
+int omCudaGraphLaunch(void* pGraphExec);
+
+// 20260402 ZJH 释放 CUDA Graph 资源
+// pGraphExec: 可执行图句柄
+int omCudaGraphDestroy(void* pGraphExec);
 
 #ifdef __cplusplus
 }

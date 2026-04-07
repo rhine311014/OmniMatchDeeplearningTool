@@ -48,12 +48,20 @@ public:
 
     Tensor forward(const Tensor& input) override {
         // 20260402 ZJH 根据 m_bUseGroupNorm 选择归一化层（GN 或 BN）
-        auto out = m_relu.forward((m_bUseGroupNorm ? m_gn1 : m_bn1).forward(m_conv1.forward(input)));
+        // 不使用三元运算符（BatchNorm2d 和 GroupNorm2d 类型不同，无法隐式转换）
+        auto conv1Out = m_conv1.forward(input);  // 20260402 ZJH 第一层卷积
+        auto norm1Out = m_bUseGroupNorm ? m_gn1.forward(conv1Out) : m_bn1.forward(conv1Out);
+        auto out = m_relu.forward(norm1Out);
         if (m_dropout.isTraining() && m_fDrop > 0.01f) out = m_dropout.forward(out);
-        out = (m_bUseGroupNorm ? m_gn2 : m_bn2).forward(m_conv2.forward(out));
-        auto shortcut = m_bDownsample
-            ? (m_bUseGroupNorm ? m_gnDs : m_bnDs).forward(m_convDs.forward(input))
-            : input;
+        auto conv2Out = m_conv2.forward(out);  // 20260402 ZJH 第二层卷积
+        out = m_bUseGroupNorm ? m_gn2.forward(conv2Out) : m_bn2.forward(conv2Out);
+        Tensor shortcut;  // 20260402 ZJH 残差分支
+        if (m_bDownsample) {
+            auto dsConvOut = m_convDs.forward(input);
+            shortcut = m_bUseGroupNorm ? m_gnDs.forward(dsConvOut) : m_bnDs.forward(dsConvOut);
+        } else {
+            shortcut = input;
+        }
         out = tensorAdd(out, shortcut);
         return m_relu.forward(out);
     }
@@ -145,11 +153,11 @@ public:
     }
 
 private:
-    Conv2d m_conv1, m_conv2;
-    BatchNorm2d m_bn1, m_bn2;
-    Dropout2d m_dropout;
-    float m_fDrop = 0.0f;
-    bool m_bDownsample;
+    Conv2d m_conv1, m_conv2;  // 20260406 ZJH 两层 3x3 卷积
+    BatchNorm2d m_bn1, m_bn2;  // 20260406 ZJH 两层 BatchNorm
+    Dropout2d m_dropout;  // 20260406 ZJH 空间 Dropout（仅训练模式生效）
+    float m_fDrop = 0.0f;  // 20260406 ZJH Dropout 概率
+    bool m_bDownsample;  // 20260406 ZJH 是否需要下采样捷径（stride!=1 或通道数变化）
     Conv2d m_convDs;       // 20260331 ZJH 在初始化列表中构造（不再使用默认初始化器）
     BatchNorm2d m_bnDs;    // 20260331 ZJH 在初始化列表中构造
     GroupNorm2d m_gn1;     // 20260402 ZJH 第一层 GroupNorm（bUseGroupNorm=true 时使用）
@@ -338,16 +346,16 @@ public:
     }
 
 private:
-    int m_nIn, m_nOut;
-    Conv2d m_conv1x1;
-    BatchNorm2d m_bn1;
-    DilatedConv2d m_atrous6, m_atrous12, m_atrous18;
-    BatchNorm2d m_bn6, m_bn12, m_bn18;
-    Conv2d m_convPool;
-    BatchNorm2d m_bnPool;
-    Conv2d m_convMerge;
-    BatchNorm2d m_bnMerge;
-    Dropout2d m_dropout;
+    int m_nIn, m_nOut;  // 20260406 ZJH 输入/输出通道数
+    Conv2d m_conv1x1;  // 20260406 ZJH 分支1: 1x1 卷积
+    BatchNorm2d m_bn1;  // 20260406 ZJH 分支1 BN
+    DilatedConv2d m_atrous6, m_atrous12, m_atrous18;  // 20260406 ZJH 分支2-4: 膨胀卷积 (rate=6/12/18)
+    BatchNorm2d m_bn6, m_bn12, m_bn18;  // 20260406 ZJH 分支2-4 BN
+    Conv2d m_convPool;  // 20260406 ZJH 分支5: 全局池化后 1x1 卷积
+    BatchNorm2d m_bnPool;  // 20260406 ZJH 分支5 BN
+    Conv2d m_convMerge;  // 20260406 ZJH 合并 1x1 降维 (5*nOut → nOut)
+    BatchNorm2d m_bnMerge;  // 20260406 ZJH 合并 BN
+    Dropout2d m_dropout;  // 20260406 ZJH Dropout (p=0.5)
     // 20260402 ZJH GroupNorm 实例（bUseGroupNorm=true 时使用）
     GroupNorm2d m_gn1, m_gn6, m_gn12, m_gn18;
     GroupNorm2d m_gnPool, m_gnMerge;
@@ -385,7 +393,9 @@ public:
     Tensor forward(const Tensor& input) override {
         // 20260320 ZJH 编码器
         // 20260402 ZJH stem 归一化根据 m_bUseGroupNorm 选择 GN 或 BN
-        auto stem = m_relu.forward((m_bUseGroupNorm ? m_gnStem : m_bnStem).forward(m_stem.forward(input)));  // [N,64,H,W]
+        auto stemConv = m_stem.forward(input);  // 20260402 ZJH stem 卷积
+        auto stemNorm = m_bUseGroupNorm ? m_gnStem.forward(stemConv) : m_bnStem.forward(stemConv);
+        auto stem = m_relu.forward(stemNorm);  // [N,64,H,W]
         auto l1 = m_layer1_1.forward(m_layer1_0.forward(stem));  // [N,64,H,W] 低级特征
         auto l2 = m_layer2_1.forward(m_layer2_0.forward(l1));    // [N,128,H/2,W/2]
         auto l3 = m_layer3_1.forward(m_layer3_0.forward(l2));    // [N,256,H/4,W/4]
@@ -401,7 +411,9 @@ public:
 
         // 20260331 ZJH 低级特征 1x1 降维（l2: 128ch → 48ch）
         // 20260402 ZJH 根据 m_bUseGroupNorm 选择 GN 或 BN
-        auto lowFeat = m_relu.forward((m_bUseGroupNorm ? m_gnLow : m_bnLow).forward(m_lowConv.forward(l2)));  // [N,48,H/2,W/2]
+        auto lowConvOut = m_lowConv.forward(l2);  // 20260402 ZJH 低级特征 1x1 降维
+        auto lowNorm = m_bUseGroupNorm ? m_gnLow.forward(lowConvOut) : m_bnLow.forward(lowConvOut);
+        auto lowFeat = m_relu.forward(lowNorm);  // [N,48,H/2,W/2]
 
         // 20260331 ZJH 双线性上采样 ASPP 到低级特征尺寸（设备无关，支持 autograd）
         // ASPP 输出 [B,256,H/4,W/4]，低级特征 [B,48,H,W]，倍率 = nLowH / nAH
@@ -413,8 +425,12 @@ public:
 
         // 20260320 ZJH 解码器 3x3 conv x2 + Dropout
         // 20260402 ZJH 解码器归一化根据 m_bUseGroupNorm 选择 GN 或 BN
-        auto dec = m_relu.forward((m_bUseGroupNorm ? m_gnDec1 : m_bnDec1).forward(m_decConv1.forward(concat)));
-        dec = m_relu.forward((m_bUseGroupNorm ? m_gnDec2 : m_bnDec2).forward(m_decConv2.forward(dec)));
+        auto decConv1Out = m_decConv1.forward(concat);  // 20260402 ZJH 解码器 conv1
+        auto decNorm1 = m_bUseGroupNorm ? m_gnDec1.forward(decConv1Out) : m_bnDec1.forward(decConv1Out);
+        auto dec = m_relu.forward(decNorm1);
+        auto decConv2Out = m_decConv2.forward(dec);  // 20260402 ZJH 解码器 conv2
+        auto decNorm2 = m_bUseGroupNorm ? m_gnDec2.forward(decConv2Out) : m_bnDec2.forward(decConv2Out);
+        dec = m_relu.forward(decNorm2);
         dec = m_decDropout.forward(dec);
 
         // 20260320 ZJH 分类头 1x1 conv
@@ -554,18 +570,20 @@ public:
     }
 
 private:
-    int m_nNumClasses;
-    Conv2d m_stem; BatchNorm2d m_bnStem;
-    ResBlock m_layer1_0, m_layer1_1;
-    ResBlock m_layer2_0, m_layer2_1;
-    ResBlock m_layer3_0, m_layer3_1;
-    ResBlock m_layer4_0, m_layer4_1;
-    ASPPModule m_aspp;
-    Conv2d m_lowConv; BatchNorm2d m_bnLow;
-    Conv2d m_decConv1; BatchNorm2d m_bnDec1;
-    Conv2d m_decConv2; BatchNorm2d m_bnDec2;
-    Dropout2d m_decDropout;
-    Conv2d m_classifier;
+    int m_nNumClasses;  // 20260406 ZJH 输出分割类别数
+    // 20260406 ZJH ResNet 风格编码器
+    Conv2d m_stem; BatchNorm2d m_bnStem;  // 20260406 ZJH Stem 3x3 卷积 + BN
+    ResBlock m_layer1_0, m_layer1_1;  // 20260406 ZJH 编码器层1: 64→64 (stride=1)
+    ResBlock m_layer2_0, m_layer2_1;  // 20260406 ZJH 编码器层2: 64→128 (stride=2)
+    ResBlock m_layer3_0, m_layer3_1;  // 20260406 ZJH 编码器层3: 128→256 (stride=2)
+    ResBlock m_layer4_0, m_layer4_1;  // 20260406 ZJH 编码器层4: 256→512 (stride=1, 保持 H/4)
+    ASPPModule m_aspp;  // 20260406 ZJH ASPP 空洞空间金字塔池化模块
+    // 20260406 ZJH 解码器: 低级特征融合 + 3x3 conv + 分类头
+    Conv2d m_lowConv; BatchNorm2d m_bnLow;  // 20260406 ZJH 低级特征 1x1 降维 (128→48)
+    Conv2d m_decConv1; BatchNorm2d m_bnDec1;  // 20260406 ZJH 解码器 conv1 (304→256)
+    Conv2d m_decConv2; BatchNorm2d m_bnDec2;  // 20260406 ZJH 解码器 conv2 (256→256)
+    Dropout2d m_decDropout;  // 20260406 ZJH 解码器 Dropout (p=0.5)
+    Conv2d m_classifier;  // 20260406 ZJH 分类头 1x1 Conv (256→nClasses)
     // 20260402 ZJH GroupNorm 实例（bUseGroupNorm=true 时使用）
     GroupNorm2d m_gnStem;   // 20260402 ZJH stem GN (64ch)
     GroupNorm2d m_gnLow;    // 20260402 ZJH 低级特征 GN (48ch)
@@ -579,54 +597,84 @@ private:
 // SegNet 完整版 — 对称编码器-解码器 + BN
 // =========================================================
 
+// 20260406 ZJH SegNet — 对称编码器-解码器分割网络
+// 编码器: 4 组 Conv-BN-ReLU + MaxPool 逐步下采样
+// 解码器: 4 组 ConvTranspose(上采样) + Conv-BN-ReLU 逐步恢复分辨率
+// 最终: 1x1 Conv 分类头输出逐像素类别 logits
+// 输入: [N, nInChannels, H, W] -> 输出: [N, nNumClasses, H, W]
 class SegNet : public Module {
 public:
+    // 20260406 ZJH 构造函数
+    // nInChannels: 输入通道数（默认 1 灰度图）
+    // nNumClasses: 输出类别数（默认 2，含背景）
     SegNet(int nInChannels = 1, int nNumClasses = 2)
         : m_nNumClasses(nNumClasses),
+          // 20260406 ZJH 编码器组1: nIn→64, 保持分辨率后 2x 下采样
           m_enc1a(nInChannels, 64, 3, 1, 1, true), m_bn1a(64),
           m_enc1b(64, 64, 3, 1, 1, true), m_bn1b(64), m_pool1(2),
+          // 20260406 ZJH 编码器组2: 64→128, 2x 下采样
           m_enc2a(64, 128, 3, 1, 1, true), m_bn2a(128),
           m_enc2b(128, 128, 3, 1, 1, true), m_bn2b(128), m_pool2(2),
+          // 20260406 ZJH 编码器组3: 128→256, 2x 下采样
           m_enc3a(128, 256, 3, 1, 1, true), m_bn3a(256),
           m_enc3b(256, 256, 3, 1, 1, true), m_bn3b(256), m_pool3(2),
+          // 20260406 ZJH 编码器组4: 256→512, 2x 下采样（总下采样 16 倍）
           m_enc4a(256, 512, 3, 1, 1, true), m_bn4a(512),
           m_enc4b(512, 512, 3, 1, 1, true), m_bn4b(512), m_pool4(2),
+          // 20260406 ZJH 解码器组4: ConvTranspose 2x 上采样 + Conv 512→256
           m_dec4a(512, 512, 4, 2, 1, true), m_dbn4a(512),
           m_dec4b(512, 256, 3, 1, 1, true), m_dbn4b(256),
+          // 20260406 ZJH 解码器组3: 2x 上采样 + Conv 256→128
           m_dec3a(256, 256, 4, 2, 1, true), m_dbn3a(256),
           m_dec3b(256, 128, 3, 1, 1, true), m_dbn3b(128),
+          // 20260406 ZJH 解码器组2: 2x 上采样 + Conv 128→64
           m_dec2a(128, 128, 4, 2, 1, true), m_dbn2a(128),
           m_dec2b(128, 64, 3, 1, 1, true), m_dbn2b(64),
+          // 20260406 ZJH 解码器组1: 2x 上采样恢复到原始分辨率
           m_dec1a(64, 64, 4, 2, 1, true), m_dbn1a(64),
+          // 20260406 ZJH 分类头: 1x1 Conv 输出 nClasses 通道
           m_classifier(64, nNumClasses, 1, 1, 0, true)
     {}
 
+    // 20260406 ZJH forward — SegNet 前向传播
+    // input: [N, nInChannels, H, W]（H, W 应为 16 的倍数）
+    // 返回: [N, nNumClasses, H, W] 逐像素分类 logits
     Tensor forward(const Tensor& input) override {
+        // 20260406 ZJH 编码器组1: [N,Cin,H,W] → [N,64,H/2,W/2]
         auto h = m_relu.forward(m_bn1a.forward(m_enc1a.forward(input)));
         h = m_relu.forward(m_bn1b.forward(m_enc1b.forward(h)));
-        h = m_pool1.forward(h);
+        h = m_pool1.forward(h);  // 20260406 ZJH 2x 下采样
+        // 20260406 ZJH 编码器组2: [N,64,H/2,W/2] → [N,128,H/4,W/4]
         h = m_relu.forward(m_bn2a.forward(m_enc2a.forward(h)));
         h = m_relu.forward(m_bn2b.forward(m_enc2b.forward(h)));
-        h = m_pool2.forward(h);
+        h = m_pool2.forward(h);  // 20260406 ZJH 2x 下采样
+        // 20260406 ZJH 编码器组3: [N,128,H/4,W/4] → [N,256,H/8,W/8]
         h = m_relu.forward(m_bn3a.forward(m_enc3a.forward(h)));
         h = m_relu.forward(m_bn3b.forward(m_enc3b.forward(h)));
-        h = m_pool3.forward(h);
+        h = m_pool3.forward(h);  // 20260406 ZJH 2x 下采样
+        // 20260406 ZJH 编码器组4: [N,256,H/8,W/8] → [N,512,H/16,W/16]
         h = m_relu.forward(m_bn4a.forward(m_enc4a.forward(h)));
         h = m_relu.forward(m_bn4b.forward(m_enc4b.forward(h)));
-        h = m_pool4.forward(h);
-        // 解码器
-        h = m_relu.forward(m_dbn4a.forward(m_dec4a.forward(h)));
-        h = m_relu.forward(m_dbn4b.forward(m_dec4b.forward(h)));
+        h = m_pool4.forward(h);  // 20260406 ZJH 2x 下采样
+        // 20260406 ZJH 解码器组4: [N,512,H/16,W/16] → [N,256,H/8,W/8]
+        h = m_relu.forward(m_dbn4a.forward(m_dec4a.forward(h)));  // 20260406 ZJH ConvTranspose 2x 上采样
+        h = m_relu.forward(m_dbn4b.forward(m_dec4b.forward(h)));  // 20260406 ZJH Conv 512→256
+        // 20260406 ZJH 解码器组3: [N,256,H/8,W/8] → [N,128,H/4,W/4]
         h = m_relu.forward(m_dbn3a.forward(m_dec3a.forward(h)));
         h = m_relu.forward(m_dbn3b.forward(m_dec3b.forward(h)));
+        // 20260406 ZJH 解码器组2: [N,128,H/4,W/4] → [N,64,H/2,W/2]
         h = m_relu.forward(m_dbn2a.forward(m_dec2a.forward(h)));
         h = m_relu.forward(m_dbn2b.forward(m_dec2b.forward(h)));
+        // 20260406 ZJH 解码器组1: [N,64,H/2,W/2] → [N,64,H,W]
         h = m_relu.forward(m_dbn1a.forward(m_dec1a.forward(h)));
-        return m_classifier.forward(h);
+        // 20260406 ZJH 分类头: [N,64,H,W] → [N,nClasses,H,W]
+        return m_classifier.forward(h);  // 20260406 ZJH 返回逐像素分类 logits
     }
 
+    // 20260406 ZJH 重写 parameters() 收集编码器+解码器+分类头所有可训练参数
     std::vector<Tensor*> parameters() override {
         std::vector<Tensor*> v;
+        // 20260406 ZJH 编码器组1-4 卷积 + BN 参数
         for (auto* p : m_enc1a.parameters()) v.push_back(p);
         for (auto* p : m_bn1a.parameters()) v.push_back(p);
         for (auto* p : m_enc1b.parameters()) v.push_back(p);
@@ -643,6 +691,7 @@ public:
         for (auto* p : m_bn4a.parameters()) v.push_back(p);
         for (auto* p : m_enc4b.parameters()) v.push_back(p);
         for (auto* p : m_bn4b.parameters()) v.push_back(p);
+        // 20260406 ZJH 解码器组4-1 反卷积/卷积 + BN 参数
         for (auto* p : m_dec4a.parameters()) v.push_back(p);
         for (auto* p : m_dbn4a.parameters()) v.push_back(p);
         for (auto* p : m_dec4b.parameters()) v.push_back(p);
@@ -657,8 +706,9 @@ public:
         for (auto* p : m_dbn2b.parameters()) v.push_back(p);
         for (auto* p : m_dec1a.parameters()) v.push_back(p);
         for (auto* p : m_dbn1a.parameters()) v.push_back(p);
+        // 20260406 ZJH 分类头参数
         for (auto* p : m_classifier.parameters()) v.push_back(p);
-        return v;
+        return v;  // 20260406 ZJH 返回所有可训练参数指针
     }
 
     // 20260328 ZJH 重写 buffers() 收集所有 BN running stats
@@ -706,23 +756,33 @@ public:
     }
 
 private:
-    int m_nNumClasses;
-    Conv2d m_enc1a, m_enc1b, m_enc2a, m_enc2b, m_enc3a, m_enc3b, m_enc4a, m_enc4b;
-    BatchNorm2d m_bn1a, m_bn1b, m_bn2a, m_bn2b, m_bn3a, m_bn3b, m_bn4a, m_bn4b;
-    MaxPool2d m_pool1, m_pool2, m_pool3, m_pool4;
-    ConvTranspose2d m_dec4a, m_dec3a, m_dec2a, m_dec1a;
-    Conv2d m_dec4b, m_dec3b, m_dec2b;
-    BatchNorm2d m_dbn4a, m_dbn4b, m_dbn3a, m_dbn3b, m_dbn2a, m_dbn2b, m_dbn1a;
-    Conv2d m_classifier;
-    ReLU m_relu;
+    int m_nNumClasses;  // 20260406 ZJH 输出分割类别数
+    // 20260406 ZJH 编码器: 4 组 Conv-BN-ReLU + MaxPool
+    Conv2d m_enc1a, m_enc1b, m_enc2a, m_enc2b, m_enc3a, m_enc3b, m_enc4a, m_enc4b;  // 20260406 ZJH 编码器卷积层
+    BatchNorm2d m_bn1a, m_bn1b, m_bn2a, m_bn2b, m_bn3a, m_bn3b, m_bn4a, m_bn4b;  // 20260406 ZJH 编码器 BN 层
+    MaxPool2d m_pool1, m_pool2, m_pool3, m_pool4;  // 20260406 ZJH 各组的 2x2 最大池化
+    // 20260406 ZJH 解码器: ConvTranspose(上采样) + Conv-BN-ReLU
+    ConvTranspose2d m_dec4a, m_dec3a, m_dec2a, m_dec1a;  // 20260406 ZJH 反卷积上采样层（4组各 1 个）
+    Conv2d m_dec4b, m_dec3b, m_dec2b;  // 20260406 ZJH 解码器 3x3 卷积层（组4/3/2 各 1 个）
+    BatchNorm2d m_dbn4a, m_dbn4b, m_dbn3a, m_dbn3b, m_dbn2a, m_dbn2b, m_dbn1a;  // 20260406 ZJH 解码器 BN 层
+    Conv2d m_classifier;  // 20260406 ZJH 1x1 分类头卷积
+    ReLU m_relu;  // 20260406 ZJH 共用 ReLU 激活
 };
 
 // =========================================================
 // FCN-8s 完整版 — VGG 风格编码器 + 跳跃融合
 // =========================================================
 
+// 20260406 ZJH FCN-8s — 全卷积网络（VGG 编码器 + 跳跃融合）
+// 编码器: VGG-16 风格 5 组 Conv-BN-ReLU + Pool
+// FC 替代: 1x1 Conv 替代全连接层
+// 跳跃融合: score_7(2x) + pool4 → (2x) + pool3 → (8x) 恢复原始分辨率
+// 输入: [N, nInChannels, H, W] → 输出: [N, nNumClasses, H, W]
 class FCN8s : public Module {
 public:
+    // 20260406 ZJH 构造函数
+    // nInChannels: 输入通道数（默认 1 灰度图）
+    // nNumClasses: 输出类别数（默认 2，含背景）
     FCN8s(int nInChannels = 1, int nNumClasses = 2)
         : m_nNumClasses(nNumClasses),
           // 20260320 ZJH VGG 风格编码器（5 组）
@@ -749,24 +809,32 @@ public:
           m_drop6(0.5f), m_drop7(0.5f)
     {}
 
+    // 20260406 ZJH forward — FCN-8s 前向传播
+    // input: [N, nInChannels, H, W]
+    // 返回: [N, nNumClasses, H, W] 逐像素分类 logits
     Tensor forward(const Tensor& input) override {
-        int nBatch = input.shape(0);
+        int nBatch = input.shape(0);  // 20260406 ZJH 批次大小
 
+        // 20260406 ZJH VGG 编码器组1: [N,Cin,H,W] → [N,64,H/2,W/2]
         auto h = m_relu.forward(m_b1a.forward(m_c1a.forward(input)));
         h = m_relu.forward(m_b1b.forward(m_c1b.forward(h)));
-        h = m_p1.forward(h);
+        h = m_p1.forward(h);  // 20260406 ZJH pool1: 2x 下采样
+        // 20260406 ZJH VGG 编码器组2: [N,64,H/2,W/2] → [N,128,H/4,W/4]
         h = m_relu.forward(m_b2a.forward(m_c2a.forward(h)));
         h = m_relu.forward(m_b2b.forward(m_c2b.forward(h)));
-        h = m_p2.forward(h);
+        h = m_p2.forward(h);  // 20260406 ZJH pool2: 2x 下采样
+        // 20260406 ZJH VGG 编码器组3: [N,128,H/4,W/4] → [N,256,H/8,W/8]
         h = m_relu.forward(m_b3a.forward(m_c3a.forward(h)));
         h = m_relu.forward(m_b3b.forward(m_c3b.forward(h)));
         auto pool3 = m_p3.forward(h);  // 20260320 ZJH 保存 pool3 用于跳跃连接
+        // 20260406 ZJH VGG 编码器组4: [N,256,H/8,W/8] → [N,512,H/16,W/16]
         h = m_relu.forward(m_b4a.forward(m_c4a.forward(pool3)));
         h = m_relu.forward(m_b4b.forward(m_c4b.forward(h)));
         auto pool4 = m_p4.forward(h);  // 20260320 ZJH 保存 pool4
+        // 20260406 ZJH VGG 编码器组5: [N,512,H/16,W/16] → [N,512,H/32,W/32]
         h = m_relu.forward(m_b5a.forward(m_c5a.forward(pool4)));
         h = m_relu.forward(m_b5b.forward(m_c5b.forward(h)));
-        h = m_p5.forward(h);
+        h = m_p5.forward(h);  // 20260406 ZJH pool5: 2x 下采样
 
         // 20260320 ZJH FC 替代层
         h = m_relu.forward(m_fc6.forward(h));
@@ -778,43 +846,45 @@ public:
         auto s7 = m_score7.forward(h);
         auto up7 = m_up7.forward(s7);              // 2x 上采样到 pool4 尺寸
 
-        // 20260320 ZJH score_pool4 + up7 逐元素加
-        auto s4 = m_score4.forward(pool4);
-        int nMinH4 = std::min(up7.shape(2), s4.shape(2));
-        int nMinW4 = std::min(up7.shape(3), s4.shape(3));
-        auto fuse4 = Tensor::zeros({nBatch, m_nNumClasses, nMinH4, nMinW4});
+        // 20260320 ZJH score_pool4 + up7 逐元素加（第一次跳跃融合）
+        auto s4 = m_score4.forward(pool4);  // 20260406 ZJH pool4 投影到 nClasses 通道
+        int nMinH4 = std::min(up7.shape(2), s4.shape(2));  // 20260406 ZJH 取最小高度（防止尺寸不匹配）
+        int nMinW4 = std::min(up7.shape(3), s4.shape(3));  // 20260406 ZJH 取最小宽度
+        auto fuse4 = Tensor::zeros({nBatch, m_nNumClasses, nMinH4, nMinW4});  // 20260406 ZJH 融合结果张量
         {
-            auto cu = up7.contiguous(); auto cs = s4.contiguous();
-            float* pF = fuse4.mutableFloatDataPtr();
-            const float* pU = cu.floatDataPtr(); const float* pS = cs.floatDataPtr();
+            auto cu = up7.contiguous(); auto cs = s4.contiguous();  // 20260406 ZJH 确保连续存储
+            float* pF = fuse4.mutableFloatDataPtr();  // 20260406 ZJH 融合结果指针
+            const float* pU = cu.floatDataPtr(); const float* pS = cs.floatDataPtr();  // 20260406 ZJH 上采样/score 数据指针
+            // 20260406 ZJH 逐像素逐通道相加: fuse4 = up7 + score_pool4
             for (int n = 0; n < nBatch; ++n)
             for (int c = 0; c < m_nNumClasses; ++c)
             for (int hh = 0; hh < nMinH4; ++hh)
             for (int ww = 0; ww < nMinW4; ++ww) {
-                int idxF = ((n * m_nNumClasses + c) * nMinH4 + hh) * nMinW4 + ww;
-                pF[idxF] = pU[((n * m_nNumClasses + c) * up7.shape(2) + hh) * up7.shape(3) + ww]
-                         + pS[((n * m_nNumClasses + c) * s4.shape(2) + hh) * s4.shape(3) + ww];
+                int idxF = ((n * m_nNumClasses + c) * nMinH4 + hh) * nMinW4 + ww;  // 20260406 ZJH 融合张量线性索引
+                pF[idxF] = pU[((n * m_nNumClasses + c) * up7.shape(2) + hh) * up7.shape(3) + ww]  // 20260406 ZJH up7 值
+                         + pS[((n * m_nNumClasses + c) * s4.shape(2) + hh) * s4.shape(3) + ww];  // 20260406 ZJH score_pool4 值
             }
         }
 
-        auto up4 = m_up4.forward(fuse4);  // 2x 上采样到 pool3 尺寸
+        auto up4 = m_up4.forward(fuse4);  // 20260406 ZJH 2x 上采样到 pool3 尺寸
 
-        // 20260320 ZJH score_pool3 + up4 逐元素加
-        auto s3 = m_score3.forward(pool3);
-        int nMinH3 = std::min(up4.shape(2), s3.shape(2));
-        int nMinW3 = std::min(up4.shape(3), s3.shape(3));
-        auto fuse3 = Tensor::zeros({nBatch, m_nNumClasses, nMinH3, nMinW3});
+        // 20260320 ZJH score_pool3 + up4 逐元素加（第二次跳跃融合）
+        auto s3 = m_score3.forward(pool3);  // 20260406 ZJH pool3 投影到 nClasses 通道
+        int nMinH3 = std::min(up4.shape(2), s3.shape(2));  // 20260406 ZJH 取最小高度
+        int nMinW3 = std::min(up4.shape(3), s3.shape(3));  // 20260406 ZJH 取最小宽度
+        auto fuse3 = Tensor::zeros({nBatch, m_nNumClasses, nMinH3, nMinW3});  // 20260406 ZJH 融合结果张量
         {
-            auto cu = up4.contiguous(); auto cs = s3.contiguous();
-            float* pF = fuse3.mutableFloatDataPtr();
-            const float* pU = cu.floatDataPtr(); const float* pS = cs.floatDataPtr();
+            auto cu = up4.contiguous(); auto cs = s3.contiguous();  // 20260406 ZJH 确保连续存储
+            float* pF = fuse3.mutableFloatDataPtr();  // 20260406 ZJH 融合结果指针
+            const float* pU = cu.floatDataPtr(); const float* pS = cs.floatDataPtr();  // 20260406 ZJH 上采样/score 数据指针
+            // 20260406 ZJH 逐像素逐通道相加: fuse3 = up4 + score_pool3
             for (int n = 0; n < nBatch; ++n)
             for (int c = 0; c < m_nNumClasses; ++c)
             for (int hh = 0; hh < nMinH3; ++hh)
             for (int ww = 0; ww < nMinW3; ++ww) {
-                int idxF = ((n * m_nNumClasses + c) * nMinH3 + hh) * nMinW3 + ww;
-                pF[idxF] = pU[((n * m_nNumClasses + c) * up4.shape(2) + hh) * up4.shape(3) + ww]
-                         + pS[((n * m_nNumClasses + c) * s3.shape(2) + hh) * s3.shape(3) + ww];
+                int idxF = ((n * m_nNumClasses + c) * nMinH3 + hh) * nMinW3 + ww;  // 20260406 ZJH 融合张量线性索引
+                pF[idxF] = pU[((n * m_nNumClasses + c) * up4.shape(2) + hh) * up4.shape(3) + ww]  // 20260406 ZJH up4 值
+                         + pS[((n * m_nNumClasses + c) * s3.shape(2) + hh) * s3.shape(3) + ww];  // 20260406 ZJH score_pool3 值
             }
         }
 
@@ -822,8 +892,10 @@ public:
         return m_up3.forward(fuse3);
     }
 
+    // 20260406 ZJH 重写 parameters() 收集所有可训练参数
     std::vector<Tensor*> parameters() override {
         std::vector<Tensor*> v;
+        // 20260406 ZJH VGG 编码器组1-5 卷积 + BN 参数
         for (auto* p : m_c1a.parameters()) v.push_back(p);
         for (auto* p : m_b1a.parameters()) v.push_back(p);
         for (auto* p : m_c1b.parameters()) v.push_back(p);
@@ -844,15 +916,17 @@ public:
         for (auto* p : m_b5a.parameters()) v.push_back(p);
         for (auto* p : m_c5b.parameters()) v.push_back(p);
         for (auto* p : m_b5b.parameters()) v.push_back(p);
+        // 20260406 ZJH FC 替代层参数
         for (auto* p : m_fc6.parameters()) v.push_back(p);
         for (auto* p : m_fc7.parameters()) v.push_back(p);
+        // 20260406 ZJH Score 层 + 上采样层参数
         for (auto* p : m_score7.parameters()) v.push_back(p);
         for (auto* p : m_score4.parameters()) v.push_back(p);
         for (auto* p : m_score3.parameters()) v.push_back(p);
         for (auto* p : m_up7.parameters()) v.push_back(p);
         for (auto* p : m_up4.parameters()) v.push_back(p);
         for (auto* p : m_up3.parameters()) v.push_back(p);
-        return v;
+        return v;  // 20260406 ZJH 返回所有可训练参数指针
     }
 
     // 20260328 ZJH 重写 buffers() 收集所有 BN running stats
@@ -888,15 +962,19 @@ public:
     }
 
 private:
-    int m_nNumClasses;
-    Conv2d m_c1a, m_c1b, m_c2a, m_c2b, m_c3a, m_c3b, m_c4a, m_c4b, m_c5a, m_c5b;
-    BatchNorm2d m_b1a, m_b1b, m_b2a, m_b2b, m_b3a, m_b3b, m_b4a, m_b4b, m_b5a, m_b5b;
-    MaxPool2d m_p1, m_p2, m_p3, m_p4, m_p5;
-    Conv2d m_fc6, m_fc7;
-    Conv2d m_score7, m_score4, m_score3;
-    ConvTranspose2d m_up7, m_up4, m_up3;
-    Dropout2d m_drop6, m_drop7;
-    ReLU m_relu;
+    int m_nNumClasses;  // 20260406 ZJH 输出分割类别数
+    // 20260406 ZJH VGG 风格编码器: 5 组 Conv-BN-ReLU + Pool
+    Conv2d m_c1a, m_c1b, m_c2a, m_c2b, m_c3a, m_c3b, m_c4a, m_c4b, m_c5a, m_c5b;  // 20260406 ZJH VGG 卷积层
+    BatchNorm2d m_b1a, m_b1b, m_b2a, m_b2b, m_b3a, m_b3b, m_b4a, m_b4b, m_b5a, m_b5b;  // 20260406 ZJH VGG BN 层
+    MaxPool2d m_p1, m_p2, m_p3, m_p4, m_p5;  // 20260406 ZJH 各组的 2x2 最大池化
+    // 20260406 ZJH FC 替代层: 1x1 Conv 替代原始 VGG 的全连接层
+    Conv2d m_fc6, m_fc7;  // 20260406 ZJH fc6: 512→4096, fc7: 4096→4096
+    // 20260406 ZJH Score 层: 将特征投影到 nClasses 通道
+    Conv2d m_score7, m_score4, m_score3;  // 20260406 ZJH 分别对 fc7/pool4/pool3 的 score 投影
+    // 20260406 ZJH 上采样层: ConvTranspose 逐步恢复分辨率
+    ConvTranspose2d m_up7, m_up4, m_up3;  // 20260406 ZJH up7: 2x, up4: 2x, up3: 8x 上采样
+    Dropout2d m_drop6, m_drop7;  // 20260406 ZJH fc6/fc7 后的 Dropout（p=0.5）
+    ReLU m_relu;  // 20260406 ZJH 共用 ReLU 激活
 };
 
 // =========================================================
@@ -1061,7 +1139,7 @@ public:
     }
 
 private:
-    int m_nIn, m_nMid, m_nOut;
+    int m_nIn, m_nMid, m_nOut;  // 20260406 ZJH 输入/中间/输出通道数
     Conv2d m_conv1x1;  BatchNorm2d m_bn1;              // 20260401 ZJH 分支1: 1x1
     DilatedConv2d m_atrous6;  BatchNorm2d m_bn6;       // 20260401 ZJH 分支2: dilation=6
     Conv2d m_convPool;  BatchNorm2d m_bnPool;           // 20260401 ZJH 分支3: GAP
@@ -1207,7 +1285,9 @@ public:
         // 20260401 ZJH ===== 编码器 =====
         // Stem: Conv3x3(stride=2) + BN/GN + ReLU → [N, 16, H/2, W/2]
         // 20260402 ZJH stem 归一化根据 m_bUseGroupNorm 选择 GN 或 BN
-        auto stem = m_relu.forward((m_bUseGroupNorm ? m_gnStem : m_bnStem).forward(m_stem.forward(input)));
+        auto mStemConv = m_stem.forward(input);  // 20260402 ZJH stem 卷积
+        auto mStemNorm = m_bUseGroupNorm ? m_gnStem.forward(mStemConv) : m_bnStem.forward(mStemConv);
+        auto stem = m_relu.forward(mStemNorm);
 
         // 20260401 ZJH Stage1: [N, 16, H/2, W/2]
         auto s1 = m_stage1_0.forward(stem);
@@ -1230,7 +1310,9 @@ public:
         // 20260401 ZJH ===== 解码器 =====
         // 低级特征 1x1 降维: 24ch → 16ch
         // 20260402 ZJH 根据 m_bUseGroupNorm 选择 GN 或 BN
-        auto lowFeat = m_relu.forward((m_bUseGroupNorm ? m_gnLow : m_bnLow).forward(m_lowConv.forward(s2)));  // [N, 16, H/4, W/4]
+        auto mLowConvOut = m_lowConv.forward(s2);  // 20260402 ZJH 低级特征降维
+        auto mLowNorm = m_bUseGroupNorm ? m_gnLow.forward(mLowConvOut) : m_bnLow.forward(mLowConvOut);
+        auto lowFeat = m_relu.forward(mLowNorm);  // [N, 16, H/4, W/4]
 
         // 20260401 ZJH 上采样 ASPP 输出到低级特征尺寸（H/16 → H/4, 即 4x）
         int nLowH = lowFeat.shape(2);  // 20260401 ZJH 低级特征高度
@@ -1243,8 +1325,12 @@ public:
 
         // 20260401 ZJH 解码器 3x3 conv x2
         // 20260402 ZJH 解码器归一化根据 m_bUseGroupNorm 选择 GN 或 BN
-        auto dec = m_relu.forward((m_bUseGroupNorm ? m_gnDec1 : m_bnDec1).forward(m_decConv1.forward(concat)));  // 112→64
-        dec = m_relu.forward((m_bUseGroupNorm ? m_gnDec2 : m_bnDec2).forward(m_decConv2.forward(dec)));           // 64→64
+        auto mDecConv1Out = m_decConv1.forward(concat);  // 20260402 ZJH 解码器 conv1
+        auto mDecNorm1 = m_bUseGroupNorm ? m_gnDec1.forward(mDecConv1Out) : m_bnDec1.forward(mDecConv1Out);
+        auto dec = m_relu.forward(mDecNorm1);  // 112→64
+        auto mDecConv2Out = m_decConv2.forward(dec);  // 20260402 ZJH 解码器 conv2
+        auto mDecNorm2 = m_bUseGroupNorm ? m_gnDec2.forward(mDecConv2Out) : m_bnDec2.forward(mDecConv2Out);
+        dec = m_relu.forward(mDecNorm2);  // 64→64
         dec = m_decDropout.forward(dec);
 
         // 20260401 ZJH 分类头 1x1
@@ -1407,7 +1493,7 @@ public:
     }
 
 private:
-    int m_nNumClasses;
+    int m_nNumClasses;  // 20260406 ZJH 输出分割类别数
 
     // 20260401 ZJH ===== 编码器: MobileNet 风格 =====
     Conv2d m_stem;  BatchNorm2d m_bnStem;                          // 20260401 ZJH Stem 3x3

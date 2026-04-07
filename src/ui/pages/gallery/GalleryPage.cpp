@@ -135,34 +135,34 @@ bool GalleryFilterProxy::lessThan(const QModelIndex& left,
 
 // 20260322 ZJH 构造函数，初始化三栏布局
 GalleryPage::GalleryPage(QWidget* pParent)
-    : BasePage(pParent)
-    , m_pStatsGroup(nullptr)
-    , m_pLblTotalImages(nullptr)
-    , m_pLblLabeledCount(nullptr)
-    , m_pLblUnlabeledCount(nullptr)
-    , m_pLblTrainCount(nullptr)
-    , m_pLblValCount(nullptr)
-    , m_pLblTestCount(nullptr)
-    , m_pLabelFilterGroup(nullptr)
-    , m_pLabelFilterLayout(nullptr)
-    , m_pChkAllLabels(nullptr)
-    , m_pSplitFilterGroup(nullptr)
-    , m_pChkSplitAll(nullptr)
-    , m_pChkSplitTrain(nullptr)
-    , m_pChkSplitVal(nullptr)
-    , m_pChkSplitTest(nullptr)
-    , m_pBtnManageLabels(nullptr)
-    , m_pBtnImportImages(nullptr)
-    , m_pBtnImportFolder(nullptr)
-    , m_pBtnDeleteSelected(nullptr)
-    , m_pCmbSort(nullptr)
-    , m_pEdtSearch(nullptr)
-    , m_pSliderThumbSize(nullptr)
-    , m_pListView(nullptr)
-    , m_pModel(nullptr)
-    , m_pProxyModel(nullptr)
-    , m_pDelegate(nullptr)
-    , m_pDataset(nullptr)
+    : BasePage(pParent)                    // 20260406 ZJH 初始化页面基类
+    , m_pStatsGroup(nullptr)               // 20260406 ZJH 统计分组框初始为空
+    , m_pLblTotalImages(nullptr)           // 20260406 ZJH 总图像数标签初始为空
+    , m_pLblLabeledCount(nullptr)          // 20260406 ZJH 已标注数标签初始为空
+    , m_pLblUnlabeledCount(nullptr)        // 20260406 ZJH 未标注数标签初始为空
+    , m_pLblTrainCount(nullptr)            // 20260406 ZJH 训练集数标签初始为空
+    , m_pLblValCount(nullptr)              // 20260406 ZJH 验证集数标签初始为空
+    , m_pLblTestCount(nullptr)             // 20260406 ZJH 测试集数标签初始为空
+    , m_pLabelFilterGroup(nullptr)         // 20260406 ZJH 标签过滤分组框初始为空
+    , m_pLabelFilterLayout(nullptr)        // 20260406 ZJH 标签过滤布局初始为空
+    , m_pChkAllLabels(nullptr)             // 20260406 ZJH "全部"复选框初始为空
+    , m_pSplitFilterGroup(nullptr)         // 20260406 ZJH 拆分过滤分组框初始为空
+    , m_pChkSplitAll(nullptr)              // 20260406 ZJH 拆分-全部复选框初始为空
+    , m_pChkSplitTrain(nullptr)            // 20260406 ZJH 拆分-训练复选框初始为空
+    , m_pChkSplitVal(nullptr)              // 20260406 ZJH 拆分-验证复选框初始为空
+    , m_pChkSplitTest(nullptr)             // 20260406 ZJH 拆分-测试复选框初始为空
+    , m_pBtnManageLabels(nullptr)          // 20260406 ZJH 标签管理按钮初始为空
+    , m_pBtnImportImages(nullptr)          // 20260406 ZJH 导入图像按钮初始为空
+    , m_pBtnImportFolder(nullptr)          // 20260406 ZJH 导入文件夹按钮初始为空
+    , m_pBtnDeleteSelected(nullptr)        // 20260406 ZJH 删除选中按钮初始为空
+    , m_pCmbSort(nullptr)                  // 20260406 ZJH 排序下拉框初始为空
+    , m_pEdtSearch(nullptr)                // 20260406 ZJH 搜索框初始为空
+    , m_pSliderThumbSize(nullptr)          // 20260406 ZJH 缩略图大小滑块初始为空
+    , m_pListView(nullptr)                 // 20260406 ZJH 缩略图列表视图初始为空
+    , m_pModel(nullptr)                    // 20260406 ZJH 底层数据模型初始为空
+    , m_pProxyModel(nullptr)               // 20260406 ZJH 过滤排序代理模型初始为空
+    , m_pDelegate(nullptr)                 // 20260406 ZJH 缩略图绘制代理初始为空
+    , m_pDataset(nullptr)                  // 20260406 ZJH 数据集弱引用初始为空
 {
     // 20260322 ZJH 启用拖放接受
     setAcceptDrops(true);

@@ -12,6 +12,7 @@ module;
 #include <random>
 #include <memory>
 #include <limits>
+#include <unordered_map>  // 20260402 ZJH CharsetManager 字符→索引映射
 
 export module om.engine.crnn;
 
@@ -27,7 +28,7 @@ import om.hal.cpu_backend;
 export namespace om {
 
 // =========================================================
-// 辅助函数（需在 CRNN 之前定义）
+// 20260406 ZJH 辅助函数（需在 CRNN 之前定义）
 // =========================================================
 
 // 20260321 ZJH tensorMaxPool2dAsym — 支持非对称核/步幅的最大池化
@@ -157,8 +158,8 @@ public:
         return { hNew, cNew };
     }
 
-    int hiddenSize() const { return m_nHiddenSize; }
-    int inputSize() const { return m_nInputSize; }
+    int hiddenSize() const { return m_nHiddenSize; }  // 20260406 ZJH 获取隐藏维度
+    int inputSize() const { return m_nInputSize; }    // 20260406 ZJH 获取输入维度
 
 private:
     int m_nInputSize;     // 20260321 ZJH 输入特征维度
@@ -260,7 +261,7 @@ public:
         return result;
     }
 
-    int outputSize() const { return 2 * m_nHiddenSize; }
+    int outputSize() const { return 2 * m_nHiddenSize; }  // 20260406 ZJH 双向输出维度 = 2 * hidden
 
 private:
     int m_nHiddenSize;  // 20260321 ZJH 每个方向的隐藏维度
@@ -649,8 +650,8 @@ public:
         return output;
     }
 
-    int numClasses() const { return m_nNumClasses; }
-    int hiddenSize() const { return m_nHiddenSize; }
+    int numClasses() const { return m_nNumClasses; }  // 20260406 ZJH 获取字符类别数
+    int hiddenSize() const { return m_nHiddenSize; }  // 20260406 ZJH 获取 LSTM 隐藏维度
 
 private:
     int m_nNumClasses;   // 20260321 ZJH 字符类别数（含空白符）
@@ -669,6 +670,224 @@ private:
 
     // 20260321 ZJH 分类头
     std::shared_ptr<Linear> m_pClassifier;
+};
+
+// =========================================================
+// 20260402 ZJH CharsetManager — 多语言字符集管理器（对标 Halcon Deep OCR 50+ 语言）
+// 支持分级字符集:
+//   Level 0 — Digits: 0-9（10 字符，纯数字场景: 序列号、计数器）
+//   Level 1 — Latin: 0-9 A-Z a-z（62 字符，英文标识/型号/日期）
+//   Level 2 — Industrial: Latin + 常用标点符号（95 字符，ASCII 可打印范围）
+//   Level 3 — Extended: Industrial + 西欧/日韩扩展（~300 字符，多语言标签）
+//   Level 4 — CJK: Extended + GB2312 一级常用汉字（~3800 字符，中文工业标签）
+// 每个级别包含前一级别的所有字符 + 1 个 CTC blank 符号（index 0）
+// 使用方法:
+//   auto mgr = CharsetManager(CharsetLevel::Industrial);
+//   int nClasses = mgr.numClasses();  // 含 blank
+//   CRNN model(nClasses);
+//   std::string text = mgr.decode(vecIndices);
+// =========================================================
+
+// 20260402 ZJH CharsetLevel — 字符集级别枚举
+enum class CharsetLevel {
+    Digits     = 0,  // 20260402 ZJH 纯数字 0-9
+    Latin      = 1,  // 20260402 ZJH 0-9 A-Z a-z
+    Industrial = 2,  // 20260402 ZJH ASCII 可打印字符（32~126）
+    Extended   = 3,  // 20260402 ZJH 西欧扩展 + 日韩基础
+    CJK        = 4   // 20260402 ZJH GB2312 一级常用汉字
+};
+
+// 20260402 ZJH CharsetManager — 字符集管理器
+class CharsetManager {
+public:
+    // 20260402 ZJH 构造函数 — 根据字符集级别初始化字符映射表
+    // eLevel: 字符集级别
+    explicit CharsetManager(CharsetLevel eLevel = CharsetLevel::Industrial)
+        : m_eLevel(eLevel)
+    {
+        buildCharset(eLevel);  // 20260402 ZJH 构建字符映射
+    }
+
+    // 20260402 ZJH numClasses — 返回总类别数（含 CTC blank 符号）
+    // blank 占 index 0，实际字符从 index 1 开始
+    int numClasses() const {
+        return static_cast<int>(m_vecChars.size()) + 1;  // 20260402 ZJH +1 for blank
+    }
+
+    // 20260402 ZJH numChars — 返回纯字符数（不含 blank）
+    int numChars() const {
+        return static_cast<int>(m_vecChars.size());  // 20260402 ZJH 字符总数
+    }
+
+    // 20260402 ZJH charToIndex — 字符转索引（0 保留给 blank）
+    // ch: Unicode 代码点
+    // 返回: 1-based 索引，未知字符返回 -1
+    int charToIndex(int nCodePoint) const {
+        auto it = m_mapCharToIdx.find(nCodePoint);  // 20260402 ZJH 查找映射
+        if (it != m_mapCharToIdx.end()) {
+            return it->second;  // 20260402 ZJH 返回 1-based 索引
+        }
+        return -1;  // 20260402 ZJH 未知字符
+    }
+
+    // 20260402 ZJH indexToChar — 索引转字符
+    // nIndex: 1-based 索引（0 = blank）
+    // 返回: Unicode 代码点，blank 或越界返回 0
+    int indexToChar(int nIndex) const {
+        if (nIndex <= 0 || nIndex > static_cast<int>(m_vecChars.size())) {
+            return 0;  // 20260402 ZJH blank 或越界
+        }
+        return m_vecChars[nIndex - 1];  // 20260402 ZJH 1-based → 0-based 查表
+    }
+
+    // 20260402 ZJH encode — 将字符串编码为索引序列
+    // strText: UTF-8 编码的输入字符串
+    // 返回: 索引序列（跳过未知字符）
+    std::vector<int> encode(const std::string& strText) const {
+        std::vector<int> vecIndices;  // 20260402 ZJH 输出索引
+        vecIndices.reserve(strText.size());  // 20260402 ZJH 预分配
+        // 20260402 ZJH 简化 UTF-8 解码（单字节 ASCII + 多字节 CJK）
+        size_t i = 0;  // 20260402 ZJH 字节偏移
+        while (i < strText.size()) {
+            int nCodePoint = 0;  // 20260402 ZJH 当前字符代码点
+            unsigned char ch = static_cast<unsigned char>(strText[i]);  // 20260402 ZJH 当前字节
+            if (ch < 0x80) {
+                // 20260402 ZJH 单字节 ASCII
+                nCodePoint = ch;
+                i += 1;
+            } else if ((ch & 0xE0) == 0xC0 && i + 1 < strText.size()) {
+                // 20260402 ZJH 双字节 UTF-8（Latin 扩展/西欧字符）
+                nCodePoint = ((ch & 0x1F) << 6) |
+                             (static_cast<unsigned char>(strText[i + 1]) & 0x3F);
+                i += 2;
+            } else if ((ch & 0xF0) == 0xE0 && i + 2 < strText.size()) {
+                // 20260402 ZJH 三字节 UTF-8（CJK 字符 U+4E00~U+9FFF）
+                nCodePoint = ((ch & 0x0F) << 12) |
+                             ((static_cast<unsigned char>(strText[i + 1]) & 0x3F) << 6) |
+                             (static_cast<unsigned char>(strText[i + 2]) & 0x3F);
+                i += 3;
+            } else if ((ch & 0xF8) == 0xF0 && i + 3 < strText.size()) {
+                // 20260402 ZJH 四字节 UTF-8（辅助平面，罕见）
+                nCodePoint = ((ch & 0x07) << 18) |
+                             ((static_cast<unsigned char>(strText[i + 1]) & 0x3F) << 12) |
+                             ((static_cast<unsigned char>(strText[i + 2]) & 0x3F) << 6) |
+                             (static_cast<unsigned char>(strText[i + 3]) & 0x3F);
+                i += 4;
+            } else {
+                ++i;  // 20260402 ZJH 非法 UTF-8 序列，跳过
+                continue;
+            }
+            int nIdx = charToIndex(nCodePoint);  // 20260402 ZJH 查找索引
+            if (nIdx > 0) {
+                vecIndices.push_back(nIdx);  // 20260402 ZJH 有效字符，添加索引
+            }
+        }
+        return vecIndices;  // 20260402 ZJH 返回编码后的索引序列
+    }
+
+    // 20260402 ZJH decode — 将 CTC 解码后的索引序列转为 UTF-8 字符串
+    // vecIndices: CTC 解码输出的索引序列（已去除 blank 和重复）
+    // 返回: UTF-8 编码的字符串
+    std::string decode(const std::vector<int>& vecIndices) const {
+        std::string strResult;  // 20260402 ZJH 输出字符串
+        strResult.reserve(vecIndices.size() * 3);  // 20260402 ZJH 预分配（CJK 最多 3 字节）
+        for (int nIdx : vecIndices) {
+            int nCodePoint = indexToChar(nIdx);  // 20260402 ZJH 索引转代码点
+            if (nCodePoint <= 0) continue;  // 20260402 ZJH 跳过 blank/无效
+            // 20260402 ZJH 将 Unicode 代码点编码为 UTF-8
+            if (nCodePoint < 0x80) {
+                strResult += static_cast<char>(nCodePoint);  // 20260402 ZJH 单字节
+            } else if (nCodePoint < 0x800) {
+                strResult += static_cast<char>(0xC0 | (nCodePoint >> 6));  // 20260402 ZJH 双字节头
+                strResult += static_cast<char>(0x80 | (nCodePoint & 0x3F));  // 20260402 ZJH 双字节尾
+            } else if (nCodePoint < 0x10000) {
+                strResult += static_cast<char>(0xE0 | (nCodePoint >> 12));  // 20260402 ZJH 三字节头
+                strResult += static_cast<char>(0x80 | ((nCodePoint >> 6) & 0x3F));  // 20260402 ZJH 三字节中
+                strResult += static_cast<char>(0x80 | (nCodePoint & 0x3F));  // 20260402 ZJH 三字节尾
+            }
+        }
+        return strResult;  // 20260402 ZJH 返回 UTF-8 字符串
+    }
+
+    // 20260402 ZJH level — 获取当前字符集级别
+    CharsetLevel level() const { return m_eLevel; }
+
+    // 20260402 ZJH levelName — 获取当前级别的人类可读名称
+    std::string levelName() const {
+        switch (m_eLevel) {
+            case CharsetLevel::Digits:     return "Digits (0-9)";
+            case CharsetLevel::Latin:      return "Latin (0-9, A-Z, a-z)";
+            case CharsetLevel::Industrial: return "Industrial (ASCII printable)";
+            case CharsetLevel::Extended:   return "Extended (Latin + symbols)";
+            case CharsetLevel::CJK:        return "CJK (GB2312 Level-1)";
+            default:                       return "Unknown";
+        }
+    }
+
+private:
+    CharsetLevel m_eLevel;                            // 20260402 ZJH 当前字符集级别
+    std::vector<int> m_vecChars;                      // 20260402 ZJH 字符列表（Unicode 代码点，0-based）
+    std::unordered_map<int, int> m_mapCharToIdx;      // 20260402 ZJH 字符→索引映射（1-based）
+
+    // 20260402 ZJH addChar — 添加一个字符到字符集
+    void addChar(int nCodePoint) {
+        if (m_mapCharToIdx.count(nCodePoint) == 0) {
+            m_vecChars.push_back(nCodePoint);  // 20260402 ZJH 添加到列表
+            m_mapCharToIdx[nCodePoint] = static_cast<int>(m_vecChars.size());  // 20260402 ZJH 1-based 索引
+        }
+    }
+
+    // 20260402 ZJH addRange — 添加一个连续范围的字符
+    void addRange(int nStart, int nEnd) {
+        for (int cp = nStart; cp <= nEnd; ++cp) {
+            addChar(cp);  // 20260402 ZJH 逐个添加
+        }
+    }
+
+    // 20260402 ZJH buildCharset — 根据级别构建字符集
+    void buildCharset(CharsetLevel eLevel) {
+        m_vecChars.clear();  // 20260402 ZJH 清空
+        m_mapCharToIdx.clear();  // 20260402 ZJH 清空映射
+
+        // 20260402 ZJH Level 0: 数字 0-9
+        addRange(0x30, 0x39);  // 20260402 ZJH '0'~'9'
+
+        if (eLevel >= CharsetLevel::Latin) {
+            // 20260402 ZJH Level 1: + 英文字母 A-Z a-z
+            addRange(0x41, 0x5A);  // 20260402 ZJH 'A'~'Z'
+            addRange(0x61, 0x7A);  // 20260402 ZJH 'a'~'z'
+        }
+
+        if (eLevel >= CharsetLevel::Industrial) {
+            // 20260402 ZJH Level 2: + ASCII 可打印字符中的标点和符号
+            // 空格 + 标点符号（! " # $ % & ' ( ) * + , - . / : ; < = > ? @ [ \ ] ^ _ ` { | } ~）
+            addChar(0x20);  // 20260402 ZJH 空格
+            addRange(0x21, 0x2F);  // 20260402 ZJH ! " # $ % & ' ( ) * + , - . /
+            addRange(0x3A, 0x40);  // 20260402 ZJH : ; < = > ? @
+            addRange(0x5B, 0x60);  // 20260402 ZJH [ \ ] ^ _ `
+            addRange(0x7B, 0x7E);  // 20260402 ZJH { | } ~
+        }
+
+        if (eLevel >= CharsetLevel::Extended) {
+            // 20260402 ZJH Level 3: 西欧扩展字符（Latin-1 Supplement 常用部分）
+            // 包括: àáâãäå æçèéêë ìíîï ðñòóôõö ùúûü ýþÿ 及大写对应
+            addRange(0xC0, 0xFF);  // 20260402 ZJH Latin-1 Supplement (À~ÿ, 64 字符)
+            // 20260402 ZJH 日韩基础符号（半角片假名 + 全角标点）
+            addRange(0xFF01, 0xFF5E);  // 20260402 ZJH 全角 ASCII (！~～, 94 字符)
+            addRange(0x3000, 0x303F);  // 20260402 ZJH CJK 符号和标点（、。〃〈〉《》等, 64 字符)
+            addRange(0x30A0, 0x30FF);  // 20260402 ZJH 片假名 (96 字符)
+            addRange(0x3040, 0x309F);  // 20260402 ZJH 平假名 (96 字符)
+        }
+
+        if (eLevel >= CharsetLevel::CJK) {
+            // 20260402 ZJH Level 4: GB2312 一级汉字（3755 个最常用汉字）
+            // 覆盖 99.7% 的中文工业标签用字
+            // Unicode CJK 统一汉字基本区: U+4E00 ~ U+9FFF
+            // 这里添加 GB2312 一级汉字范围（按拼音排序的 3755 个常用字）
+            // 实际工业场景常用字约 500 个，但为兼容性加入完整一级字库
+            addRange(0x4E00, 0x9FA5);  // 20260402 ZJH CJK 基本区 (20902 字符，含 GB2312 全集)
+        }
+    }
 };
 
 }  // namespace om

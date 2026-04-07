@@ -1,26 +1,30 @@
 // 20260319 ZJH Tensor 运算模块 — 元素运算、matmul、reshape、transpose、slice、归约、自动微分集成
+// 20260406 ZJH 全局模块片段（module; 声明之前的预处理指令区域）
 module;
 
-#include <vector>
-#include <stdexcept>
-#include <memory>
-#include <cassert>
-#include <random>
-#include <cmath>
-#include "om_types.h"
+#include <vector>      // 20260406 ZJH std::vector — 形状和索引向量
+#include <stdexcept>   // 20260406 ZJH std::runtime_error / std::invalid_argument — 异常类
+#include <memory>      // 20260406 ZJH std::shared_ptr / std::make_shared — 自动微分节点
+#include <cassert>     // 20260406 ZJH assert 宏 — 调试断言
+#include <random>      // 20260406 ZJH std::mt19937 / std::uniform_real_distribution — dropout 随机数
+#include <cmath>       // 20260406 ZJH std::exp / std::sqrtf — 数学函数（sigmoid/groupnorm 等）
+#include <cstdio>      // 20260404 ZJH fprintf（matmul 维度校验错误输出）
+#include "om_types.h"  // 20260406 ZJH DeviceType / DataType 枚举定义
 
+// 20260406 ZJH 导出 tensor_ops 模块接口单元
 export module om.engine.tensor_ops;
 
 // 20260319 ZJH 导入依赖模块：存储层、张量类、CPU 计算内核、自动微分
-import om.engine.tensor_storage;
-import om.engine.tensor;
-import om.hal.cpu_backend;
+import om.engine.tensor_storage;  // 20260406 ZJH TensorStorage 类（内存管理）
+import om.engine.tensor;          // 20260406 ZJH Tensor 类（多维张量）
+import om.hal.cpu_backend;        // 20260406 ZJH CPUBackend — CPU 计算内核（add/mul/matmul 等）
 // 20260325 ZJH Phase 3: GPU-Resident 重写，导入 CUDA 后端用于设备调度
 #ifdef OM_HAS_CUDA
-import om.hal.cuda_backend;
+import om.hal.cuda_backend;       // 20260406 ZJH CUDABackend — GPU 计算内核
 #endif
-import om.engine.autograd;
+import om.engine.autograd;        // 20260406 ZJH GradFunction / GradAccumulator / Edge / *Backward 类
 
+// 20260406 ZJH om 命名空间：OmniMatch 引擎全部公开类型和函数的顶层命名空间
 export namespace om {
 
 // =========================================================
@@ -103,7 +107,7 @@ Edge makeEdge(Tensor& t, int nIndex = 0) {
         edge.pGradFn = castGradFn(t.gradFnRaw());  // 20260319 ZJH 设置上游 gradFn
         edge.nInputIndex = nIndex;  // 20260319 ZJH 输入索引
     }
-    return edge;
+    return edge;  // 20260406 ZJH 返回构建的 Edge（有 gradFn 则连接计算图，无则空 Edge）
 }
 
 // ===== 元素运算 =====
@@ -164,14 +168,14 @@ Tensor tensorSub(Tensor a, Tensor b) {
 
     // 20260319 ZJH AutoGrad: 如果任一输入需要梯度，创建 SubBackward 节点
     if (a.requiresGrad() || b.requiresGrad()) {
-        auto pBackward = std::make_shared<SubBackward>();
-        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));
-        pBackward->m_vecInputEdges.push_back(makeEdge(b, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        auto pBackward = std::make_shared<SubBackward>();  // 20260406 ZJH 创建减法反向节点
+        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));  // 20260406 ZJH 连接输入 a
+        pBackward->m_vecInputEdges.push_back(makeEdge(b, 0));  // 20260406 ZJH 连接输入 b
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 设置结果的 gradFn
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回减法结果张量
 }
 
 // 20260319 ZJH 逐元素乘法：result = a * b（Hadamard 积）
@@ -196,16 +200,16 @@ Tensor tensorMul(Tensor a, Tensor b) {
 
     // 20260319 ZJH AutoGrad: 如果任一输入需要梯度，创建 MulBackward 并保存输入
     if (a.requiresGrad() || b.requiresGrad()) {
-        auto pBackward = std::make_shared<MulBackward>();
+        auto pBackward = std::make_shared<MulBackward>();  // 20260406 ZJH 创建乘法反向节点
         pBackward->m_savedA = a;  // 20260319 ZJH 保存 a 用于反向传播
         pBackward->m_savedB = b;  // 20260319 ZJH 保存 b 用于反向传播
-        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));
-        pBackward->m_vecInputEdges.push_back(makeEdge(b, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));  // 20260406 ZJH 连接输入 a
+        pBackward->m_vecInputEdges.push_back(makeEdge(b, 0));  // 20260406 ZJH 连接输入 b
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 设置结果的 gradFn
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回乘法结果张量
 }
 
 // 20260319 ZJH 逐元素除法：result = a / b（调用方保证 b 中无零）
@@ -216,12 +220,12 @@ Tensor tensorDiv(const Tensor& a, const Tensor& b) {
     if (isCudaTensor(a)) {
 #ifdef OM_HAS_CUDA
         // 20260327 ZJH GPU 路径：CUDABackend::div 直接在 GPU 上逐元素除法
-        auto ca = a.contiguous();
-        auto cb = b.contiguous();
-        auto result = Tensor::zeros(ca.shapeVec(), DeviceType::CUDA);
+        auto ca = a.contiguous();  // 20260406 ZJH 连续化 a（GPU）
+        auto cb = b.contiguous();  // 20260406 ZJH 连续化 b（GPU）
+        auto result = Tensor::zeros(ca.shapeVec(), DeviceType::CUDA);  // 20260406 ZJH 在 GPU 上分配输出
         CUDABackend::div(ca.floatDataPtr(), cb.floatDataPtr(),
                          result.mutableFloatDataPtr(), static_cast<size_t>(result.numel()));
-        return result;
+        return result;  // 20260406 ZJH 返回 GPU 除法结果
 #endif
     }
     auto ca = a.contiguous();  // 20260319 ZJH 连续化 a
@@ -230,7 +234,7 @@ Tensor tensorDiv(const Tensor& a, const Tensor& b) {
     // 20260319 ZJH 调用 CPU 逐元素除法内核
     CPUBackend::div(ca.floatDataPtr(), cb.floatDataPtr(),
                     result.mutableFloatDataPtr(), static_cast<size_t>(result.numel()));
-    return result;
+    return result;  // 20260406 ZJH 返回 CPU 除法结果
 }
 
 // 20260319 ZJH 加标量：result = a + fScalar（广播到所有元素）
@@ -253,13 +257,13 @@ Tensor tensorAddScalar(Tensor a, float fScalar) {
 
     // 20260319 ZJH AutoGrad: 如果输入需要梯度，创建 AddScalarBackward
     if (a.requiresGrad()) {
-        auto pBackward = std::make_shared<AddScalarBackward>();
-        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        auto pBackward = std::make_shared<AddScalarBackward>();  // 20260406 ZJH 创建 AddScalarBackward 节点
+        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));  // 20260406 ZJH 连接输入 a 的梯度边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点绑定到结果
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果张量需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回加标量运算结果
 }
 
 // 20260319 ZJH 乘标量：result = a * fScalar（广播到所有元素）
@@ -282,14 +286,14 @@ Tensor tensorMulScalar(Tensor a, float fScalar) {
 
     // 20260319 ZJH AutoGrad: 如果输入需要梯度，创建 MulScalarBackward
     if (a.requiresGrad()) {
-        auto pBackward = std::make_shared<MulScalarBackward>();
+        auto pBackward = std::make_shared<MulScalarBackward>();  // 20260406 ZJH 创建 MulScalarBackward 节点
         pBackward->m_fScalar = fScalar;  // 20260319 ZJH 保存标量值
-        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));  // 20260406 ZJH 连接输入 a 的梯度边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点绑定到结果
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果张量需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回乘标量运算结果
 }
 
 // ===== 矩阵乘法 =====
@@ -300,11 +304,23 @@ Tensor tensorMulScalar(Tensor a, float fScalar) {
 // 20260325 ZJH Phase 3: 添加设备调度
 Tensor tensorMatmul(Tensor a, Tensor b) {
     checkSameDevice(a, b);  // 20260325 ZJH 确保两个张量在同一设备上
+    // 20260404 ZJH 维度校验：matmul 要求 2D 张量，且内维度匹配
+    if (a.ndim() < 2 || b.ndim() < 2) {
+        fprintf(stderr, "[ERROR] tensorMatmul: input must be 2D, got a.ndim=%d b.ndim=%d\n",
+                a.ndim(), b.ndim());
+        return Tensor::zeros({1, 1}, a.device());  // 20260404 ZJH 返回安全张量避免崩溃
+    }
     auto ca = a.contiguous();  // 20260319 ZJH 确保 a 连续，matmul 需要行主序连续内存
     auto cb = b.contiguous();  // 20260319 ZJH 确保 b 连续
     int nM = ca.shape(0);  // 20260319 ZJH 行数（矩阵 A 的行）
     int nK = ca.shape(1);  // 20260319 ZJH 内维度（A 的列 = B 的行）
     int nN = cb.shape(1);  // 20260319 ZJH 列数（矩阵 B 的列）
+    // 20260404 ZJH 内维度匹配校验: A[M,K] * B[K,N] 要求 A.shape(1) == B.shape(0)
+    if (nK != cb.shape(0)) {
+        fprintf(stderr, "[ERROR] tensorMatmul: inner dim mismatch, A.shape(1)=%d B.shape(0)=%d\n",
+                nK, cb.shape(0));
+        return Tensor::zeros({nM, nN}, a.device());  // 20260406 ZJH 维度不匹配时返回零张量避免崩溃
+    }
     auto result = Tensor::zeros({nM, nN}, a.device());  // 20260325 ZJH 在输入设备上分配输出张量
     // 20260325 ZJH 根据设备类型选择后端
     if (isCudaTensor(a)) {
@@ -347,8 +363,8 @@ Tensor tensorReshape(const Tensor& t, std::vector<int> vecNewShape) {
 
     if (t.isContiguous()) {
         // 20260319 ZJH 原张量连续：直接共享 Storage，仅修改 shape/strides
-        std::vector<int> vecNewStrides(vecNewShape.size());
-        if (!vecNewShape.empty()) {
+        std::vector<int> vecNewStrides(vecNewShape.size());  // 20260406 ZJH 分配新步长数组
+        if (!vecNewShape.empty()) {  // 20260406 ZJH 非空形状才计算步长
             vecNewStrides.back() = 1;  // 20260319 ZJH 最低维步长固定为 1
             for (int d = static_cast<int>(vecNewShape.size()) - 2; d >= 0; --d) {
                 vecNewStrides[static_cast<size_t>(d)] =
@@ -356,30 +372,32 @@ Tensor tensorReshape(const Tensor& t, std::vector<int> vecNewShape) {
                     * vecNewShape[static_cast<size_t>(d + 1)];
             }
         }
-        return Tensor::makeView(t.storage(), vecNewShape, vecNewStrides, t.offset());
+        return Tensor::makeView(t.storage(), vecNewShape, vecNewStrides, t.offset());  // 20260406 ZJH 零拷贝视图
     } else {
         // 20260319 ZJH 非连续张量：先连续化再 reshape
-        auto ct = t.contiguous();
-        return tensorReshape(ct, vecNewShape);
+        auto ct = t.contiguous();  // 20260406 ZJH 拷贝为连续内存布局
+        return tensorReshape(ct, vecNewShape);  // 20260406 ZJH 递归调用（此时已连续）
     }
 }
 
 // 20260319 ZJH transpose — 交换两个维度，生成视图（不拷贝数据）
 Tensor tensorTranspose(const Tensor& t, int nDim0, int nDim1) {
-    auto vecShape   = t.shapeVec();
-    auto vecStrides = t.stridesVec();
+    auto vecShape   = t.shapeVec();    // 20260406 ZJH 复制形状（后续交换不影响原张量）
+    auto vecStrides = t.stridesVec();  // 20260406 ZJH 复制步长
+    // 20260406 ZJH 交换 nDim0 和 nDim1 两个维度的形状和步长
     std::swap(vecShape[static_cast<size_t>(nDim0)], vecShape[static_cast<size_t>(nDim1)]);
     std::swap(vecStrides[static_cast<size_t>(nDim0)], vecStrides[static_cast<size_t>(nDim1)]);
-    return Tensor::makeView(t.storage(), vecShape, vecStrides, t.offset());
+    return Tensor::makeView(t.storage(), vecShape, vecStrides, t.offset());  // 20260406 ZJH 零拷贝视图
 }
 
 // 20260319 ZJH slice — 在指定维度上截取子区间 [nStart, nEnd)
 Tensor tensorSlice(const Tensor& t, int nDim, int nStart, int nEnd) {
-    auto vecShape   = t.shapeVec();
-    auto vecStrides = t.stridesVec();
+    auto vecShape   = t.shapeVec();    // 20260406 ZJH 复制形状
+    auto vecStrides = t.stridesVec();  // 20260406 ZJH 复制步长
+    // 20260406 ZJH 计算新偏移: 原偏移 + 切片起始位置 * 该维步长
     int nNewOffset = t.offset() + nStart * vecStrides[static_cast<size_t>(nDim)];
-    vecShape[static_cast<size_t>(nDim)] = nEnd - nStart;
-    return Tensor::makeView(t.storage(), vecShape, vecStrides, nNewOffset);
+    vecShape[static_cast<size_t>(nDim)] = nEnd - nStart;  // 20260406 ZJH 更新切片维度的大小
+    return Tensor::makeView(t.storage(), vecShape, vecStrides, nNewOffset);  // 20260406 ZJH 零拷贝视图
 }
 
 // ===== 归约运算 =====
@@ -583,14 +601,14 @@ Tensor tensorSoftmaxCrossEntropy(Tensor logits, const Tensor& targets) {
                                           result.mutableFloatDataPtr(), nBatch, nClasses);
         // 20260328 ZJH AutoGrad: result 直接作为 GPU 张量参与计算图
         if (logits.requiresGrad()) {
-            auto pBackward = std::make_shared<SoftmaxCrossEntropyBackward>();
-            pBackward->m_savedSoftmax = softmaxOut;
-            pBackward->m_savedTargets = cTargets;
-            pBackward->m_nBatch = nBatch;
-            pBackward->m_nClasses = nClasses;
-            pBackward->m_vecInputEdges.push_back(makeEdge(logits, 0));
-            result.setGradFnRaw(pBackward);
-            result.setRequiresGrad(true);
+            auto pBackward = std::make_shared<SoftmaxCrossEntropyBackward>();  // 20260406 ZJH 创建联合反向节点
+            pBackward->m_savedSoftmax = softmaxOut;  // 20260406 ZJH 保存 softmax 输出
+            pBackward->m_savedTargets = cTargets;    // 20260406 ZJH 保存 one-hot 目标
+            pBackward->m_nBatch = nBatch;            // 20260406 ZJH 保存批次大小
+            pBackward->m_nClasses = nClasses;        // 20260406 ZJH 保存类别数
+            pBackward->m_vecInputEdges.push_back(makeEdge(logits, 0));  // 20260406 ZJH 连接 logits 边
+            result.setGradFnRaw(pBackward);  // 20260406 ZJH 绑定反向节点
+            result.setRequiresGrad(true);  // 20260406 ZJH 标记需要梯度
         }
         return result;  // 20260328 ZJH 返回 GPU 标量张量，零 D2H
     }
@@ -722,30 +740,30 @@ Tensor tensorConv2d(Tensor input, Tensor weight, Tensor bias, int nStride, int n
 
     // 20260319 ZJH AutoGrad: 如果任一输入需要梯度，创建 Conv2dBackward
     if (input.requiresGrad() || weight.requiresGrad()) {
-        auto pBackward = std::make_shared<Conv2dBackward>();
-        pBackward->m_savedInput = cInput;
-        pBackward->m_savedWeight = cWeight;
-        pBackward->m_nBatch = nBatch;
-        pBackward->m_nCin = nCin;
-        pBackward->m_nH = nH;
-        pBackward->m_nW = nW;
-        pBackward->m_nCout = nCout;
-        pBackward->m_nKH = nKH;
-        pBackward->m_nKW = nKW;
-        pBackward->m_nStride = nStride;
-        pBackward->m_nPad = nPad;
+        auto pBackward = std::make_shared<Conv2dBackward>();  // 20260406 ZJH 创建 Conv2d 反向节点
+        pBackward->m_savedInput = cInput;    // 20260406 ZJH 保存输入
+        pBackward->m_savedWeight = cWeight;  // 20260406 ZJH 保存权重
+        pBackward->m_nBatch = nBatch;        // 20260406 ZJH 保存批次大小
+        pBackward->m_nCin = nCin;            // 20260406 ZJH 保存输入通道数
+        pBackward->m_nH = nH;                // 20260406 ZJH 保存输入高度
+        pBackward->m_nW = nW;                // 20260406 ZJH 保存输入宽度
+        pBackward->m_nCout = nCout;          // 20260406 ZJH 保存输出通道数
+        pBackward->m_nKH = nKH;              // 20260406 ZJH 保存核高度
+        pBackward->m_nKW = nKW;              // 20260406 ZJH 保存核宽度
+        pBackward->m_nStride = nStride;      // 20260406 ZJH 保存步长
+        pBackward->m_nPad = nPad;            // 20260406 ZJH 保存填充
         pBackward->m_nGroups = nGroups;  // 20260330 ZJH 保存分组数用于反向传播
-        pBackward->m_bHasBias = bHasBias;
+        pBackward->m_bHasBias = bHasBias;    // 20260406 ZJH 保存是否有偏置
         pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));   // 20260319 ZJH 输入边
         pBackward->m_vecInputEdges.push_back(makeEdge(weight, 0));  // 20260319 ZJH 权重边
         if (bHasBias) {
             pBackward->m_vecInputEdges.push_back(makeEdge(bias, 0));  // 20260319 ZJH 偏置边
         }
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点绑定到结果
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回卷积结果
 }
 
 // 20260319 ZJH tensorBatchNorm2d — 批归一化前向，支持自动微分
@@ -754,13 +772,13 @@ Tensor tensorConv2d(Tensor input, Tensor weight, Tensor bias, int nStride, int n
 Tensor tensorBatchNorm2d(Tensor input, Tensor gamma, Tensor beta,
                           Tensor& runMean, Tensor& runVar,
                           bool bTraining, float fEps, float fMomentum) {
-    auto cInput = input.contiguous();
-    auto cGamma = gamma.contiguous();
-    auto cBeta = beta.contiguous();
-    int nBatch = cInput.shape(0);
-    int nChannels = cInput.shape(1);
-    int nH = cInput.shape(2);
-    int nW = cInput.shape(3);
+    auto cInput = input.contiguous();  // 20260406 ZJH 连续化输入
+    auto cGamma = gamma.contiguous();  // 20260406 ZJH 连续化 gamma
+    auto cBeta = beta.contiguous();  // 20260406 ZJH 连续化 beta
+    int nBatch = cInput.shape(0);  // 20260406 ZJH 批次大小
+    int nChannels = cInput.shape(1);  // 20260406 ZJH 通道数
+    int nH = cInput.shape(2);  // 20260406 ZJH 输入高度
+    int nW = cInput.shape(3);  // 20260406 ZJH 输入宽度
 
     auto result = Tensor::zeros(cInput.shapeVec(), input.device());  // 20260325 ZJH 在输入设备上分配
     auto savedMean = Tensor::zeros({nChannels}, input.device());   // 20260325 ZJH 保存均值
@@ -769,12 +787,13 @@ Tensor tensorBatchNorm2d(Tensor input, Tensor gamma, Tensor beta,
     // 20260325 ZJH 根据设备类型选择后端
     if (isCudaTensor(input)) {
 #ifdef OM_HAS_CUDA
+        // 20260406 ZJH 确保 running stats 和参数在 GPU 上（可能从 CPU 初始化）
         if (runMean.isCpu()) runMean = runMean.cuda();
         if (runVar.isCpu())  runVar = runVar.cuda();
         if (cGamma.isCpu()) cGamma = cGamma.cuda();
         if (cBeta.isCpu())  cBeta = cBeta.cuda();
 
-        int nHW = nH * nW;
+        int nHW = nH * nW;  // 20260406 ZJH 空间维度大小 H*W
         CUDABackend::batchNorm2d(
             cInput.floatDataPtr(), cGamma.floatDataPtr(), cBeta.floatDataPtr(),
             result.mutableFloatDataPtr(),
@@ -794,23 +813,23 @@ Tensor tensorBatchNorm2d(Tensor input, Tensor gamma, Tensor beta,
 
     // 20260319 ZJH AutoGrad
     if (input.requiresGrad() || gamma.requiresGrad()) {
-        auto pBackward = std::make_shared<BatchNorm2dBackward>();
-        pBackward->m_savedInput = cInput;
-        pBackward->m_savedMean = savedMean;
-        pBackward->m_savedInvStd = savedInvStd;
-        pBackward->m_savedGamma = cGamma;
-        pBackward->m_nBatch = nBatch;
-        pBackward->m_nChannels = nChannels;
-        pBackward->m_nH = nH;
-        pBackward->m_nW = nW;
-        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
-        pBackward->m_vecInputEdges.push_back(makeEdge(gamma, 0));
-        pBackward->m_vecInputEdges.push_back(makeEdge(beta, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        auto pBackward = std::make_shared<BatchNorm2dBackward>();  // 20260406 ZJH 创建 BN 反向节点
+        pBackward->m_savedInput = cInput;      // 20260406 ZJH 保存输入（反向需要）
+        pBackward->m_savedMean = savedMean;    // 20260406 ZJH 保存均值
+        pBackward->m_savedInvStd = savedInvStd;  // 20260406 ZJH 保存逆标准差
+        pBackward->m_savedGamma = cGamma;      // 20260406 ZJH 保存 gamma 参数
+        pBackward->m_nBatch = nBatch;          // 20260406 ZJH 保存批次大小
+        pBackward->m_nChannels = nChannels;    // 20260406 ZJH 保存通道数
+        pBackward->m_nH = nH;                  // 20260406 ZJH 保存高度
+        pBackward->m_nW = nW;                  // 20260406 ZJH 保存宽度
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));  // 20260406 ZJH 连接输入边
+        pBackward->m_vecInputEdges.push_back(makeEdge(gamma, 0));  // 20260406 ZJH 连接 gamma 边
+        pBackward->m_vecInputEdges.push_back(makeEdge(beta, 0));   // 20260406 ZJH 连接 beta 边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点绑定到结果
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回批归一化结果
 }
 
 // 20260402 ZJH tensorGroupNorm2d — GroupNorm 前向，支持 autograd
@@ -921,13 +940,13 @@ inline Tensor tensorGroupNorm2d(Tensor input, Tensor gamma, Tensor beta,
 // input: [N, C, H, W]  返回: [N, C, Hout, Wout]
 // 20260325 ZJH Phase 3: 添加设备调度
 Tensor tensorMaxPool2d(Tensor input, int nKernelSize, int nStride, int nPad) {
-    auto cInput = input.contiguous();
-    int nBatch = cInput.shape(0);
-    int nChannels = cInput.shape(1);
-    int nH = cInput.shape(2);
-    int nW = cInput.shape(3);
-    int nHout = (nH + 2 * nPad - nKernelSize) / nStride + 1;
-    int nWout = (nW + 2 * nPad - nKernelSize) / nStride + 1;
+    auto cInput = input.contiguous();  // 20260406 ZJH 连续化输入
+    int nBatch = cInput.shape(0);      // 20260406 ZJH 批次大小
+    int nChannels = cInput.shape(1);   // 20260406 ZJH 通道数
+    int nH = cInput.shape(2);          // 20260406 ZJH 输入高度
+    int nW = cInput.shape(3);          // 20260406 ZJH 输入宽度
+    int nHout = (nH + 2 * nPad - nKernelSize) / nStride + 1;  // 20260406 ZJH 输出高度
+    int nWout = (nW + 2 * nPad - nKernelSize) / nStride + 1;  // 20260406 ZJH 输出宽度
 
     auto result = Tensor::zeros({nBatch, nChannels, nHout, nWout}, input.device());  // 20260325 ZJH 在输入设备上分配
     int nOutSize = nBatch * nChannels * nHout * nWout;  // 20260319 ZJH 输出元素总数
@@ -962,33 +981,33 @@ Tensor tensorMaxPool2d(Tensor input, int nKernelSize, int nStride, int nPad) {
 
     // 20260319 ZJH AutoGrad
     if (input.requiresGrad()) {
-        auto pBackward = std::make_shared<MaxPool2dBackward>();
+        auto pBackward = std::make_shared<MaxPool2dBackward>();  // 20260406 ZJH 创建最大池化反向节点
         pBackward->m_savedIndices = savedIndices;  // 20260327 ZJH GPU 张量直接存 GPU，零 D2H
-        pBackward->m_nBatch = nBatch;
-        pBackward->m_nChannels = nChannels;
-        pBackward->m_nHout = nHout;
-        pBackward->m_nWout = nWout;
-        pBackward->m_nH = nH;
-        pBackward->m_nW = nW;
-        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        pBackward->m_nBatch = nBatch;          // 20260406 ZJH 保存批次大小
+        pBackward->m_nChannels = nChannels;    // 20260406 ZJH 保存通道数
+        pBackward->m_nHout = nHout;            // 20260406 ZJH 保存输出高度
+        pBackward->m_nWout = nWout;            // 20260406 ZJH 保存输出宽度
+        pBackward->m_nH = nH;  // 20260406 ZJH 保存输入高度
+        pBackward->m_nW = nW;  // 20260406 ZJH 保存输入宽度
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));  // 20260406 ZJH 连接输入边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点绑定到结果
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回最大池化结果
 }
 
 // 20260319 ZJH tensorAvgPool2d — 平均池化前向，支持自动微分
 // input: [N, C, H, W]  返回: [N, C, Hout, Wout]
 // 20260325 ZJH Phase 3: 添加设备调度
 Tensor tensorAvgPool2d(Tensor input, int nKernelSize, int nStride, int nPad) {
-    auto cInput = input.contiguous();
-    int nBatch = cInput.shape(0);
-    int nChannels = cInput.shape(1);
-    int nH = cInput.shape(2);
-    int nW = cInput.shape(3);
-    int nHout = (nH + 2 * nPad - nKernelSize) / nStride + 1;
-    int nWout = (nW + 2 * nPad - nKernelSize) / nStride + 1;
+    auto cInput = input.contiguous();  // 20260406 ZJH 连续化输入
+    int nBatch = cInput.shape(0);      // 20260406 ZJH 批次大小
+    int nChannels = cInput.shape(1);   // 20260406 ZJH 通道数
+    int nH = cInput.shape(2);          // 20260406 ZJH 输入高度
+    int nW = cInput.shape(3);          // 20260406 ZJH 输入宽度
+    int nHout = (nH + 2 * nPad - nKernelSize) / nStride + 1;  // 20260406 ZJH 输出高度
+    int nWout = (nW + 2 * nPad - nKernelSize) / nStride + 1;  // 20260406 ZJH 输出宽度
 
     auto result = Tensor::zeros({nBatch, nChannels, nHout, nWout}, input.device());  // 20260325 ZJH 在输入设备上分配
     // 20260325 ZJH 根据设备类型选择后端
@@ -1007,42 +1026,43 @@ Tensor tensorAvgPool2d(Tensor input, int nKernelSize, int nStride, int nPad) {
 
     // 20260319 ZJH AutoGrad
     if (input.requiresGrad()) {
-        auto pBackward = std::make_shared<AvgPool2dBackward>();
-        pBackward->m_nBatch = nBatch;
-        pBackward->m_nChannels = nChannels;
-        pBackward->m_nH = nH;
-        pBackward->m_nW = nW;
-        pBackward->m_nHout = nHout;
-        pBackward->m_nWout = nWout;
-        pBackward->m_nKH = nKernelSize;
-        pBackward->m_nKW = nKernelSize;
-        pBackward->m_nStride = nStride;
-        pBackward->m_nPad = nPad;
-        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        auto pBackward = std::make_shared<AvgPool2dBackward>();  // 20260406 ZJH 创建平均池化反向节点
+        pBackward->m_nBatch = nBatch;          // 20260406 ZJH 保存批次大小
+        pBackward->m_nChannels = nChannels;    // 20260406 ZJH 保存通道数
+        pBackward->m_nH = nH;                  // 20260406 ZJH 保存输入高度
+        pBackward->m_nW = nW;                  // 20260406 ZJH 保存输入宽度
+        pBackward->m_nHout = nHout;            // 20260406 ZJH 保存输出高度
+        pBackward->m_nWout = nWout;            // 20260406 ZJH 保存输出宽度
+        pBackward->m_nKH = nKernelSize;        // 20260406 ZJH 保存池化核高度
+        pBackward->m_nKW = nKernelSize;        // 20260406 ZJH 保存池化核宽度
+        pBackward->m_nStride = nStride;        // 20260406 ZJH 保存步长
+        pBackward->m_nPad = nPad;              // 20260406 ZJH 保存填充大小
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));  // 20260406 ZJH 连接输入边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点绑定到结果
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回平均池化结果
 }
 
 // 20260319 ZJH tensorFlatten — 将 [N, C, H, W, ...] 展平为 [N, -1]
 // startDim: 从哪个维度开始展平（默认 1，保留 batch 维）
 Tensor tensorFlatten(Tensor input, int nStartDim) {
-    auto cInput = input.contiguous();
-    auto vecShape = cInput.shapeVec();
+    auto cInput = input.contiguous();  // 20260406 ZJH 连续化输入
+    auto vecShape = cInput.shapeVec();  // 20260406 ZJH 获取当前形状
 
     // 20260319 ZJH 计算新形状
-    std::vector<int> vecNewShape;
-    int nFlatSize = 1;
+    std::vector<int> vecNewShape;  // 20260406 ZJH 展平后的新形状
+    int nFlatSize = 1;  // 20260406 ZJH 被展平的维度乘积
+    // 20260406 ZJH 遍历所有维度：startDim 之前保留，startDim 及之后合并为一维
     for (int d = 0; d < static_cast<int>(vecShape.size()); ++d) {
         if (d < nStartDim) {
-            vecNewShape.push_back(vecShape[static_cast<size_t>(d)]);
+            vecNewShape.push_back(vecShape[static_cast<size_t>(d)]);  // 20260406 ZJH 保留该维
         } else {
-            nFlatSize *= vecShape[static_cast<size_t>(d)];
+            nFlatSize *= vecShape[static_cast<size_t>(d)];  // 20260406 ZJH 累乘展平维
         }
     }
-    vecNewShape.push_back(nFlatSize);
+    vecNewShape.push_back(nFlatSize);  // 20260406 ZJH 添加展平后的合并维度
 
     // 20260319 ZJH 使用 fromData 创建新张量（保证连续）
     // 20260325 ZJH Phase 3: 已连续化的张量直接用 reshape 零拷贝视图（适用于 CPU 和 GPU）
@@ -1052,12 +1072,12 @@ Tensor tensorFlatten(Tensor input, int nStartDim) {
     if (input.requiresGrad()) {
         auto pBackward = std::make_shared<FlattenBackward>();
         pBackward->m_vecInputShape = vecShape;  // 20260319 ZJH 保存原始形状
-        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));  // 20260406 ZJH 连接输入边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 绑定反向节点
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回展平结果
 }
 
 // 20260319 ZJH tensorDropout — Dropout 前向，支持自动微分
@@ -1153,14 +1173,14 @@ Tensor tensorSigmoid(Tensor a) {
 
     // 20260320 ZJH AutoGrad: 保存输出（非输入），sigmoid 反向需要输出值
     if (a.requiresGrad()) {
-        auto pBackward = std::make_shared<SigmoidBackwardFn>();
+        auto pBackward = std::make_shared<SigmoidBackwardFn>();  // 20260406 ZJH 创建 Sigmoid 反向节点
         pBackward->m_savedOutput = result;  // 20260320 ZJH 保存输出用于反向
-        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));  // 20260406 ZJH 连接输入边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 绑定反向节点
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回 Sigmoid 激活结果
 }
 
 // 20260320 ZJH tensorLeakyReLU — LeakyReLU 激活函数，支持自动微分
@@ -1182,15 +1202,15 @@ Tensor tensorLeakyReLU(Tensor a, float fSlope = 0.01f) {
 
     // 20260320 ZJH AutoGrad: 保存输入和斜率
     if (a.requiresGrad()) {
-        auto pBackward = std::make_shared<LeakyReLUBackwardFn>();
+        auto pBackward = std::make_shared<LeakyReLUBackwardFn>();  // 20260406 ZJH 创建 LeakyReLU 反向节点
         pBackward->m_savedInput = ca;  // 20260320 ZJH 保存输入
         pBackward->m_fSlope = fSlope;  // 20260320 ZJH 保存斜率
-        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));  // 20260406 ZJH 连接输入边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 绑定反向节点
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回 LeakyReLU 激活结果
 }
 
 // 20260320 ZJH tensorUpsampleBilinear — 双线性上采样，支持自动微分
@@ -1218,18 +1238,18 @@ Tensor tensorUpsampleBilinear(Tensor input, int nScale) {
 
     // 20260320 ZJH AutoGrad
     if (input.requiresGrad()) {
-        auto pBackward = std::make_shared<UpsampleBilinearBackwardFn>();
-        pBackward->m_nBatch = nBatch;
-        pBackward->m_nChannels = nChannels;
-        pBackward->m_nH = nH;
-        pBackward->m_nW = nW;
-        pBackward->m_nScale = nScale;
-        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        auto pBackward = std::make_shared<UpsampleBilinearBackwardFn>();  // 20260406 ZJH 创建上采样反向节点
+        pBackward->m_nBatch = nBatch;          // 20260406 ZJH 保存批次大小
+        pBackward->m_nChannels = nChannels;    // 20260406 ZJH 保存通道数
+        pBackward->m_nH = nH;                  // 20260406 ZJH 保存输入高度
+        pBackward->m_nW = nW;                  // 20260406 ZJH 保存输入宽度
+        pBackward->m_nScale = nScale;          // 20260406 ZJH 保存上采样倍数
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));  // 20260406 ZJH 连接输入边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 绑定反向节点
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回上采样结果
 }
 
 // 20260320 ZJH tensorConcatChannels — 沿通道维度拼接两个张量，支持自动微分
@@ -1262,19 +1282,19 @@ Tensor tensorConcatChannels(Tensor a, Tensor b) {
 
     // 20260320 ZJH AutoGrad
     if (a.requiresGrad() || b.requiresGrad()) {
-        auto pBackward = std::make_shared<ConcatChannelsBackwardFn>();
-        pBackward->m_nBatch = nBatch;
-        pBackward->m_nC1 = nC1;
-        pBackward->m_nC2 = nC2;
-        pBackward->m_nH = nH;
-        pBackward->m_nW = nW;
-        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));
-        pBackward->m_vecInputEdges.push_back(makeEdge(b, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        auto pBackward = std::make_shared<ConcatChannelsBackwardFn>();  // 20260406 ZJH 创建通道拼接反向节点
+        pBackward->m_nBatch = nBatch;  // 20260406 ZJH 保存批次大小
+        pBackward->m_nC1 = nC1;        // 20260406 ZJH 保存 a 通道数
+        pBackward->m_nC2 = nC2;        // 20260406 ZJH 保存 b 通道数
+        pBackward->m_nH = nH;          // 20260406 ZJH 保存高度
+        pBackward->m_nW = nW;          // 20260406 ZJH 保存宽度
+        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));  // 20260406 ZJH 连接 a 的梯度边
+        pBackward->m_vecInputEdges.push_back(makeEdge(b, 0));  // 20260406 ZJH 连接 b 的梯度边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 绑定反向节点
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回通道拼接结果
 }
 
 // 20260320 ZJH tensorConvTranspose2d — 转置卷积前向，支持自动微分
@@ -1314,29 +1334,29 @@ Tensor tensorConvTranspose2d(Tensor input, Tensor weight, Tensor bias, int nStri
 
     // 20260320 ZJH AutoGrad
     if (input.requiresGrad() || weight.requiresGrad()) {
-        auto pBackward = std::make_shared<ConvTranspose2dBackwardFn>();
-        pBackward->m_savedInput = cInput;
-        pBackward->m_savedWeight = cWeight;
-        pBackward->m_nBatch = nBatch;
-        pBackward->m_nCin = nCin;
-        pBackward->m_nHin = nHin;
-        pBackward->m_nWin = nWin;
-        pBackward->m_nCout = nCout;
-        pBackward->m_nKH = nKH;
-        pBackward->m_nKW = nKW;
-        pBackward->m_nStride = nStride;
-        pBackward->m_nPad = nPad;
-        pBackward->m_bHasBias = bHasBias;
-        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
-        pBackward->m_vecInputEdges.push_back(makeEdge(weight, 0));
+        auto pBackward = std::make_shared<ConvTranspose2dBackwardFn>();  // 20260406 ZJH 创建转置卷积反向节点
+        pBackward->m_savedInput = cInput;    // 20260406 ZJH 保存输入
+        pBackward->m_savedWeight = cWeight;  // 20260406 ZJH 保存权重
+        pBackward->m_nBatch = nBatch;        // 20260406 ZJH 保存批次大小
+        pBackward->m_nCin = nCin;            // 20260406 ZJH 保存输入通道数
+        pBackward->m_nHin = nHin;            // 20260406 ZJH 保存输入高度
+        pBackward->m_nWin = nWin;            // 20260406 ZJH 保存输入宽度
+        pBackward->m_nCout = nCout;          // 20260406 ZJH 保存输出通道数
+        pBackward->m_nKH = nKH;              // 20260406 ZJH 保存核高度
+        pBackward->m_nKW = nKW;              // 20260406 ZJH 保存核宽度
+        pBackward->m_nStride = nStride;      // 20260406 ZJH 保存步长
+        pBackward->m_nPad = nPad;            // 20260406 ZJH 保存填充
+        pBackward->m_bHasBias = bHasBias;    // 20260406 ZJH 保存是否有偏置
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));   // 20260406 ZJH 连接输入边
+        pBackward->m_vecInputEdges.push_back(makeEdge(weight, 0));  // 20260406 ZJH 连接权重边
         if (bHasBias) {
-            pBackward->m_vecInputEdges.push_back(makeEdge(bias, 0));
+            pBackward->m_vecInputEdges.push_back(makeEdge(bias, 0));  // 20260406 ZJH 连接偏置边
         }
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点绑定到结果
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回转置卷积结果
 }
 
 // 20260320 ZJH tensorBCEWithLogitsLoss — 二元交叉熵损失（含 sigmoid），支持自动微分
@@ -1345,8 +1365,8 @@ Tensor tensorConvTranspose2d(Tensor input, Tensor weight, Tensor bias, int nStri
 // 20260325 ZJH Phase 3: 添加设备调度
 Tensor tensorBCEWithLogitsLoss(Tensor logits, const Tensor& targets) {
     checkSameDevice(logits, targets);  // 20260325 ZJH 确保两个张量在同一设备上
-    auto cLogits = logits.contiguous();
-    auto cTargets = targets.contiguous();
+    auto cLogits = logits.contiguous();    // 20260406 ZJH 连续化 logits
+    auto cTargets = targets.contiguous();  // 20260406 ZJH 连续化 targets
     int nCount = cLogits.numel();  // 20260320 ZJH 元素总数
 
 #ifdef OM_HAS_CUDA
@@ -1356,16 +1376,16 @@ Tensor tensorBCEWithLogitsLoss(Tensor logits, const Tensor& targets) {
         CUDABackend::bceWithLogitsForward(cLogits.floatDataPtr(), cTargets.floatDataPtr(),
                                            result.mutableFloatDataPtr(), nCount);
         // 20260328 ZJH GPU 原地标量乘（除以 nCount = 乘以 1/nCount），避免 D2H
-        float fInvN = 1.0f / static_cast<float>(nCount);
+        float fInvN = 1.0f / static_cast<float>(nCount);  // 20260406 ZJH 计算 1/N 倒数因子
         CUDABackend::mulScalar(result.floatDataPtr(), fInvN, result.mutableFloatDataPtr(), 1);
         if (logits.requiresGrad()) {
-            auto pBackward = std::make_shared<BCEWithLogitsBackwardFn>();
-            pBackward->m_savedLogits = cLogits;
-            pBackward->m_savedTargets = cTargets;
-            pBackward->m_nCount = nCount;
-            pBackward->m_vecInputEdges.push_back(makeEdge(logits, 0));
-            result.setGradFnRaw(pBackward);
-            result.setRequiresGrad(true);
+            auto pBackward = std::make_shared<BCEWithLogitsBackwardFn>();  // 20260406 ZJH 创建 BCE 反向节点
+            pBackward->m_savedLogits = cLogits;    // 20260406 ZJH 保存 logits
+            pBackward->m_savedTargets = cTargets;  // 20260406 ZJH 保存目标
+            pBackward->m_nCount = nCount;          // 20260406 ZJH 保存元素总数
+            pBackward->m_vecInputEdges.push_back(makeEdge(logits, 0));  // 20260406 ZJH 连接边
+            result.setGradFnRaw(pBackward);  // 20260406 ZJH 绑定反向节点
+            result.setRequiresGrad(true);  // 20260406 ZJH 标记需要梯度
         }
         return result;  // 20260328 ZJH 返回 GPU 标量张量，零 D2H
     }
@@ -1377,16 +1397,16 @@ Tensor tensorBCEWithLogitsLoss(Tensor logits, const Tensor& targets) {
 
     // 20260320 ZJH AutoGrad
     if (logits.requiresGrad()) {
-        auto pBackward = std::make_shared<BCEWithLogitsBackwardFn>();
-        pBackward->m_savedLogits = cLogits;
-        pBackward->m_savedTargets = cTargets;
-        pBackward->m_nCount = nCount;
-        pBackward->m_vecInputEdges.push_back(makeEdge(logits, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        auto pBackward = std::make_shared<BCEWithLogitsBackwardFn>();  // 20260406 ZJH 创建 BCE 反向节点
+        pBackward->m_savedLogits = cLogits;    // 20260406 ZJH 保存 logits
+        pBackward->m_savedTargets = cTargets;  // 20260406 ZJH 保存目标
+        pBackward->m_nCount = nCount;          // 20260406 ZJH 保存元素总数
+        pBackward->m_vecInputEdges.push_back(makeEdge(logits, 0));  // 20260406 ZJH 连接 logits 边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点绑定到结果
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回 BCE 损失标量张量
 }
 
 // =========================================================
@@ -1412,13 +1432,13 @@ Tensor tensorGELU(Tensor a) {
 
     // 20260320 ZJH AutoGrad
     if (a.requiresGrad()) {
-        auto pBackward = std::make_shared<GELUBackwardFn>();
+        auto pBackward = std::make_shared<GELUBackwardFn>();  // 20260406 ZJH 创建 GELU 反向节点
         pBackward->m_savedInput = ca;  // 20260320 ZJH 保存输入
-        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));  // 20260406 ZJH 连接输入边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 绑定反向节点
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记需要梯度
     }
-    return result;
+    return result;  // 20260406 ZJH 返回 GELU 激活结果
 }
 
 // 20260320 ZJH tensorSiLU — SiLU (Swish) 激活函数，支持自动微分
@@ -1438,23 +1458,24 @@ Tensor tensorSiLU(Tensor a) {
                          static_cast<size_t>(result.numel()));
     }
 
+    // 20260406 ZJH AutoGrad: 保存输入用于反向
     if (a.requiresGrad()) {
-        auto pBackward = std::make_shared<SiLUBackwardFn>();
-        pBackward->m_savedInput = ca;
-        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        auto pBackward = std::make_shared<SiLUBackwardFn>();  // 20260406 ZJH 创建 SiLU 反向节点
+        pBackward->m_savedInput = ca;  // 20260406 ZJH 保存输入用于反向
+        pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));  // 20260406 ZJH 连接输入边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点绑定到结果
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果需要梯度
     }
-    return result;
+    return result;  // 20260406 ZJH 返回 SiLU 激活结果
 }
 
 // 20260320 ZJH tensorLayerNorm — LayerNorm 前向，支持自动微分
 // input: [batch, dim]  gamma/beta: [dim]
 // 返回: [batch, dim] 归一化后的张量
 Tensor tensorLayerNorm(Tensor input, Tensor gamma, Tensor beta, float fEps = 1e-5f) {
-    auto cInput = input.contiguous();
-    auto cGamma = gamma.contiguous();
-    auto cBeta = beta.contiguous();
+    auto cInput = input.contiguous();  // 20260406 ZJH 连续化输入
+    auto cGamma = gamma.contiguous();  // 20260406 ZJH 连续化 gamma
+    auto cBeta = beta.contiguous();    // 20260406 ZJH 连续化 beta
     int nBatch = cInput.shape(0);  // 20260320 ZJH 批次大小
     int nDim = cInput.shape(1);    // 20260320 ZJH 归一化维度
 
@@ -1479,31 +1500,31 @@ Tensor tensorLayerNorm(Tensor input, Tensor gamma, Tensor beta, float fEps = 1e-
 
     // 20260320 ZJH AutoGrad
     if (input.requiresGrad() || gamma.requiresGrad()) {
-        auto pBackward = std::make_shared<LayerNormBackwardFn>();
-        pBackward->m_savedInput = cInput;
-        pBackward->m_savedMean = savedMean;
-        pBackward->m_savedInvStd = savedInvStd;
-        pBackward->m_savedGamma = cGamma;
-        pBackward->m_nBatch = nBatch;
-        pBackward->m_nDim = nDim;
-        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
-        pBackward->m_vecInputEdges.push_back(makeEdge(gamma, 0));
-        pBackward->m_vecInputEdges.push_back(makeEdge(beta, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        auto pBackward = std::make_shared<LayerNormBackwardFn>();  // 20260406 ZJH 创建 LN 反向节点
+        pBackward->m_savedInput = cInput;      // 20260406 ZJH 保存输入
+        pBackward->m_savedMean = savedMean;    // 20260406 ZJH 保存均值
+        pBackward->m_savedInvStd = savedInvStd;  // 20260406 ZJH 保存逆标准差
+        pBackward->m_savedGamma = cGamma;      // 20260406 ZJH 保存 gamma 参数
+        pBackward->m_nBatch = nBatch;          // 20260406 ZJH 保存批次大小
+        pBackward->m_nDim = nDim;              // 20260406 ZJH 保存归一化维度
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));  // 20260406 ZJH 连接输入边
+        pBackward->m_vecInputEdges.push_back(makeEdge(gamma, 0));  // 20260406 ZJH 连接 gamma 边
+        pBackward->m_vecInputEdges.push_back(makeEdge(beta, 0));   // 20260406 ZJH 连接 beta 边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点绑定到结果
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回 LayerNorm 结果
 }
 
 // 20260320 ZJH tensorAdaptiveAvgPool2d — 自适应平均池化，支持自动微分
 // input: [N, C, H, W] -> output: [N, C, outH, outW]
 Tensor tensorAdaptiveAvgPool2d(Tensor input, int nOutH, int nOutW) {
-    auto cInput = input.contiguous();
-    int nBatch = cInput.shape(0);
-    int nChannels = cInput.shape(1);
-    int nH = cInput.shape(2);
-    int nW = cInput.shape(3);
+    auto cInput = input.contiguous();  // 20260406 ZJH 连续化输入
+    int nBatch = cInput.shape(0);      // 20260406 ZJH 批次大小
+    int nChannels = cInput.shape(1);   // 20260406 ZJH 通道数
+    int nH = cInput.shape(2);          // 20260406 ZJH 输入高度
+    int nW = cInput.shape(3);          // 20260406 ZJH 输入宽度
 
     auto result = Tensor::zeros({nBatch, nChannels, nOutH, nOutW}, input.device());  // 20260325 ZJH 在输入设备上分配
     // 20260325 ZJH 根据设备类型选择后端
@@ -1517,20 +1538,21 @@ Tensor tensorAdaptiveAvgPool2d(Tensor input, int nOutH, int nOutW) {
                                        nBatch, nChannels, nH, nW, nOutH, nOutW);
     }
 
+    // 20260406 ZJH AutoGrad: 注册自适应平均池化反向节点
     if (input.requiresGrad()) {
-        auto pBackward = std::make_shared<AdaptiveAvgPool2dBackwardFn>();
-        pBackward->m_nBatch = nBatch;
-        pBackward->m_nChannels = nChannels;
-        pBackward->m_nH = nH;
-        pBackward->m_nW = nW;
-        pBackward->m_nOutH = nOutH;
-        pBackward->m_nOutW = nOutW;
-        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        auto pBackward = std::make_shared<AdaptiveAvgPool2dBackwardFn>();  // 20260406 ZJH 创建反向节点
+        pBackward->m_nBatch = nBatch;          // 20260406 ZJH 保存批次大小
+        pBackward->m_nChannels = nChannels;    // 20260406 ZJH 保存通道数
+        pBackward->m_nH = nH;                  // 20260406 ZJH 保存输入高度
+        pBackward->m_nW = nW;                  // 20260406 ZJH 保存输入宽度
+        pBackward->m_nOutH = nOutH;            // 20260406 ZJH 保存输出高度
+        pBackward->m_nOutW = nOutW;            // 20260406 ZJH 保存输出宽度
+        pBackward->m_vecInputEdges.push_back(makeEdge(input, 0));  // 20260406 ZJH 连接输入边
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 将反向节点绑定到结果
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回自适应平均池化结果
 }
 
 // 20260320 ZJH tensorBatchedMatmul — 批量矩阵乘法（不含自动微分，用于注意力推理）
@@ -1538,12 +1560,12 @@ Tensor tensorAdaptiveAvgPool2d(Tensor input, int nOutH, int nOutW) {
 // 20260325 ZJH Phase 3: 添加设备调度
 Tensor tensorBatchedMatmul(const Tensor& a, const Tensor& b) {
     checkSameDevice(a, b);  // 20260325 ZJH 确保两个张量在同一设备上
-    auto ca = a.contiguous();
-    auto cb = b.contiguous();
-    int nBatch = ca.shape(0);
-    int nM = ca.shape(1);
-    int nK = ca.shape(2);
-    int nN = cb.shape(2);
+    auto ca = a.contiguous();  // 20260406 ZJH 连续化 A
+    auto cb = b.contiguous();  // 20260406 ZJH 连续化 B
+    int nBatch = ca.shape(0);  // 20260406 ZJH 批次大小
+    int nM = ca.shape(1);      // 20260406 ZJH 矩阵行数
+    int nK = ca.shape(2);      // 20260406 ZJH 内维度
+    int nN = cb.shape(2);      // 20260406 ZJH 矩阵列数
 
     auto result = Tensor::zeros({nBatch, nM, nN}, a.device());  // 20260325 ZJH 在输入设备上分配
     // 20260325 ZJH 根据设备类型选择后端
@@ -1556,7 +1578,7 @@ Tensor tensorBatchedMatmul(const Tensor& a, const Tensor& b) {
         CPUBackend::batchedMatmul(ca.floatDataPtr(), cb.floatDataPtr(),
                                    result.mutableFloatDataPtr(), nBatch, nM, nK, nN);
     }
-    return result;
+    return result;  // 20260406 ZJH 返回批量矩阵乘法结果
 }
 
 // 20260320 ZJH tensorTranspose2dBatched — 批量转置最后两维
@@ -1607,8 +1629,8 @@ Tensor tensorTranspose2dBatched(const Tensor& t) {
 // 20260325 ZJH Phase 3: 添加设备调度
 // 20260328 ZJH 添加 autograd 注册：保存 softmax 输出用于反向传播
 Tensor tensorSoftmaxLastDim(const Tensor& t) {
-    auto ct = t.contiguous();
-    auto vecShape = ct.shapeVec();
+    auto ct = t.contiguous();  // 20260406 ZJH 连续化输入
+    auto vecShape = ct.shapeVec();  // 20260406 ZJH 获取形状
     int nLastDim = vecShape.back();  // 20260320 ZJH 最后一维大小
     int nOuter = ct.numel() / nLastDim;  // 20260320 ZJH 外层维度积
 
@@ -1634,7 +1656,7 @@ Tensor tensorSoftmaxLastDim(const Tensor& t) {
         result.setRequiresGrad(true);  // 20260328 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回 softmax 结果
 }
 
 // =========================================================
@@ -1663,11 +1685,11 @@ Tensor tensorTanh(Tensor a) {
         auto pBackward = std::make_shared<TanhBackwardFn>();
         pBackward->m_savedOutput = result;  // 20260321 ZJH 保存输出用于反向
         pBackward->m_vecInputEdges.push_back(makeEdge(a, 0));
-        result.setGradFnRaw(pBackward);
-        result.setRequiresGrad(true);
+        result.setGradFnRaw(pBackward);  // 20260406 ZJH 绑定反向节点
+        result.setRequiresGrad(true);  // 20260406 ZJH 标记需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回 tanh 激活结果
 }
 
 // 20260321 ZJH tensorClip — 值裁剪（CTC loss 中防止 log(0)）
@@ -1698,7 +1720,7 @@ Tensor tensorClip(const Tensor& a, float fMin, float fMax) {
         result.setRequiresGrad(true);  // 20260328 ZJH 标记结果需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回裁剪结果
 }
 
 // 20260321 ZJH tensorSliceLastDim — 沿最后一维切片 [start, end)
@@ -1750,7 +1772,7 @@ Tensor tensorSliceLastDim(Tensor t, int nStart, int nEnd) {
         result.setRequiresGrad(true);      // 20260328 ZJH 标记需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回最后一维切片结果
 }
 
 // 20260321 ZJH tensorConcatLastDim — 沿最后一维拼接两个张量
@@ -1814,7 +1836,7 @@ Tensor tensorConcatLastDim(Tensor a, Tensor b) {
         result.setRequiresGrad(true);      // 20260328 ZJH 标记需要梯度
     }
 
-    return result;
+    return result;  // 20260406 ZJH 返回最后一维拼接结果
 }
 
 // 20260328 ZJH tensorDiceLoss — Fused Dice Loss：sigmoid + 归约 + 标量计算，单 kernel 替代 10 步 ops

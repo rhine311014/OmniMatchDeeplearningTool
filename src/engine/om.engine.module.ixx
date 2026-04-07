@@ -1,19 +1,23 @@
 // 20260319 ZJH Module 基类模块 — Phase 2 Part 1
 // 实现 PyTorch nn.Module 风格的模块基类，支持参数管理、子模块注册、训练/评估模式切换
 // Sequential 容器支持链式前向传播
+// 20260406 ZJH 全局模块片段（module; 之后、export module 之前），用于引入传统头文件
 module;
 
-#include <vector>
-#include <string>
-#include <memory>
-#include <utility>
+#include <vector>   // 20260406 ZJH 动态数组容器，用于存储参数列表、子模块列表、缓冲区列表
+#include <string>   // 20260406 ZJH 字符串类型，用于参数名称、子模块名称等标识符
+#include <memory>   // 20260406 ZJH 智能指针 shared_ptr，用于子模块的共享所有权管理
+#include <utility>  // 20260406 ZJH std::pair，用于构建 {名称, 指针} 键值对
 
+// 20260406 ZJH 声明本文件为 C++20 模块接口单元，模块名 om.engine.module
+// 20260406 ZJH 提供 Module 基类和 Sequential 容器，是整个引擎神经网络层次结构的根基
 export module om.engine.module;
 
 // 20260319 ZJH 导入张量类和张量运算模块（含自动微分接口）
 import om.engine.tensor;
 import om.engine.tensor_ops;
 
+// 20260406 ZJH om 命名空间，OmniMatch 引擎所有公开符号的顶层命名空间
 export namespace om {
 
 // 20260319 ZJH Module — 模块基类，所有神经网络层继承此类
@@ -40,21 +44,23 @@ public:
     // 独立于 parameters()，不影响优化器
     // 通过 buffers() 方法收集，GPU 迁移时单独处理
     void registerBuffer(const std::string& strName, Tensor& buf) {
-        m_vecBuffers.push_back({strName, &buf});
+        m_vecBuffers.push_back({strName, &buf});  // 20260406 ZJH 保存缓冲区名称和指针对到列表
     }
 
     // 20260326 ZJH buffers — 递归收集本模块及所有子模块的缓冲区指针
     // 返回不参与梯度更新但需要随设备迁移的张量（如 BN running stats）
     virtual std::vector<Tensor*> buffers() {
-        std::vector<Tensor*> vecResult;
+        std::vector<Tensor*> vecResult;  // 20260406 ZJH 结果容器，存储所有缓冲区的原始指针
+        // 20260406 ZJH 遍历本模块直接注册的缓冲区，strName 为名称（此处未使用），pBuf 为指针
         for (auto& [strName, pBuf] : m_vecBuffers) {
-            vecResult.push_back(pBuf);
+            vecResult.push_back(pBuf);  // 20260406 ZJH 添加缓冲区指针到结果
         }
+        // 20260406 ZJH 遍历所有子模块，递归收集子模块的缓冲区
         for (auto& [strName, pChild] : m_vecChildren) {
-            auto vecChildBufs = pChild->buffers();
-            vecResult.insert(vecResult.end(), vecChildBufs.begin(), vecChildBufs.end());
+            auto vecChildBufs = pChild->buffers();  // 20260406 ZJH 子模块递归调用 buffers()
+            vecResult.insert(vecResult.end(), vecChildBufs.begin(), vecChildBufs.end());  // 20260406 ZJH 合并子模块缓冲区到结果
         }
-        return vecResult;
+        return vecResult;  // 20260406 ZJH 返回本模块及所有子模块的全部缓冲区指针
     }
 
     // 20260327 ZJH namedBuffers — 递归收集本模块及所有子模块的命名缓冲区
@@ -62,34 +68,39 @@ public:
     // 用于序列化保存 BN running stats 等非训练状态张量
     // 20260328 ZJH 增加 fallback 机制，与 namedParameters() 一致
     virtual std::vector<std::pair<std::string, Tensor*>> namedBuffers(const std::string& strPrefix = "") {
-        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        std::vector<std::pair<std::string, Tensor*>> vecResult;  // 20260406 ZJH 结果容器，存储 {全限定名, 指针} 对
         // 20260327 ZJH 收集本模块直接注册的缓冲区
         for (auto& [strName, pBuf] : m_vecBuffers) {
+            // 20260406 ZJH 构建全限定名：若有前缀则拼接 "prefix.name"，否则直接使用名称
             std::string strFullName = strPrefix.empty() ? strName : strPrefix + "." + strName;
-            vecResult.push_back({strFullName, pBuf});
+            vecResult.push_back({strFullName, pBuf});  // 20260406 ZJH 添加命名缓冲区到结果
         }
         // 20260327 ZJH 递归收集子模块的命名缓冲区
         for (auto& [strName, pChild] : m_vecChildren) {
+            // 20260406 ZJH 构建子模块前缀：将子模块名称追加到当前前缀后
             std::string strChildPrefix = strPrefix.empty() ? strName : strPrefix + "." + strName;
-            auto vecChildBufs = pChild->namedBuffers(strChildPrefix);
-            vecResult.insert(vecResult.end(), vecChildBufs.begin(), vecChildBufs.end());
+            auto vecChildBufs = pChild->namedBuffers(strChildPrefix);  // 20260406 ZJH 子模块递归调用
+            vecResult.insert(vecResult.end(), vecChildBufs.begin(), vecChildBufs.end());  // 20260406 ZJH 合并子模块结果
         }
 
         // 20260328 ZJH Fallback: 模型重写了 buffers() 但未重写 namedBuffers()
+        // 20260406 ZJH 如果递归收集为空，尝试从 buffers() 虚调用获取并自动编号命名
         if (vecResult.empty()) {
-            auto vecBufs = buffers();
+            auto vecBufs = buffers();  // 20260406 ZJH virtual dispatch 到子类重写版本
+            // 20260406 ZJH 如果子类 buffers() 返回了非空结果，则自动生成编号命名
             if (!vecBufs.empty()) {
-                vecResult.reserve(vecBufs.size());
+                vecResult.reserve(vecBufs.size());  // 20260406 ZJH 预分配空间，避免多次扩容
+                // 20260406 ZJH 遍历所有缓冲区，生成 "buffer_0", "buffer_1", ... 编号名称
                 for (size_t i = 0; i < vecBufs.size(); ++i) {
                     std::string strName = strPrefix.empty()
                         ? ("buffer_" + std::to_string(i))
                         : (strPrefix + ".buffer_" + std::to_string(i));
-                    vecResult.push_back({strName, vecBufs[i]});
+                    vecResult.push_back({strName, vecBufs[i]});  // 20260406 ZJH 添加自动命名的缓冲区
                 }
             }
         }
 
-        return vecResult;
+        return vecResult;  // 20260406 ZJH 返回所有命名缓冲区列表
     }
 
     // 20260319 ZJH parameters — 递归收集本模块及所有子模块的参数指针
@@ -116,37 +127,42 @@ public:
     //              自动从 parameters() 生成 "param_N" 编号命名，解决大量模型
     //              只重写 parameters() 未重写 namedParameters() 导致序列化空文件的 bug
     virtual std::vector<std::pair<std::string, Tensor*>> namedParameters(const std::string& strPrefix = "") {
-        std::vector<std::pair<std::string, Tensor*>> vecResult;
+        std::vector<std::pair<std::string, Tensor*>> vecResult;  // 20260406 ZJH 结果容器，存储 {全限定名, 指针} 对
         // 20260319 ZJH 收集本模块直接注册的参数
         for (auto& [strName, pParam] : m_vecParameters) {
+            // 20260406 ZJH 构建全限定名：若有前缀则拼接 "prefix.name"，否则直接使用名称
             std::string strFullName = strPrefix.empty() ? strName : strPrefix + "." + strName;
-            vecResult.push_back({strFullName, pParam});
+            vecResult.push_back({strFullName, pParam});  // 20260406 ZJH 添加命名参数到结果
         }
         // 20260319 ZJH 递归收集子模块的命名参数
         for (auto& [strName, pChild] : m_vecChildren) {
+            // 20260406 ZJH 构建子模块前缀：将子模块名称追加到当前前缀后
             std::string strChildPrefix = strPrefix.empty() ? strName : strPrefix + "." + strName;
-            auto vecChildParams = pChild->namedParameters(strChildPrefix);
-            vecResult.insert(vecResult.end(), vecChildParams.begin(), vecChildParams.end());
+            auto vecChildParams = pChild->namedParameters(strChildPrefix);  // 20260406 ZJH 子模块递归调用
+            vecResult.insert(vecResult.end(), vecChildParams.begin(), vecChildParams.end());  // 20260406 ZJH 合并子模块结果
         }
 
         // 20260328 ZJH Fallback: 模型重写了 parameters() 但未重写 namedParameters()
         // 此时 m_vecParameters/m_vecChildren 为空，递归收集返回空列表
         // 但 parameters()（virtual dispatch 到子类）可能返回非空
         // 自动生成 "param_0", "param_1", ... 编号命名，确保序列化正常工作
+        // 20260406 ZJH 如果递归收集为空，尝试从 parameters() 虚调用获取并自动编号命名
         if (vecResult.empty()) {
             auto vecParams = parameters();  // 20260328 ZJH virtual call → 子类重写版本
+            // 20260406 ZJH 如果子类 parameters() 返回了非空结果，则自动生成编号命名
             if (!vecParams.empty()) {
-                vecResult.reserve(vecParams.size());
+                vecResult.reserve(vecParams.size());  // 20260406 ZJH 预分配空间，避免多次扩容
+                // 20260406 ZJH 遍历所有参数，生成 "param_0", "param_1", ... 编号名称
                 for (size_t i = 0; i < vecParams.size(); ++i) {
                     std::string strName = strPrefix.empty()
                         ? ("param_" + std::to_string(i))
                         : (strPrefix + ".param_" + std::to_string(i));
-                    vecResult.push_back({strName, vecParams[i]});
+                    vecResult.push_back({strName, vecParams[i]});  // 20260406 ZJH 添加自动命名的参数
                 }
             }
         }
 
-        return vecResult;
+        return vecResult;  // 20260406 ZJH 返回所有命名参数列表
     }
 
     // 20260319 ZJH registerModule — 注册子模块，用于递归参数管理和训练模式切换
@@ -178,13 +194,15 @@ public:
     }
 
     // 20260328 ZJH debugChildCount — 诊断用：返回直接子模块数量
+    // 20260406 ZJH 返回: m_vecChildren 的元素数量，不递归统计孙模块
     size_t debugChildCount() const {
-        return m_vecChildren.size();
+        return m_vecChildren.size();  // 20260406 ZJH 返回子模块列表大小
     }
 
     // 20260328 ZJH debugParamCount — 诊断用：返回直接注册参数数量
+    // 20260406 ZJH 返回: m_vecParameters 的元素数量，不包含子模块的参数
     size_t debugParamCount() const {
-        return m_vecParameters.size();
+        return m_vecParameters.size();  // 20260406 ZJH 返回参数列表大小
     }
 
     // 20260319 ZJH zeroGrad — 清零所有参数的梯度，递归包含子模块参数
@@ -233,4 +251,4 @@ private:
     std::vector<std::shared_ptr<Module>> m_vecLayers;
 };
 
-}  // namespace om
+}  // namespace om  // 20260406 ZJH 结束 om 命名空间

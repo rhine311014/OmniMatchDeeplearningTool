@@ -2,15 +2,16 @@
 // 通过 shared_ptr 引用计数管理生命周期
 // 视图操作（reshape/slice/transpose）共享同一 Storage 实例
 // 20260325 ZJH Phase 1 GPU-Resident 重写：支持 CUDA 设备内存分配/释放/拷贝
+// 20260406 ZJH 全局模块片段（module; 声明之前的预处理指令区域）
 module;
 
-#include <cstddef>
-#include <cstdlib>
-#include <cstring>
-#include <memory>
-#include <stdexcept>
+#include <cstddef>     // 20260406 ZJH size_t — 无符号整数类型
+#include <cstdlib>     // 20260406 ZJH std::aligned_alloc / std::free — 对齐内存分配/释放（非 MSVC）
+#include <cstring>     // 20260406 ZJH std::memcpy — 内存拷贝
+#include <memory>      // 20260406 ZJH std::shared_ptr / std::make_shared — 引用计数智能指针
+#include <stdexcept>   // 20260406 ZJH std::runtime_error / std::bad_alloc — 异常类
 
-#include "om_types.h"
+#include "om_types.h"  // 20260406 ZJH DeviceType 枚举定义（CPU / CUDA）
 
 // 20260325 ZJH CUDA 内存管理函数前向声明（C 链接）
 // 仅在编译时启用 CUDA 支持时生效，用于 GPU 内存分配/释放/传输
@@ -29,8 +30,10 @@ extern "C" {
 }
 #endif
 
+// 20260406 ZJH 导出 TensorStorage 模块接口单元
 export module om.engine.tensor_storage;
 
+// 20260406 ZJH om 命名空间：OmniMatch 引擎全部公开类型和函数的顶层命名空间
 export namespace om {
 
 // 20260319 ZJH TensorStorage — 持有连续内存块，支持 CPU 分配
@@ -121,10 +124,15 @@ public:
         }
     }
 
+    // 20260406 ZJH 返回底层内存的常量指针（CPU 或 GPU 设备指针），供只读访问
     const void* data() const { return m_pData; }
+    // 20260406 ZJH 返回底层内存的可写指针（CPU 或 GPU 设备指针），供写入访问
     void* mutableData() { return m_pData; }
+    // 20260406 ZJH 返回已分配的总字节数
     size_t bytes() const { return m_nBytes; }
+    // 20260406 ZJH 返回存储所在的设备类型（CPU 或 CUDA）
     DeviceType deviceType() const { return m_deviceType; }
+    // 20260406 ZJH 返回设备编号（多 GPU 场景下区分不同 GPU，默认 0）
     int deviceId() const { return m_nDeviceId; }
 
     // 20260325 ZJH 创建指定设备上的数据副本，处理全部 4 种传输方向

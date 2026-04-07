@@ -18,6 +18,7 @@ module;
 
 export module om.engine.parallel;
 
+// 20260406 ZJH 导入依赖模块：张量类和模型基类
 import om.engine.tensor;
 import om.engine.module;
 
@@ -45,11 +46,12 @@ public:
         }
     }
 
+    // 20260406 ZJH 析构函数 — 通知所有工作线程退出并等待其完成
     ~InferenceThreadPool() {
-        m_bStop.store(true);
-        m_cv.notify_all();
+        m_bStop.store(true);  // 20260406 ZJH 设置停止标志，通知工作线程退出循环
+        m_cv.notify_all();  // 20260406 ZJH 唤醒所有等待中的工作线程
         for (auto& t : m_vecWorkers) {
-            if (t.joinable()) t.join();
+            if (t.joinable()) t.join();  // 20260406 ZJH 等待每个工作线程结束
         }
     }
 
@@ -83,9 +85,9 @@ public:
         result.nNumImages = static_cast<int>(vecInputs.size());
         result.nNumThreads = m_nNumThreads;
 
-        if (vecInputs.empty()) return result;
+        if (vecInputs.empty()) return result;  // 20260406 ZJH 无输入直接返回空结果
 
-        auto tStart = std::chrono::steady_clock::now();
+        auto tStart = std::chrono::steady_clock::now();  // 20260406 ZJH 记录批量推理开始时间
 
         // 20260320 ZJH 提交所有推理任务
         std::vector<std::future<Tensor>> vecFutures;
@@ -103,11 +105,11 @@ public:
             result.vecOutputs.push_back(fut.get());
         }
 
-        auto tEnd = std::chrono::steady_clock::now();
-        result.fTotalTimeMs = std::chrono::duration<float, std::milli>(tEnd - tStart).count();
-        result.fAvgTimeMs = result.fTotalTimeMs / static_cast<float>(result.nNumImages);
+        auto tEnd = std::chrono::steady_clock::now();  // 20260406 ZJH 记录结束时间
+        result.fTotalTimeMs = std::chrono::duration<float, std::milli>(tEnd - tStart).count();  // 20260406 ZJH 总耗时（毫秒）
+        result.fAvgTimeMs = result.fTotalTimeMs / static_cast<float>(result.nNumImages);  // 20260406 ZJH 平均单张耗时
 
-        return result;
+        return result;  // 20260406 ZJH 返回批量推理结果
     }
 
     // 20260320 ZJH 获取线程数
@@ -124,26 +126,30 @@ public:
     }
 
 private:
+    // 20260406 ZJH workerLoop — 工作线程的主循环
+    // 每个工作线程持续从任务队列中取出并执行任务，直到收到停止信号
     void workerLoop() {
         while (true) {
-            std::function<void()> task;
+            std::function<void()> task;  // 20260406 ZJH 待执行的任务
             {
-                std::unique_lock<std::mutex> lk(m_mutex);
+                std::unique_lock<std::mutex> lk(m_mutex);  // 20260406 ZJH 加锁访问任务队列
+                // 20260406 ZJH 等待条件：收到停止信号 或 队列中有新任务
                 m_cv.wait(lk, [this]() { return m_bStop.load() || !m_queueTasks.empty(); });
+                // 20260406 ZJH 停止信号且队列为空时退出线程
                 if (m_bStop.load() && m_queueTasks.empty()) return;
-                task = std::move(m_queueTasks.front());
-                m_queueTasks.pop();
+                task = std::move(m_queueTasks.front());  // 20260406 ZJH 取出队首任务
+                m_queueTasks.pop();  // 20260406 ZJH 移除已取出的任务
             }
-            task();
+            task();  // 20260406 ZJH 在锁外执行任务，避免阻塞其他线程取任务
         }
     }
 
-    int m_nNumThreads;
-    std::vector<std::thread> m_vecWorkers;
-    std::queue<std::function<void()>> m_queueTasks;
-    std::mutex m_mutex;
-    std::condition_variable m_cv;
-    std::atomic<bool> m_bStop;
+    int m_nNumThreads;  // 20260406 ZJH 线程池中的工作线程数量
+    std::vector<std::thread> m_vecWorkers;  // 20260406 ZJH 工作线程容器
+    std::queue<std::function<void()>> m_queueTasks;  // 20260406 ZJH 待执行任务队列（FIFO）
+    std::mutex m_mutex;  // 20260406 ZJH 保护任务队列的互斥锁
+    std::condition_variable m_cv;  // 20260406 ZJH 通知工作线程有新任务或需退出
+    std::atomic<bool> m_bStop;  // 20260406 ZJH 停止标志（原子操作，线程安全）
 };
 
 // =========================================================
@@ -152,9 +158,9 @@ private:
 
 // 20260320 ZJH PrefetchItem — 预取数据项
 struct PrefetchItem {
-    Tensor input;
-    Tensor target;
-    bool bReady = false;
+    Tensor input;           // 20260406 ZJH 预取的输入张量
+    Tensor target;          // 20260406 ZJH 预取的目标（标签）张量
+    bool bReady = false;    // 20260406 ZJH 是否已加载完毕可供使用
 };
 
 // 20260320 ZJH ParallelTrainer — 并行训练管理器
@@ -177,11 +183,13 @@ public:
         float fTotalBatchTimeMs = 0.0f; // 20260320 ZJH 总 batch 耗时
         int nBatchesProcessed = 0;      // 20260320 ZJH 已处理 batch 数
 
+        // 20260406 ZJH throughput — 计算训练吞吐量（每秒处理的 batch 数）
         float throughput() const {
-            return fTotalBatchTimeMs > 0 ? (nBatchesProcessed * 1000.0f / fTotalBatchTimeMs) : 0;
+            return fTotalBatchTimeMs > 0 ? (nBatchesProcessed * 1000.0f / fTotalBatchTimeMs) : 0;  // 20260406 ZJH batches/sec
         }
     };
 
+    // 20260406 ZJH stats — 获取训练性能统计数据（只读拷贝）
     TrainStats stats() const { return m_stats; }
 
     // 20260320 ZJH recordBatchTime — 记录单次 batch 的各阶段耗时
@@ -194,12 +202,13 @@ public:
         m_stats.nBatchesProcessed++;
     }
 
+    // 20260406 ZJH resetStats — 重置所有训练性能统计数据
     void resetStats() { m_stats = TrainStats{}; }
 
 private:
-    int m_nPrefetchCount;
-    int m_nNumWorkers;
-    TrainStats m_stats;
+    int m_nPrefetchCount;  // 20260406 ZJH 预取 batch 数量（流水线缓冲深度）
+    int m_nNumWorkers;     // 20260406 ZJH 数据加载工作线程数
+    TrainStats m_stats;    // 20260406 ZJH 累积训练性能统计
 };
 
 // =========================================================
@@ -209,11 +218,14 @@ private:
 // 20260320 ZJH InferenceTimer — 精确推理计时
 class InferenceTimer {
 public:
+    // 20260406 ZJH start — 记录计时起点
     void start() { m_tStart = std::chrono::steady_clock::now(); }
 
+    // 20260406 ZJH stopMs — 停止计时并返回经过的毫秒数
+    // 返回: 从 start() 到当前的耗时（毫秒）
     float stopMs() {
-        auto tEnd = std::chrono::steady_clock::now();
-        return std::chrono::duration<float, std::milli>(tEnd - m_tStart).count();
+        auto tEnd = std::chrono::steady_clock::now();  // 20260406 ZJH 记录结束时间点
+        return std::chrono::duration<float, std::milli>(tEnd - m_tStart).count();  // 20260406 ZJH 计算时间差
     }
 
     // 20260320 ZJH 多次测量取中位数（排除首次 warmup）
@@ -234,7 +246,7 @@ public:
     }
 
 private:
-    std::chrono::steady_clock::time_point m_tStart;
+    std::chrono::steady_clock::time_point m_tStart;  // 20260406 ZJH 计时起点时间戳
 };
 
 // =========================================================

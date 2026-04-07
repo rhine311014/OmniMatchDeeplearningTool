@@ -88,29 +88,29 @@ static const QString s_strSecondaryBtnStyle = QStringLiteral(
 // 20260322 ZJH 构造函数
 // ============================================================================
 SplitPage::SplitPage(QWidget* pParent)
-    : BasePage(pParent)
-    , m_pSplitNameEdit(nullptr)
-    , m_pTrainSlider(nullptr)
-    , m_pTrainSpin(nullptr)
-    , m_pValSlider(nullptr)
-    , m_pValSpin(nullptr)
-    , m_pTestLabel(nullptr)
-    , m_pStratifiedCheck(nullptr)
-    , m_pPreset701515Btn(nullptr)
-    , m_pPreset801010Btn(nullptr)
-    , m_pPreset602020Btn(nullptr)
-    , m_pExecuteBtn(nullptr)
-    , m_pResetBtn(nullptr)
-    , m_pTrainCount(nullptr)
-    , m_pTrainPct(nullptr)
-    , m_pValCount(nullptr)
-    , m_pValPct(nullptr)
-    , m_pTestCount(nullptr)
-    , m_pTestPct(nullptr)
-    , m_pDistTable(nullptr)
-    , m_pChart(nullptr)
-    , m_pSplitStatusLabel(nullptr)
-    , m_bUpdating(false)
+    : BasePage(pParent)                   // 20260406 ZJH 初始化页面基类
+    , m_pSplitNameEdit(nullptr)           // 20260406 ZJH 拆分名称输入框初始为空
+    , m_pTrainSlider(nullptr)             // 20260406 ZJH 训练集比例滑块初始为空
+    , m_pTrainSpin(nullptr)               // 20260406 ZJH 训练集比例微调框初始为空
+    , m_pValSlider(nullptr)               // 20260406 ZJH 验证集比例滑块初始为空
+    , m_pValSpin(nullptr)                 // 20260406 ZJH 验证集比例微调框初始为空
+    , m_pTestLabel(nullptr)               // 20260406 ZJH 测试集比例显示标签初始为空
+    , m_pStratifiedCheck(nullptr)         // 20260406 ZJH 分层采样复选框初始为空
+    , m_pPreset701515Btn(nullptr)         // 20260406 ZJH 70/15/15 预设按钮初始为空
+    , m_pPreset801010Btn(nullptr)         // 20260406 ZJH 80/10/10 预设按钮初始为空
+    , m_pPreset602020Btn(nullptr)         // 20260406 ZJH 60/20/20 预设按钮初始为空
+    , m_pExecuteBtn(nullptr)              // 20260406 ZJH 执行拆分按钮初始为空
+    , m_pResetBtn(nullptr)                // 20260406 ZJH 重置拆分按钮初始为空
+    , m_pTrainCount(nullptr)              // 20260406 ZJH 训练集统计卡片数量标签初始为空
+    , m_pTrainPct(nullptr)                // 20260406 ZJH 训练集统计卡片百分比标签初始为空
+    , m_pValCount(nullptr)                // 20260406 ZJH 验证集统计卡片数量标签初始为空
+    , m_pValPct(nullptr)                  // 20260406 ZJH 验证集统计卡片百分比标签初始为空
+    , m_pTestCount(nullptr)               // 20260406 ZJH 测试集统计卡片数量标签初始为空
+    , m_pTestPct(nullptr)                 // 20260406 ZJH 测试集统计卡片百分比标签初始为空
+    , m_pDistTable(nullptr)               // 20260406 ZJH 标签分布表格初始为空
+    , m_pChart(nullptr)                   // 20260406 ZJH 类别分布条形图初始为空
+    , m_pSplitStatusLabel(nullptr)        // 20260406 ZJH 拆分状态标签初始为空
+    , m_bUpdating(false)                  // 20260406 ZJH 联动防递归标志初始为 false
 {
     // 20260322 ZJH 构建三栏子控件
     QWidget* pLeft   = buildLeftPanel();    // 20260322 ZJH 左侧配置面板
@@ -649,33 +649,63 @@ void SplitPage::refreshStats()
         mapTotalCnt[label.nId] = 0;
     }
 
-    // 20260322 ZJH 遍历全部图像，按 labelId + splitType 累计计数
-    for (const ImageEntry& entry : vecImages) {
-        // 20260322 ZJH 优先使用图像级标签 ID（分类/异常检测任务）
-        // 若图像级标签无效，则取第一个标注的标签 ID（检测/分割任务）
-        int nLabelId = entry.nLabelId;
-        if (nLabelId < 0 && !entry.vecAnnotations.isEmpty()) {
-            nLabelId = entry.vecAnnotations.first().nLabelId;  // 20260322 ZJH 取第一个标注的标签 ID
-        }
-        if (nLabelId < 0 || !mapTotalCnt.contains(nLabelId)) {
-            continue;  // 20260322 ZJH 无有效标签或标签不在列表中，跳过
-        }
+    // 20260405 ZJH [修复] 智能计数策略（区分两种任务类型）:
+    //   语义分割/实例分割/目标检测: 按标注实例计数（一张图 3 个标注 = 3 次）
+    //   分类/异常检测: 按图像计数（一张图 = 1 次）
+    // 语义分割每张图可有多类标注（异物+划伤+脏污），必须按标注计数才能与图库页一致
+    bool bCountPerAnnotation = false;  // 20260405 ZJH 默认按图像计数
+    if (m_pProject) {
+        auto eTask = m_pProject->taskType();
+        bCountPerAnnotation = (eTask == om::TaskType::SemanticSegmentation ||
+                               eTask == om::TaskType::InstanceSegmentation ||
+                               eTask == om::TaskType::ObjectDetection);
+    }
 
-        // 20260322 ZJH 按拆分类型（eSplit 公共成员）累加计数
-        switch (entry.eSplit) {
-            case om::SplitType::Train:
-                ++mapTrainCnt[nLabelId];
-                break;
-            case om::SplitType::Validation:
-                ++mapValCnt[nLabelId];
-                break;
-            case om::SplitType::Test:
-                ++mapTestCnt[nLabelId];
-                break;
-            default:
-                break;  // 20260322 ZJH Unassigned 不计入拆分统计
+    for (const ImageEntry& entry : vecImages) {
+        if (bCountPerAnnotation && !entry.vecAnnotations.isEmpty()) {
+            // 20260402 ZJH 实例分割/检测: 按每个标注独立计数
+            for (const auto& annotation : entry.vecAnnotations) {
+                int nLabelId = annotation.nLabelId;
+                if (nLabelId < 0 || !mapTotalCnt.contains(nLabelId)) continue;
+
+                switch (entry.eSplit) {
+                    case om::SplitType::Train:      ++mapTrainCnt[nLabelId]; break;
+                    case om::SplitType::Validation:  ++mapValCnt[nLabelId];  break;
+                    case om::SplitType::Test:        ++mapTestCnt[nLabelId]; break;
+                    default: break;
+                }
+                ++mapTotalCnt[nLabelId];
+            }
+        } else if (!bCountPerAnnotation && !entry.vecAnnotations.isEmpty()) {
+            // 20260402 ZJH 语义分割: 有标注但按图像计数（取第一个标注的标签）
+            int nLabelId = entry.vecAnnotations.first().nLabelId;
+            if (nLabelId < 0 || !mapTotalCnt.contains(nLabelId)) {
+                // 20260402 ZJH fallback 到图像级标签
+                nLabelId = entry.nLabelId;
+                if (nLabelId < 0 || !mapTotalCnt.contains(nLabelId)) continue;
+            }
+
+            switch (entry.eSplit) {
+                case om::SplitType::Train:      ++mapTrainCnt[nLabelId]; break;
+                case om::SplitType::Validation:  ++mapValCnt[nLabelId];  break;
+                case om::SplitType::Test:        ++mapTestCnt[nLabelId]; break;
+                default: break;
+            }
+            ++mapTotalCnt[nLabelId];
+        } else if (entry.nLabelId >= 0) {
+            // 20260402 ZJH 无标注、仅图像级标签 → 按图像计数（分类/异常检测任务）
+            int nLabelId = entry.nLabelId;
+            if (!mapTotalCnt.contains(nLabelId)) continue;
+
+            switch (entry.eSplit) {
+                case om::SplitType::Train:      ++mapTrainCnt[nLabelId]; break;
+                case om::SplitType::Validation:  ++mapValCnt[nLabelId];  break;
+                case om::SplitType::Test:        ++mapTestCnt[nLabelId]; break;
+                default: break;
+            }
+            ++mapTotalCnt[nLabelId];
         }
-        ++mapTotalCnt[nLabelId];  // 20260322 ZJH 总数始终累加（不分拆分类型）
+        // 20260402 ZJH 未标注图像（nLabelId<0 且无标注）不参与标签统计
     }
 
     // 20260322 ZJH 填充表格行

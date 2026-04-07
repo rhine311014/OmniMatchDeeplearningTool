@@ -14,11 +14,14 @@
 #include <QDoubleSpinBox>    // 20260322 ZJH 浮点数微调框
 #include <QCheckBox>         // 20260322 ZJH 复选框
 #include <QPushButton>       // 20260322 ZJH 按钮
+#include <QLineEdit>         // 20260330 ZJH 预训练模型路径+模型标识输入框
 #include <QLabel>            // 20260322 ZJH 文本标签
 #include <QProgressBar>      // 20260322 ZJH 进度条
 #include <QTextEdit>         // 20260322 ZJH 日志显示文本框
 #include <QThread>           // 20260322 ZJH 训练工作线程
 #include <QElapsedTimer>     // 20260322 ZJH 计时器用于估算剩余时间
+#include <chrono>            // 20260402 ZJH steady_clock 精确 epoch 计时
+#include <vector>            // 20260402 ZJH 训练诊断历史数据容器
 
 // 20260322 ZJH 前向声明
 class TrainingLossChart;
@@ -121,8 +124,13 @@ private:
 
     // 20260322 ZJH 模型配置分组
     QComboBox* m_pCboFramework;      // 20260322 ZJH 训练框架下拉框
-    QComboBox* m_pCboArchitecture;   // 20260322 ZJH 模型架构下拉框
+    QComboBox* m_pCboCapability;     // 20260330 ZJH 模型能力等级下拉框（轻量化/普通/高精度）
+    QComboBox* m_pCboArchitecture;   // 20260322 ZJH 模型架构下拉框（高级选项）
+    QPushButton* m_pBtnToggleArch = nullptr;  // 20260330 ZJH 展开/收起模型架构选项按钮
+    QWidget*  m_pArchContainer = nullptr;     // 20260330 ZJH 架构选择容器（默认折叠）
     QComboBox* m_pCboDevice;         // 20260322 ZJH 设备类型下拉框
+    QComboBox* m_pCboAnomalyMode = nullptr;   // 20260330 ZJH 异常检测训练模式下拉框（极速/高精度）
+    QLabel*    m_pLblAnomalyMode = nullptr;   // 20260330 ZJH 异常检测训练模式标签
     QComboBox* m_pCboOptimizer;      // 20260322 ZJH 优化器下拉框
     QComboBox* m_pCboScheduler;      // 20260322 ZJH 调度器下拉框
 
@@ -132,10 +140,17 @@ private:
     QPushButton*    m_pBtnAutoMaxBatch;  // 20260324 ZJH 自动最大批量大小按钮
     QPushButton*    m_pBtnAutoRecommend = nullptr;  // 20260325 ZJH 自动推荐最优训练参数按钮
     QSpinBox*       m_pSpnEpochs;        // 20260322 ZJH 训练轮次微调框
-    QSpinBox*       m_pSpnInputSize;     // 20260322 ZJH 输入尺寸微调框
+    QComboBox*      m_pCboResolution = nullptr;  // 20260330 ZJH 输入分辨率预设下拉框
+    QSpinBox*       m_pSpnInputSize;     // 20260322 ZJH 输入尺寸微调框（Custom时显示）
     QSpinBox*       m_pSpnPatience;      // 20260322 ZJH 早停耐心微调框
 
+    // 20260330 ZJH 预训练模型与标识
+    QLineEdit*   m_pEdtPretrained = nullptr;      // 20260330 ZJH 预训练模型路径编辑框
+    QPushButton* m_pBtnBrowsePretrained = nullptr; // 20260330 ZJH 浏览预训练模型按钮
+    QLineEdit*   m_pEdtModelTag = nullptr;         // 20260330 ZJH 模型标识输入框
+
     // 20260322 ZJH 数据增强分组
+    QComboBox*      m_pCboAugPreset = nullptr;    // 20260330 ZJH 增强策略预设下拉框（默认/手动）
     QCheckBox*      m_pChkAugmentation;  // 20260322 ZJH 启用增强复选框
     QPushButton*    m_pBtnToggleAug = nullptr;    // 20260325 ZJH 展开/收起增强选项按钮
     QWidget*        m_pAugContainer = nullptr;    // 20260325 ZJH 增强选项容器（可折叠）
@@ -170,6 +185,33 @@ private:
     QDoubleSpinBox* m_pSpnMixupAlpha;  // 20260324 ZJH Mixup alpha 微调框
     QCheckBox*      m_pChkCutMix;      // 20260324 ZJH CutMix 启用复选框
     QDoubleSpinBox* m_pSpnCutMixAlpha; // 20260324 ZJH CutMix alpha 微调框
+
+    // 20260330 ZJH 预训练权重启用开关（新增：控制是否使用预训练权重）
+    QCheckBox*   m_pChkUsePretrained = nullptr;    // 20260330 ZJH 使用预训练权重复选框
+    QLineEdit*   m_pEdtPretrainedPath = nullptr;   // 20260330 ZJH 预训练权重路径显示（只读）
+    QPushButton* m_pBtnBrowsePretrainedPath = nullptr; // 20260330 ZJH 浏览预训练权重文件按钮
+
+    // 20260330 ZJH HSV 色彩空间抖动增强
+    QCheckBox*      m_pChkHsvAugment = nullptr;   // 20260330 ZJH HSV 增强启用复选框
+    QDoubleSpinBox* m_pSpnHueShift = nullptr;     // 20260330 ZJH 色调偏移微调框
+    QDoubleSpinBox* m_pSpnSatShift = nullptr;     // 20260330 ZJH 饱和度偏移微调框
+    QDoubleSpinBox* m_pSpnValShift = nullptr;     // 20260330 ZJH 明度偏移微调框
+
+    // 20260330 ZJH 少样本学习
+    QCheckBox* m_pChkFewShot = nullptr;           // 20260330 ZJH 少样本学习模式复选框
+    QSpinBox*  m_pSpnShotsPerClass = nullptr;     // 20260330 ZJH 每类样本数微调框
+
+    // 20260330 ZJH 模型优化（训练后剪枝）
+    QCheckBox*      m_pChkPruning = nullptr;      // 20260330 ZJH 训练后剪枝启用复选框
+    QComboBox*      m_pCboPruneMethod = nullptr;  // 20260330 ZJH 剪枝方法下拉框
+    QDoubleSpinBox* m_pSpnPruneRatio = nullptr;   // 20260330 ZJH 剪枝比例微调框
+
+    // 20260402 ZJH [OPT-2.5] 增量训练 (Continual Learning)
+    QCheckBox*      m_pChkContinualLearning = nullptr;  // 20260402 ZJH 增量训练启用复选框
+    QDoubleSpinBox* m_pSpnEwcLambda = nullptr;          // 20260402 ZJH EWC 正则化系数微调框
+
+    // 20260330 ZJH AI 数据合成
+    QPushButton* m_pBtnDataSynth = nullptr;       // 20260330 ZJH AI 数据合成按钮
 
     // 20260322 ZJH ONNX 导出
     QCheckBox* m_pChkExportOnnx;  // 20260322 ZJH 导出 ONNX 复选框
@@ -221,4 +263,24 @@ private:
 
     // 20260322 ZJH 左面板容器（训练中禁用）
     QWidget* m_pLeftPanel = nullptr;
+
+    // 20260402 ZJH ===== 训练诊断系统 =====
+    std::vector<float> m_vecTrainLossHistory;   // 20260402 ZJH 历史训练 loss（按 epoch 顺序）
+    std::vector<float> m_vecValLossHistory;     // 20260402 ZJH 历史验证 loss（按 epoch 顺序）
+    std::vector<float> m_vecValMetricHistory;   // 20260402 ZJH 历史验证指标（按 epoch 顺序）
+    std::chrono::steady_clock::time_point m_tpEpochStart;  // 20260402 ZJH epoch 计时起点
+    double m_dAvgEpochSec = 0.0;               // 20260402 ZJH 平均每 epoch 秒数（滑动平均）
+    int m_nDiagOverfitCount = 0;               // 20260402 ZJH 过拟合连续计数（train↓val↑）
+    int m_nDiagOscillCount = 0;                // 20260402 ZJH 损失震荡连续计数（正负交替）
+    int m_nDiagNoImproveCount = 0;             // 20260402 ZJH 验证指标无改善连续计数
+
+    // 20260402 ZJH 运行训练诊断分析（每 epoch 结束后调用）
+    // 参数: nEpoch - 当前轮次; nTotalEpochs - 总轮次
+    //       fTrainLoss - 当前训练损失; fValLoss - 当前验证损失; fMetric - 当前验证指标
+    void runTrainingDiagnostics(int nEpoch, int nTotalEpochs, float fTrainLoss, float fValLoss, float fMetric);
+
+    // 20260402 ZJH 格式化剩余时间为人类可读字符串
+    // 参数: nRemainingEpochs - 剩余 epoch 数
+    // 返回: "XX分XX秒" 格式的字符串
+    QString formatRemainingTime(int nRemainingEpochs) const;
 };

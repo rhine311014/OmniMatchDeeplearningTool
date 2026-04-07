@@ -58,7 +58,8 @@ public:
     void notifyNavigateToPage(int nPageIndex);
 
     // 20260324 ZJH 通知请求打开指定图像，内部发射 requestOpenImage 信号
-    void notifyOpenImage(const QString& strImageUuid);
+    // 20260404 ZJH 新增 strAnnotationUuid: 可选，跳转后自动选中该标注（检查页实例双击用）
+    void notifyOpenImage(const QString& strImageUuid, const QString& strAnnotationUuid = QString());
 
     // 20260324 ZJH 通知全局设置已变更，内部发射 globalSettingsChanged 信号
     void notifyGlobalSettingsChanged();
@@ -146,7 +147,8 @@ signals:
     void requestNavigateToPage(int nPageIndex);
 
     // 20260322 ZJH 请求打开指定 UUID 对应的图像详情页
-    void requestOpenImage(const QString& strImageUuid);
+    // 20260404 ZJH 第二参数: 可选标注 UUID，用于跳转后自动选中该标注
+    void requestOpenImage(const QString& strImageUuid, const QString& strAnnotationUuid);
 
     // ===== 设置信号 =====
 

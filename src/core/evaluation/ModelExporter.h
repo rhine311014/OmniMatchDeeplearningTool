@@ -1,5 +1,5 @@
 // 20260323 ZJH ModelExporter — 模型导出器
-// 将训练好的模型导出为 ONNX/TensorRT/OpenVINO/自研 DFM 格式
+// 将训练好的模型导出为 ONNX/TensorRT/OpenVINO/自研 OMM 格式
 // 提供导出进度回调和格式兼容性检查
 #pragma once
 
@@ -13,7 +13,7 @@ enum class ExportFormat
     ONNX = 0,       // 20260323 ZJH Open Neural Network Exchange
     TensorRT,       // 20260323 ZJH NVIDIA TensorRT 引擎
     OpenVINO,       // 20260323 ZJH Intel OpenVINO IR
-    NativeDFM       // 20260323 ZJH OmniMatch 自研 .dfm 模型格式
+    NativeOMM       // 20260330 ZJH OmniMatch 自研 .omm 模型格式（v4，含架构元数据）
 };
 
 // 20260323 ZJH 导出精度枚举
@@ -77,6 +77,51 @@ public:
 
     // 20260323 ZJH 检查格式是否可用（依赖检查）
     static bool isFormatAvailable(ExportFormat format);
+
+    // 20260402 ZJH [OPT-2.4] 模型量化导出 — PTQ/QAT 支持
+    // 对标 NVIDIA Model Optimizer: FP16/INT8/NVFP4 量化
+
+    // 20260402 ZJH 量化模式枚举
+    enum class QuantizationMode {
+        DynamicPTQ,     // 20260402 ZJH 动态量化（无需校准数据，权重 INT8 + 激活 FP32，速度 1.5-2x）
+        StaticPTQ,      // 20260402 ZJH 静态量化（需校准数据，权重+激活 INT8，速度 2-4x）
+        QAT             // 20260402 ZJH 量化感知训练（训练时插入伪量化节点，精度最高，速度同 StaticPTQ）
+    };
+
+    // 20260402 ZJH 量化配置
+    struct QuantizeConfig {
+        QuantizationMode eMode = QuantizationMode::StaticPTQ;  // 20260402 ZJH 量化模式
+        QString strCalibDataDir;          // 20260402 ZJH 校准数据目录（StaticPTQ 需要）
+        int nCalibBatchSize = 8;          // 20260402 ZJH 校准批次大小
+        int nCalibNumBatches = 50;        // 20260402 ZJH 校准批次数量
+        QString strCalibMethod = "entropy";  // 20260402 ZJH 校准方法: "minmax"/"entropy"/"percentile"
+        float fPercentile = 99.99f;       // 20260402 ZJH Percentile 校准百分位
+        bool bPerChannel = true;          // 20260402 ZJH 是否逐通道量化（精度更高但稍慢）
+    };
+
+    // 20260402 ZJH 量化结果
+    struct QuantizeResult {
+        bool bSuccess = false;            // 20260402 ZJH 是否成功
+        QString strOutputPath;            // 20260402 ZJH 量化后模型路径
+        qint64 nOrigSizeBytes = 0;        // 20260402 ZJH 原始模型大小
+        qint64 nQuantSizeBytes = 0;       // 20260402 ZJH 量化后模型大小
+        float fCompressionRatio = 1.0f;   // 20260402 ZJH 压缩比
+        QString strErrorMessage;          // 20260402 ZJH 错误信息
+    };
+
+    // 20260402 ZJH 执行模型量化
+    // strOnnxPath: 源 ONNX 模型路径
+    // config: 量化配置
+    // 返回: 量化结果
+    QuantizeResult quantizeModel(const QString& strOnnxPath, const QuantizeConfig& config);
+
+    // 20260402 ZJH TensorRT 一键优化（ONNX → TRT engine）
+    // strOnnxPath: ONNX 模型路径
+    // ePrecision: 精度 (FP32/FP16/INT8)
+    // strCalibDir: INT8 校准数据目录（FP16/FP32 可为空）
+    // 返回: 导出结果，strOutputPath 为 .trt 文件路径
+    ExportResult optimizeTensorRT(const QString& strOnnxPath, ExportPrecision ePrecision,
+                                   const QString& strCalibDir = QString());
 
 signals:
     // 20260323 ZJH 导出进度更新

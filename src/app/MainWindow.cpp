@@ -19,6 +19,7 @@
 #include "core/project/Project.h"            // 20260322 ZJH 项目数据类
 #include "core/project/ProjectSerializer.h"  // 20260322 ZJH 项目序列化器（菜单保存用）
 #include "ui/dialogs/SettingsDialog.h"       // 20260322 ZJH 设置对话框
+#include "core/UpdateChecker.h"              // 20260330 ZJH 版本更新检查器
 #include "ui/widgets/ShortcutHelpOverlay.h"  // 20260322 ZJH 快捷键参考面板
 
 #include <QVBoxLayout>     // 20260322 ZJH 垂直布局
@@ -29,13 +30,14 @@
 #include <QEasingCurve>    // 20260322 ZJH 动画缓动曲线
 #include <QFileDialog>     // 20260322 ZJH 文件对话框（保存项目另存为）
 #include <QCloseEvent>     // 20260324 ZJH 窗口关闭事件
+#include <QApplication>   // 20260403 ZJH processEvents()，启动期间保持动画流畅
 
 // 20260324 ZJH 页签总数快捷别名（引用 NavigationBar::kPageCount，消除魔数 8）
 static constexpr int s_nPageCount = OmniMatch::NavigationBar::kPageCount;
 
 // 20260322 ZJH 构造函数，初始化主窗口全部组件
 // 20260324 ZJH 初始化列表顺序严格匹配 MainWindow.h 中成员声明顺序
-MainWindow::MainWindow(QWidget* pParent)
+MainWindow::MainWindow(bool bDeferPages, QWidget* pParent)
     : QMainWindow(pParent)
     , m_pNavBar(nullptr)       // 20260322 ZJH 导航栏指针，setupPages 中创建
     , m_pPageStack(nullptr)    // 20260322 ZJH 页面堆叠指针
@@ -101,58 +103,13 @@ MainWindow::MainWindow(QWidget* pParent)
     // 20260322 ZJH 设置中央控件
     setCentralWidget(pCentralWidget);
 
-    // 20260322 ZJH 8. 创建全部工作流页面
-    createPlaceholderPages();
-
-    // 20260322 ZJH 9. 连接导航栏页面切换信号到 switchToPage 槽
-    connect(m_pNavBar, &OmniMatch::NavigationBar::pageChanged,
-            this, &MainWindow::switchToPage);
-
-    // 20260322 ZJH 10. 连接 Application 全局导航请求信号
-    connect(Application::instance(), &Application::requestNavigateToPage,
-            this, &MainWindow::switchToPage);
-
-    // 20260322 ZJH 10b. 连接 requestOpenImage 信号：切换到图像页并加载图像
-    connect(Application::instance(), &Application::requestOpenImage,
-            this, [this](const QString& strImageUuid) {
-                switchToPage(2);  // 20260322 ZJH 切换到图像标注页
-                if (m_pImagePage) {
-                    m_pImagePage->loadImage(strImageUuid);  // 20260322 ZJH 加载指定图像
-                }
-            });
-
-    // 20260322 ZJH 11. 初始化页面切换淡入动画
-    m_pFadeEffect = new QGraphicsOpacityEffect(m_pPageStack);
-    m_pFadeEffect->setOpacity(1.0);  // 20260322 ZJH 初始完全不透明
-    m_pPageStack->setGraphicsEffect(m_pFadeEffect);
-
-    // 20260322 ZJH 创建 opacity 属性动画
-    m_pFadeAnim = new QPropertyAnimation(m_pFadeEffect, "opacity", this);
-    m_pFadeAnim->setDuration(200);                    // 20260322 ZJH 淡入持续 200ms
-    m_pFadeAnim->setStartValue(0.0);                  // 20260322 ZJH 从完全透明开始
-    m_pFadeAnim->setEndValue(1.0);                    // 20260322 ZJH 到完全不透明结束
-    m_pFadeAnim->setEasingCurve(QEasingCurve::OutQuad);  // 20260322 ZJH 减速缓出
-
-    // 20260322 ZJH 12. 初始化 GPU 信息到状态栏
-    if (Application::instance()->hasGpu()) {
-        // 20260322 ZJH 显示 GPU 名称和显存大小
-        QString strGpuInfo = QStringLiteral("GPU: %1 | %2 MB")
-            .arg(Application::instance()->gpuName())
-            .arg(Application::instance()->gpuVramMB());
-        m_pStatusBar->setGpuInfo(strGpuInfo);
-    } else {
-        m_pStatusBar->setGpuInfo(QStringLiteral("CPU Only"));  // 20260322 ZJH 无 GPU 时显示 CPU 模式
+    // 20260403 ZJH 8. 根据延迟模式决定是否立即创建页面
+    if (!bDeferPages) {
+        // 20260403 ZJH 非延迟模式：一次性创建所有页面并完成初始化
+        createPlaceholderPages();
+        finalizeInit();
     }
-
-    // 20260322 ZJH 13. 设置状态栏初始消息
-    m_pStatusBar->setMessage(QStringLiteral("就绪"));
-
-    // 20260322 ZJH 14. 创建快捷键参考面板（覆盖在中央控件之上）
-    m_pShortcutOverlay = new ShortcutHelpOverlay(pCentralWidget);
-    m_pShortcutOverlay->hide();  // 20260322 ZJH 初始隐藏
-
-    // 20260322 ZJH 15. 更新窗口标题
-    updateWindowTitle();
+    // 20260403 ZJH 延迟模式：外部通过 initPage(0..7) + finalizeInit() 分步调用
 }
 
 // ===== 菜单栏 =====
@@ -224,6 +181,25 @@ void MainWindow::setupMenuBar()
     // 20260322 ZJH 分割线
     pFileMenu->addSeparator();
 
+    // 20260330 ZJH 导入数据格式
+    QAction* pActImportData = pFileMenu->addAction(QStringLiteral("导入数据格式..."));
+    connect(pActImportData, &QAction::triggered, this, [this]() {
+        // 20260330 ZJH 占位提示，后续实现具体导入逻辑
+        QMessageBox::information(this, QStringLiteral("导入数据格式"),
+                                 QStringLiteral("导入数据格式功能即将上线。"));
+    });
+
+    // 20260330 ZJH 导出数据格式
+    QAction* pActExportData = pFileMenu->addAction(QStringLiteral("导出数据格式..."));
+    connect(pActExportData, &QAction::triggered, this, [this]() {
+        // 20260330 ZJH 占位提示，后续实现具体导出逻辑
+        QMessageBox::information(this, QStringLiteral("导出数据格式"),
+                                 QStringLiteral("导出数据格式功能即将上线。"));
+    });
+
+    // 20260330 ZJH 分割线（文件菜单末段）
+    pFileMenu->addSeparator();
+
     // 20260322 ZJH 退出 Ctrl+Q
     m_pActExit = pFileMenu->addAction(QStringLiteral("退出(&X)"));
     m_pActExit->setShortcut(QKeySequence(QStringLiteral("Ctrl+Q")));
@@ -241,6 +217,33 @@ void MainWindow::setupMenuBar()
     m_pActRedo = pEditMenu->addAction(QStringLiteral("重做(&R)"));
     m_pActRedo->setShortcut(QKeySequence(QStringLiteral("Ctrl+Y")));
     m_pActRedo->setEnabled(false);  // 20260322 ZJH Phase 2 实现，当前禁用
+
+    // ===== 工具菜单 =====
+    QMenu* pToolsMenu = pMenuBar->addMenu(QStringLiteral("工具(&T)"));
+
+    // 20260330 ZJH 配方管理
+    QAction* pActRecipe = pToolsMenu->addAction(QStringLiteral("配方管理..."));
+    connect(pActRecipe, &QAction::triggered, this, [this]() {
+        // 20260330 ZJH 占位提示，后续实现配方管理功能
+        QMessageBox::information(this, QStringLiteral("配方管理"),
+                                 QStringLiteral("配方管理功能即将上线。"));
+    });
+
+    // 20260330 ZJH 数据合成
+    QAction* pActDataSynth = pToolsMenu->addAction(QStringLiteral("数据合成..."));
+    connect(pActDataSynth, &QAction::triggered, this, [this]() {
+        // 20260330 ZJH 占位提示，后续实现数据合成功能
+        QMessageBox::information(this, QStringLiteral("数据合成"),
+                                 QStringLiteral("数据合成功能即将上线。"));
+    });
+
+    // 20260330 ZJH 主动学习
+    QAction* pActActiveLearning = pToolsMenu->addAction(QStringLiteral("主动学习..."));
+    connect(pActActiveLearning, &QAction::triggered, this, [this]() {
+        // 20260330 ZJH 占位提示，后续实现主动学习功能
+        QMessageBox::information(this, QStringLiteral("主动学习"),
+                                 QStringLiteral("主动学习功能即将上线。"));
+    });
 
     // ===== 视图菜单 =====
     QMenu* pViewMenu = pMenuBar->addMenu(QStringLiteral("视图(&V)"));
@@ -281,6 +284,43 @@ void MainWindow::setupMenuBar()
         }
     });
 
+    // 20260330 ZJH 检查更新
+    QAction* pActCheckUpdate = pHelpMenu->addAction(QStringLiteral("检查更新..."));
+    connect(pActCheckUpdate, &QAction::triggered, this, [this]() {
+        // 20260330 ZJH 创建 UpdateChecker 实例并发起异步更新检查
+        auto* pChecker = new UpdateChecker(this);
+
+        // 20260330 ZJH 更新检查完成回调
+        connect(pChecker, &UpdateChecker::updateCheckFinished, this,
+                [this, pChecker](const UpdateChecker::VersionInfo& info) {
+            if (info.bUpdateAvailable) {
+                // 20260330 ZJH 有新版本可用
+                QMessageBox::information(this, QStringLiteral("检查更新"),
+                    QStringLiteral("发现新版本: %1\n当前版本: %2\n\n%3")
+                        .arg(info.strLatestVersion)
+                        .arg(info.strCurrentVersion)
+                        .arg(info.strReleaseNotes));
+            } else {
+                // 20260330 ZJH 已是最新版本
+                QMessageBox::information(this, QStringLiteral("检查更新"),
+                    QStringLiteral("当前已是最新版本 (%1)。").arg(info.strCurrentVersion));
+            }
+            pChecker->deleteLater();  // 20260330 ZJH 释放检查器实例
+        });
+
+        // 20260330 ZJH 更新检查失败回调
+        connect(pChecker, &UpdateChecker::updateCheckFailed, this,
+                [this, pChecker](const QString& strError) {
+            QMessageBox::warning(this, QStringLiteral("检查更新"),
+                QStringLiteral("检查更新失败: %1").arg(strError));
+            pChecker->deleteLater();  // 20260330 ZJH 释放检查器实例
+        });
+
+        pChecker->checkForUpdates();  // 20260330 ZJH 发起异步检查
+    });
+
+    pHelpMenu->addSeparator();  // 20260330 ZJH 分割线
+
     // 20260322 ZJH 关于
     m_pActAbout = pHelpMenu->addAction(QStringLiteral("关于(&A)"));
     connect(m_pActAbout, &QAction::triggered, this, &MainWindow::onMenuAbout);
@@ -289,98 +329,153 @@ void MainWindow::setupMenuBar()
 // ===== 页面管理 =====
 
 // 20260324 ZJH 创建全部页面，具体页面按索引分别实例化，其余为 BasePage 占位
-void MainWindow::createPlaceholderPages()
+// 20260403 ZJH 分步创建单个页面（启动期间由定时器逐步调用，每次只创建一个页面）
+// 每次调用只阻塞一个页面构造函数的时间（~10-50ms），然后归还事件循环
+void MainWindow::initPage(int nIndex)
 {
-    // 20260324 ZJH 按索引实例化各具体页面，并保存到 m_arrPages 和类型指针
-    // 页面 0: ProjectPage
-    m_pProjectPage = new ProjectPage(m_pPageStack);
-    m_arrPages[0] = m_pProjectPage;
-    m_pPageStack->addWidget(m_pProjectPage);
+    // 20260403 ZJH 根据索引创建对应页面并添加到堆叠
+    switch (nIndex) {
+    case 0:  // 20260403 ZJH ProjectPage
+        m_pProjectPage = new ProjectPage(m_pPageStack);
+        m_arrPages[0] = m_pProjectPage;
+        m_pPageStack->addWidget(m_pProjectPage);
+        break;
+    case 1:  // 20260403 ZJH GalleryPage
+        m_pGalleryPage = new GalleryPage(m_pPageStack);
+        m_arrPages[1] = m_pGalleryPage;
+        m_pPageStack->addWidget(m_pGalleryPage);
+        break;
+    case 2:  // 20260403 ZJH ImagePage
+        m_pImagePage = new ImagePage(m_pPageStack);
+        m_arrPages[2] = m_pImagePage;
+        m_pPageStack->addWidget(m_pImagePage);
+        break;
+    case 3:  // 20260403 ZJH InspectionPage
+        m_pInspectionPage = new InspectionPage(m_pPageStack);
+        m_arrPages[3] = m_pInspectionPage;
+        m_pPageStack->addWidget(m_pInspectionPage);
+        break;
+    case 4:  // 20260403 ZJH SplitPage
+        m_pSplitPage = new SplitPage(m_pPageStack);
+        m_arrPages[4] = m_pSplitPage;
+        m_pPageStack->addWidget(m_pSplitPage);
+        break;
+    case 5:  // 20260403 ZJH TrainingPage
+        m_pTrainingPage = new TrainingPage(m_pPageStack);
+        m_arrPages[5] = m_pTrainingPage;
+        m_pPageStack->addWidget(m_pTrainingPage);
+        break;
+    case 6:  // 20260403 ZJH EvaluationPage
+        m_pEvaluationPage = new EvaluationPage(m_pPageStack);
+        m_arrPages[6] = m_pEvaluationPage;
+        m_pPageStack->addWidget(m_pEvaluationPage);
+        break;
+    case 7:  // 20260403 ZJH ExportPage
+        m_pExportPage = new ExportPage(m_pPageStack);
+        m_arrPages[7] = m_pExportPage;
+        m_pPageStack->addWidget(m_pExportPage);
+        break;
+    default:
+        break;
+    }
+    // 20260403 ZJH 页面构造完成后立即刷新事件队列
+    // 让主线程处理 DWM 合成和后台线程排队的粒子帧绘制
+    QApplication::processEvents();
+}
 
-    // 20260324 ZJH 页面 1: GalleryPage
-    m_pGalleryPage = new GalleryPage(m_pPageStack);
-    m_arrPages[1] = m_pGalleryPage;
-    m_pPageStack->addWidget(m_pGalleryPage);
+// 20260403 ZJH 所有页面创建完成后的最终初始化
+// 连接信号槽、初始化动画、设置状态栏、快捷键面板
+void MainWindow::finalizeInit()
+{
+    // 20260403 ZJH 1. 连接导航栏页面切换信号
+    connect(m_pNavBar, &OmniMatch::NavigationBar::pageChanged,
+            this, &MainWindow::switchToPage);
 
-    // 20260324 ZJH 页面 2: ImagePage
-    m_pImagePage = new ImagePage(m_pPageStack);
-    m_arrPages[2] = m_pImagePage;
-    m_pPageStack->addWidget(m_pImagePage);
+    // 20260403 ZJH 2. 连接 Application 全局导航请求信号
+    connect(Application::instance(), &Application::requestNavigateToPage,
+            this, &MainWindow::switchToPage);
 
-    // 20260324 ZJH 页面 3: InspectionPage
-    m_pInspectionPage = new InspectionPage(m_pPageStack);
-    m_arrPages[3] = m_pInspectionPage;
-    m_pPageStack->addWidget(m_pInspectionPage);
+    // 20260403 ZJH 3. 连接 requestOpenImage 信号：切换到图像页并加载图像
+    // 20260404 ZJH 扩展: 携带标注 UUID，加载后自动选中对应标注
+    connect(Application::instance(), &Application::requestOpenImage,
+            this, [this](const QString& strImageUuid, const QString& strAnnotationUuid) {
+                switchToPage(2);
+                if (m_pImagePage) {
+                    m_pImagePage->loadImage(strImageUuid, strAnnotationUuid);
+                }
+            });
 
-    // 20260324 ZJH 页面 4: SplitPage
-    m_pSplitPage = new SplitPage(m_pPageStack);
-    m_arrPages[4] = m_pSplitPage;
-    m_pPageStack->addWidget(m_pSplitPage);
+    // 20260403 ZJH 4. 初始化页面切换淡入动画
+    m_pFadeEffect = new QGraphicsOpacityEffect(m_pPageStack);
+    m_pFadeEffect->setOpacity(1.0);
+    m_pPageStack->setGraphicsEffect(m_pFadeEffect);
 
-    // 20260324 ZJH 页面 5: TrainingPage
-    m_pTrainingPage = new TrainingPage(m_pPageStack);
-    m_arrPages[5] = m_pTrainingPage;
-    m_pPageStack->addWidget(m_pTrainingPage);
+    m_pFadeAnim = new QPropertyAnimation(m_pFadeEffect, "opacity", this);
+    m_pFadeAnim->setDuration(200);
+    m_pFadeAnim->setStartValue(0.0);
+    m_pFadeAnim->setEndValue(1.0);
+    m_pFadeAnim->setEasingCurve(QEasingCurve::OutQuad);
 
-    // 20260324 ZJH 页面 6: EvaluationPage
-    m_pEvaluationPage = new EvaluationPage(m_pPageStack);
-    m_arrPages[6] = m_pEvaluationPage;
-    m_pPageStack->addWidget(m_pEvaluationPage);
-
-    // 20260324 ZJH 页面 7: ExportPage
-    m_pExportPage = new ExportPage(m_pPageStack);
-    m_arrPages[7] = m_pExportPage;
-    m_pPageStack->addWidget(m_pExportPage);
-
-    // 20260324 ZJH 统一循环连接项目生命周期信号到所有页面（消除重复信号连接样板代码）
-    // projectCreated/projectOpened → onProjectLoaded, projectClosed → onProjectClosed
+    // 20260403 ZJH 5. 统一连接项目生命周期信号到所有页面
     for (int i = 0; i < s_nPageCount; ++i) {
-        BasePage* pPage = m_arrPages[i];  // 20260324 ZJH 取当前页面基类指针
-        if (!pPage) {
-            continue;  // 20260324 ZJH 空指针保护
-        }
-        // 20260324 ZJH 项目新建时通知页面加载
+        BasePage* pPage = m_arrPages[i];
+        if (!pPage) continue;
         connect(Application::instance(), &Application::projectCreated,
                 pPage, &BasePage::onProjectLoaded);
-        // 20260324 ZJH 项目打开时通知页面加载
         connect(Application::instance(), &Application::projectOpened,
                 pPage, &BasePage::onProjectLoaded);
-        // 20260324 ZJH 项目关闭时通知页面清理
         connect(Application::instance(), &Application::projectClosed,
                 pPage, &BasePage::onProjectClosed);
     }
 
-    // 20260324 ZJH 项目加载后连接数据集变更信号到脏标志 + 窗口标题更新
-    // 当项目数据集发生任何修改时，自动标记项目为脏并刷新标题栏显示 " *"
+    // 20260403 ZJH 6. 项目数据变更 → 脏标志 + 标题更新
     auto fnConnectDirty = [this](Project* pProject) {
-        if (!pProject || !pProject->dataset()) {
-            return;  // 20260324 ZJH 空指针保护
-        }
-        // 20260324 ZJH 数据集内容变更 → 标记脏 → 刷新标题
+        if (!pProject || !pProject->dataset()) return;
         connect(pProject->dataset(), &ImageDataset::dataChanged, this, [this, pProject]() {
-            pProject->setDirty(true);   // 20260324 ZJH 数据变更，标记为脏
-            updateWindowTitle();         // 20260324 ZJH 刷新标题显示脏标志
+            pProject->setDirty(true);
+            updateWindowTitle();
         });
-        // 20260324 ZJH 标签列表变更 → 标记脏 → 刷新标题
         connect(pProject->dataset(), &ImageDataset::labelsChanged, this, [this, pProject]() {
-            pProject->setDirty(true);   // 20260324 ZJH 标签变更，标记为脏
-            updateWindowTitle();         // 20260324 ZJH 刷新标题显示脏标志
+            pProject->setDirty(true);
+            updateWindowTitle();
         });
-        // 20260324 ZJH 数据集拆分变更 → 标记脏 → 刷新标题
         connect(pProject->dataset(), &ImageDataset::splitChanged, this, [this, pProject]() {
-            pProject->setDirty(true);   // 20260324 ZJH 拆分变更，标记为脏
-            updateWindowTitle();         // 20260324 ZJH 刷新标题显示脏标志
+            pProject->setDirty(true);
+            updateWindowTitle();
         });
     };
-    // 20260324 ZJH 项目新建时绑定脏标志信号
     connect(Application::instance(), &Application::projectCreated, this, fnConnectDirty);
-    // 20260324 ZJH 项目打开时绑定脏标志信号
     connect(Application::instance(), &Application::projectOpened,  this, fnConnectDirty);
-    // 20260324 ZJH 项目保存后刷新标题（移除脏标志 " *"）
     connect(Application::instance(), &Application::projectSaved,   this, &MainWindow::updateWindowTitle);
 
-    // 20260322 ZJH 默认显示第一个页面（项目页）
+    // 20260403 ZJH 7. 初始化 GPU 信息到状态栏
+    if (Application::instance()->hasGpu()) {
+        QString strGpuInfo = QStringLiteral("GPU: %1 | %2 MB")
+            .arg(Application::instance()->gpuName())
+            .arg(Application::instance()->gpuVramMB());
+        m_pStatusBar->setGpuInfo(strGpuInfo);
+    } else {
+        m_pStatusBar->setGpuInfo(QStringLiteral("CPU Only"));
+    }
+
+    // 20260403 ZJH 8. 状态栏初始消息
+    m_pStatusBar->setMessage(QStringLiteral("就绪"));
+
+    // 20260403 ZJH 9. 快捷键参考面板
+    m_pShortcutOverlay = new ShortcutHelpOverlay(centralWidget());
+    m_pShortcutOverlay->hide();
+
+    // 20260403 ZJH 10. 默认显示第一个页面并更新标题
     m_pPageStack->setCurrentIndex(0);
+    updateWindowTitle();
+}
+
+// 20260403 ZJH 旧接口保留：一次性创建所有页面（非延迟模式使用）
+void MainWindow::createPlaceholderPages()
+{
+    for (int i = 0; i < s_nPageCount; ++i) {
+        initPage(i);
+    }
 }
 
 // 20260322 ZJH 切换到指定索引的页面

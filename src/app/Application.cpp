@@ -116,9 +116,10 @@ void Application::notifyNavigateToPage(int nPageIndex)
 }
 
 // 20260324 ZJH 通知请求打开指定图像
-void Application::notifyOpenImage(const QString& strImageUuid)
+// 20260404 ZJH 扩展: 可选传递标注 UUID，用于检查页实例双击后跳转到图像页并选中标注
+void Application::notifyOpenImage(const QString& strImageUuid, const QString& strAnnotationUuid)
 {
-    emit requestOpenImage(strImageUuid);  // 20260324 ZJH 从自身发射信号
+    emit requestOpenImage(strImageUuid, strAnnotationUuid);  // 20260404 ZJH 携带标注 UUID
 }
 
 // 20260324 ZJH 通知全局设置已变更

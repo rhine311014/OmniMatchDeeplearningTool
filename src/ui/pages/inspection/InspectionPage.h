@@ -17,6 +17,9 @@
 #include <QProgressBar>              // 20260324 ZJH 批量推理进度条
 #include <QStackedWidget>            // 20260324 ZJH 检查/推理模式切换
 #include <QSpinBox>                  // 20260324 ZJH 模型参数输入
+#include <QDoubleSpinBox>            // 20260330 ZJH 后处理参数浮点微调
+#include <QCheckBox>                 // 20260330 ZJH 推理增强开关控件
+#include <QSlider>                   // 20260401 ZJH mask 透明度滑块
 #include <QVector>                   // 20260324 ZJH 推理结果向量
 #include <memory>                    // 20260324 ZJH unique_ptr
 
@@ -56,6 +59,28 @@ private:
     int m_nStatusFilter = 0;    // 20260322 ZJH 状态过滤值（0 = 全部）
 };
 
+// 20260330 ZJH 缺陷区域度量（对标 MVTec dl_anomaly_postprocessing）
+// 每个连通域提取面积、质心、外接矩形、概率统计、圆度等几何/统计特征
+struct DefectRegion
+{
+    int nArea = 0;              // 20260330 ZJH 像素面积（连通域像素总数）
+    QPointF ptCentroid;         // 20260330 ZJH 质心坐标（区域内所有像素 x/y 均值）
+    QRect rectBounding;         // 20260330 ZJH 外接矩形（min/max x/y 构成的 AABB）
+    float fMeanProb = 0.0f;     // 20260330 ZJH 区域内平均异常概率
+    float fMaxProb = 0.0f;      // 20260330 ZJH 区域内最大异常概率
+    float fCircularity = 0.0f;  // 20260330 ZJH 圆度 = 4*pi*area / perimeter²（1.0 为完美圆形）
+};
+
+// 20260330 ZJH 检测框结构体（UI 层使用，由 EngineBridge 的 DetectionBox 转换而来）
+// 目标检测任务中每个预测目标对应一个 InferDetection
+struct InferDetection
+{
+    QRectF rect;        // 20260330 ZJH 边界框（图像坐标系，左上角+宽高）
+    int nClassId;       // 20260330 ZJH 类别 ID
+    float fScore;       // 20260330 ZJH 置信度分数 [0, 1]
+    QString strLabel;   // 20260330 ZJH 类别名称（从项目标签列表映射）
+};
+
 // 20260324 ZJH 单张推理结果结构体
 // 存储每张测试图像的推理输出（预测类别、置信度、耗时等）
 struct InferResult
@@ -67,6 +92,8 @@ struct InferResult
     double dLatencyMs = 0.0;       // 20260324 ZJH 推理耗时（毫秒）
     bool bIsDefect = false;        // 20260324 ZJH 是否为缺陷（异常检测任务用）
     QImage imgDefectMap;           // 20260325 ZJH 二值化缺陷图（白=异物, 黑=背景）
+    QVector<DefectRegion> vecDefectRegions;  // 20260330 ZJH 各缺陷连通域的度量信息
+    QVector<InferDetection> vecDetections;   // 20260330 ZJH 检测框列表（目标检测任务用）
 };
 
 // 20260322 ZJH 数据检查页面
@@ -100,6 +127,9 @@ protected:
     // 20260324 ZJH 键盘事件：左右方向键导航测试图像
     void keyPressEvent(QKeyEvent* pEvent) override;
 
+    // 20260404 ZJH 事件过滤器：处理左侧标签统计行的点击事件
+    bool eventFilter(QObject* pWatched, QEvent* pEvent) override;
+
 private slots:
     // 20260322 ZJH 标签过滤下拉框变化
     void onLabelFilterChanged(int nIndex);
@@ -130,7 +160,7 @@ private slots:
     // 20260324 ZJH 中央面板模式切换（0=检查模式, 1=推理模式）
     void onModeChanged(int nIndex);
 
-    // 20260324 ZJH 加载模型文件（.dfm）
+    // 20260330 ZJH 加载模型文件（.omm，兼容旧 .dfm）
     void onLoadModel();
 
     // 20260324 ZJH 卸载已加载的模型
@@ -226,7 +256,8 @@ private:
     QComboBox* m_pCmbStatusFilter;      // 20260322 ZJH "状态" 过滤下拉框
 
     QLabel* m_pLblFilteredCount;        // 20260322 ZJH 过滤后图像数标签
-    QLabel* m_pLblLabelStats;           // 20260322 ZJH 各标签数量列表标签
+    QLabel* m_pLblLabelStats;           // 20260322 ZJH 各标签数量列表标签（备用/兼容）
+    QVBoxLayout* m_pLabelStatsLayout;   // 20260402 ZJH 标签统计动态容器（对标 Halcon 彩色标签行）
 
     // ===== 中央面板组件（检查模式） =====
 
@@ -291,6 +322,39 @@ private:
     QLabel*       m_pLblConfidence;            // 20260324 ZJH "置信度: 98.7%"
     QLabel*       m_pLblLatency;               // 20260324 ZJH "推理耗时: 12.3ms"
     QLabel*       m_pLblClassProbs;            // 20260324 ZJH 各类别概率列表
+
+    // ===== 后处理参数控件（借鉴 MVTec classification_threshold / defect_area_min）=====
+
+    QDoubleSpinBox* m_pSpnConfThreshold = nullptr;  // 20260330 ZJH 缺陷置信度阈值（0.01~0.99）
+    QSpinBox*       m_pSpnMinArea = nullptr;         // 20260330 ZJH 最小缺陷面积（像素，0~10000）
+    QDoubleSpinBox* m_pSpnProbFloor = nullptr;       // 20260330 ZJH 缺陷图概率下限截断（0.01~0.5）
+
+    // 20260330 ZJH 批量推理批次大小（每批送入引擎的图像张数）
+    QSpinBox*       m_pSpnInferBatchSize = nullptr;  // 20260330 ZJH 批量推理张数选择 1~32
+
+    // ===== 推理增强控件（TTA + 滑动窗口）=====
+
+    QCheckBox*      m_pChkEnableTTA = nullptr;       // 20260330 ZJH 测试时增强开关
+    QComboBox*      m_pCboTTAMode = nullptr;         // 20260330 ZJH TTA 模式选择（翻转/旋转/多尺度）
+    QCheckBox*      m_pChkSlidingWindow = nullptr;   // 20260330 ZJH 滑动窗口大图检测开关
+    QSpinBox*       m_pSpnWindowSize = nullptr;      // 20260330 ZJH 滑动窗口尺寸 320~1024
+    QDoubleSpinBox* m_pSpnOverlap = nullptr;         // 20260330 ZJH 滑动窗口重叠率 0.0~0.5
+
+    // ===== 检测余裕趋势控件 =====
+
+    QProgressBar*   m_pBarMargin = nullptr;          // 20260330 ZJH 检测余裕趋势进度条（0~100%）
+    QLabel*         m_pLblMarginValue = nullptr;     // 20260330 ZJH 检测余裕当前数值标签
+
+    // ===== 分割可视化控件（Phase 1 — 对标海康级可视化）=====
+
+    QSlider*        m_pSldMaskAlpha = nullptr;       // 20260401 ZJH mask 叠加透明度滑块（0~255）
+    QLabel*         m_pLblMaskAlphaVal = nullptr;    // 20260401 ZJH 透明度数值标签
+    QLabel*         m_pLblDefectMetrics = nullptr;   // 20260401 ZJH 缺陷连通域度量信息面板
+    int             m_nMaskAlpha = 120;              // 20260401 ZJH 当前 mask 透明度值
+
+    // ===== GradCAM 可视化开关 =====
+
+    QCheckBox*      m_pChkShowGradCAM = nullptr;     // 20260330 ZJH 注意力热力图显示开关
 
     // ===== 推理引擎数据 =====
 

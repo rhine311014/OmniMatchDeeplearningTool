@@ -237,6 +237,18 @@ public:
     //   Level 2: AVX2 单线程（小矩阵直接调用 SIMD）
     //   Level 3: 标量 + OpenMP 回退
     static void matmul(const float* pA, const float* pB, float* pC, int nM, int nK, int nN) {
+        // 20260404 ZJH 诊断日志：大矩阵或可疑维度时打印，帮助定位越界崩溃
+        if (static_cast<int64_t>(nM) * nN > 50000000 || nK > 100000 || nN > 100000) {
+            fprintf(stderr, "[MATMUL-DIAG] HUGE: nM=%d nK=%d nN=%d total=%.1fM\n",
+                    nM, nK, nN, static_cast<double>(nM) * nN / 1e6);
+        }
+        // 20260404 ZJH 防御性校验：空指针或零/负维度直接返回，防止访问冲突崩溃
+        if (!pA || !pB || !pC || nM <= 0 || nK <= 0 || nN <= 0) {
+            if (pC && nM > 0 && nN > 0) {
+                std::memset(pC, 0, static_cast<size_t>(nM) * nN * sizeof(float));
+            }
+            return;
+        }
         // 20260324 ZJH 优先使用 AVX2 + OpenMP 加速矩阵乘法
         if (SIMDBackend::isAVX2Supported()) {
             if (nM >= 4) {
