@@ -1,7 +1,7 @@
 # OmniMatchDeeplearningTool
  — 纯 C++ 全流程深度学习视觉平台
 
-> 从零构建的纯 C++ 深度学习引擎，不依赖 Python/PyTorch/TensorFlow，核心计算引擎完全自研。
+> 从零构建的纯 C++ 深度学习引擎，不依赖 Python/PyTorch/TensorFlow。
 
 ## 快速开始
 
